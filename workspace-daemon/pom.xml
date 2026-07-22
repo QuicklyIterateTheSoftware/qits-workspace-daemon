@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>workspace-daemon</artifactId>
+    <packaging>quarkus</packaging>
+
+    <!-- The in-container client daemon (docs/epics/qits-workspace-daemon/): a Quarkus command-mode
+         app compiled to a GraalVM native binary (Dockerfile `workspace-daemon-build` stage) that becomes each
+         workspace container's process. It dials home over a WebSocket and, part by part, takes over
+         what qits does via `docker exec`. Part 1 is behaviour-neutral: it holds the socket open and
+         is otherwise idle. Deps are deliberately minimal — quarkus-arc (CDI + command mode) +
+         quarkus-vertx (a managed Vertx with NO HTTP server, for the Vert.x-core WebSocket client) +
+         the shared wire contract. It does NOT depend on `domain` (Panache/Hibernate/JGit would bloat
+         the native image), so it never needs -Dqits.variant. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.wohlben</groupId>
+            <artifactId>workspace-daemon-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Managed Vertx + vertx-core WebSocketClient; brings no HTTP server (unlike
+                 websockets-next), which is exactly right for a client-only container process. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-vertx</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- GraalVM native build (mirrors service/pom.xml): `-Dnative` disables the jar and enables
+             the native image. The root pom has no native profile to inherit, so it lives here. The
+             Dockerfile `workspace-daemon-build` stage runs `-pl workspace-daemon -am package -Dnative`. -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <skipITs>false</skipITs>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+            </properties>
+        </profile>
+    </profiles>
+</project>
