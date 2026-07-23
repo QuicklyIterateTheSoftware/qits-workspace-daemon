@@ -129,6 +129,54 @@ class DaemonCodecTest {
   }
 
   @Test
+  void bootstrapStepRoundTrips() {
+    BootstrapStep step = new BootstrapStep("ws-1", "install", BootstrapStep.Phase.EXECUTE);
+    assertEquals(step, roundTrip(step));
+    assertEquals(
+        DaemonProtocol.Type.BOOTSTRAP_STEP,
+        DaemonCodec.encode(step).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void bootstrapOutcomeRoundTrips() {
+    BootstrapOutcome ok =
+        new BootstrapOutcome("ws-1", "install", BootstrapOutcome.Result.SUCCEEDED, 0);
+    BootstrapOutcome skipped =
+        new BootstrapOutcome("ws-1", "seed", BootstrapOutcome.Result.SKIPPED, 1);
+    assertEquals(ok, roundTrip(ok));
+    assertEquals(skipped, roundTrip(skipped));
+    assertEquals(
+        DaemonProtocol.Type.BOOTSTRAP_OUTCOME,
+        DaemonCodec.encode(ok).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void bootstrappedRoundTripsBothOutcomes() {
+    Bootstrapped ok = new Bootstrapped("ws-1", true);
+    Bootstrapped failed = new Bootstrapped("ws-1", false);
+    assertEquals(ok, roundTrip(ok));
+    assertEquals(failed, roundTrip(failed));
+    assertEquals(
+        DaemonProtocol.Type.BOOTSTRAPPED, DaemonCodec.encode(ok).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void runBootstrapRoundTrips() {
+    RunBootstrap chain = new RunBootstrap("c1", null);
+    RunBootstrap single = new RunBootstrap("c1", "install");
+    assertEquals(chain, roundTrip(chain));
+    assertEquals(single, roundTrip(single));
+    assertEquals(
+        DaemonProtocol.Type.RUN_BOOTSTRAP,
+        DaemonCodec.encode(chain).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void bootstrapCorrelationIdIsPrefixed() {
+    assertEquals("bootstrap:install", DaemonProtocol.bootstrapCorrelationId("install"));
+  }
+
+  @Test
   void decodeRejectsMissingType() {
     assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(Map.of()));
   }

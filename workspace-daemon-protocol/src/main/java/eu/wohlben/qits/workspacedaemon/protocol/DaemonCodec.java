@@ -81,6 +81,24 @@ public final class DaemonCodec {
         map.put(Field.CONFIG_JSON, m.configJson());
         map.put(Field.WARNING, m.warning());
       }
+      case BootstrapStep m -> {
+        map.put(Field.TYPE, Type.BOOTSTRAP_STEP);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.NAME, m.name());
+        map.put(Field.PHASE, m.phase());
+      }
+      case BootstrapOutcome m -> {
+        map.put(Field.TYPE, Type.BOOTSTRAP_OUTCOME);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.NAME, m.name());
+        map.put(Field.OUTCOME, m.outcome());
+        map.put(Field.EXIT_CODE, m.exitCode());
+      }
+      case Bootstrapped m -> {
+        map.put(Field.TYPE, Type.BOOTSTRAPPED);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.OK, m.ok());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -96,6 +114,11 @@ public final class DaemonCodec {
       case DescribeConfig m -> {
         map.put(Field.TYPE, Type.DESCRIBE_CONFIG);
         map.put(Field.CORRELATION_ID, m.correlationId());
+      }
+      case RunBootstrap m -> {
+        map.put(Field.TYPE, Type.RUN_BOOTSTRAP);
+        map.put(Field.CORRELATION_ID, m.correlationId());
+        map.put(Field.NAME, m.name());
       }
     }
     return map;
@@ -142,6 +165,17 @@ public final class DaemonCodec {
               str(map, Field.CORRELATION_ID),
               str(map, Field.CONFIG_JSON),
               str(map, Field.WARNING));
+      case Type.BOOTSTRAP_STEP ->
+          new BootstrapStep(
+              str(map, Field.WORKSPACE_ID), str(map, Field.NAME), str(map, Field.PHASE));
+      case Type.BOOTSTRAP_OUTCOME ->
+          new BootstrapOutcome(
+              str(map, Field.WORKSPACE_ID),
+              str(map, Field.NAME),
+              str(map, Field.OUTCOME),
+              intVal(map, Field.EXIT_CODE));
+      case Type.BOOTSTRAPPED ->
+          new Bootstrapped(str(map, Field.WORKSPACE_ID), boolVal(map, Field.OK));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -151,6 +185,8 @@ public final class DaemonCodec {
               strMap(map, Field.ENV));
       case Type.DESCRIBE -> new Describe(str(map, Field.CORRELATION_ID));
       case Type.DESCRIBE_CONFIG -> new DescribeConfig(str(map, Field.CORRELATION_ID));
+      case Type.RUN_BOOTSTRAP ->
+          new RunBootstrap(str(map, Field.CORRELATION_ID), str(map, Field.NAME));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };

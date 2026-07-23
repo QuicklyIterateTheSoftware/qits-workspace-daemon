@@ -32,6 +32,23 @@ public final class DaemonProtocol {
    */
   public static final String PROVISION_CORRELATION_ID = "provision";
 
+  /**
+   * The prefix a bootstrap step's streamed output ({@link CommandChunk}) is correlated with, so the
+   * backend routes those chunks to the workspace's {@code bootstrap:<name>} process segment
+   * (docs/epics/qits-workspace-daemon/ Part 3). Like {@link #PROVISION_CORRELATION_ID}, a bootstrap
+   * step is not a request/reply round-trip, so its output correlation is a well-known value both
+   * sides compute from the step name rather than a per-call id.
+   */
+  public static final String BOOTSTRAP_CORRELATION_PREFIX = "bootstrap:";
+
+  /**
+   * The output correlation id for a bootstrap step — {@link #BOOTSTRAP_CORRELATION_PREFIX}{@code +
+   * name}.
+   */
+  public static String bootstrapCorrelationId(String stepName) {
+    return BOOTSTRAP_CORRELATION_PREFIX + stepName;
+  }
+
   private DaemonProtocol() {}
 
   /** The {@code "type"} discriminator values. */
@@ -46,11 +63,15 @@ public final class DaemonProtocol {
     public static final String PROVISIONED = "provisioned";
     public static final String PROVISION_FAILED = "provisionFailed";
     public static final String CONFIG_VIEW = "configView";
+    public static final String BOOTSTRAP_STEP = "bootstrapStep";
+    public static final String BOOTSTRAP_OUTCOME = "bootstrapOutcome";
+    public static final String BOOTSTRAPPED = "bootstrapped";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
     public static final String DESCRIBE = "describe";
     public static final String DESCRIBE_CONFIG = "describeConfig";
+    public static final String RUN_BOOTSTRAP = "runBootstrap";
 
     private Type() {}
   }
@@ -76,6 +97,10 @@ public final class DaemonProtocol {
     public static final String ENV = "env";
     public static final String CONFIG_JSON = "configJson";
     public static final String WARNING = "warning";
+    public static final String NAME = "name";
+    public static final String PHASE = "phase";
+    public static final String OUTCOME = "outcome";
+    public static final String OK = "ok";
 
     private Field() {}
   }

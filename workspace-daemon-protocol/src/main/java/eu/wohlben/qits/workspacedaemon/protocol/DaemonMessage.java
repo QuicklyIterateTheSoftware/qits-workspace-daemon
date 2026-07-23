@@ -15,7 +15,11 @@ public sealed interface DaemonMessage
         Provisioned,
         ProvisionFailed,
         ConfigView,
+        BootstrapStep,
+        BootstrapOutcome,
+        Bootstrapped,
         Ack,
         RunCommand,
         Describe,
-        DescribeConfig {}
+        DescribeConfig,
+        RunBootstrap {}
