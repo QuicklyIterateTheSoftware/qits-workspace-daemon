@@ -24,6 +24,14 @@ public final class DaemonProtocol {
    */
   public static final int CAPABILITY_VERSION = 1;
 
+  /**
+   * The fixed {@code correlationId} the daemon tags its autonomous-self-provision output ({@link
+   * CommandChunk}) with, so the backend can route those chunks to the workspace's {@code clone}
+   * process segment (docs/epics/qits-workspace-daemon/ Part 1). A provision is not a request/reply
+   * round-trip, so it has no per-call id — this shared constant stands in for one on both sides.
+   */
+  public static final String PROVISION_CORRELATION_ID = "provision";
+
   private DaemonProtocol() {}
 
   /** The {@code "type"} discriminator values. */
@@ -35,6 +43,8 @@ public final class DaemonProtocol {
     public static final String COMMAND_CHUNK = "commandChunk";
     public static final String COMMAND_EXIT = "commandExit";
     public static final String WORKSPACE_INFO = "workspaceInfo";
+    public static final String PROVISIONED = "provisioned";
+    public static final String PROVISION_FAILED = "provisionFailed";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";

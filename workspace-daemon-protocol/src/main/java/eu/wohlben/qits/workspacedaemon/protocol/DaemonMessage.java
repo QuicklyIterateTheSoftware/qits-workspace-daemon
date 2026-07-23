@@ -12,6 +12,8 @@ public sealed interface DaemonMessage
         CommandChunk,
         CommandExit,
         WorkspaceInfo,
+        Provisioned,
+        ProvisionFailed,
         Ack,
         RunCommand,
         Describe {}

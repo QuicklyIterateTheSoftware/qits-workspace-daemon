@@ -60,6 +60,24 @@ class DaemonCodecTest {
   }
 
   @Test
+  void provisionedRoundTrips() {
+    Provisioned provisioned = new Provisioned("ws-1", "abc123");
+    assertEquals(provisioned, roundTrip(provisioned));
+    assertEquals(
+        DaemonProtocol.Type.PROVISIONED,
+        DaemonCodec.encode(provisioned).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void provisionFailedRoundTrips() {
+    ProvisionFailed failed = new ProvisionFailed("ws-1", "git clone exited 128");
+    assertEquals(failed, roundTrip(failed));
+    assertEquals(
+        DaemonProtocol.Type.PROVISION_FAILED,
+        DaemonCodec.encode(failed).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
   void ackRoundTrips() {
     assertEquals(new Ack(), roundTrip(new Ack()));
   }
