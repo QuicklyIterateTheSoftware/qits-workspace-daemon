@@ -37,6 +37,13 @@
             <artifactId>quarkus-vertx</artifactId>
         </dependency>
         <dependency>
+            <!-- YAML parse for the in-container `.qits-config.yml` read (docs/epics/qits-workspace-daemon/
+                 Part 2). We use SafeConstructor only (plain maps/lists, never instantiates classes from
+                 repo content), which is native-image friendly. Version managed by the Quarkus BOM. -->
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
             <scope>test</scope>

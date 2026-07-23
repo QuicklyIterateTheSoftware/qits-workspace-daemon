@@ -1,10 +1,12 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
+import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
@@ -117,6 +119,15 @@ public class ControlSocket {
       new java.util.concurrent.atomic.AtomicBoolean();
 
   /**
+   * The workspace's parsed {@code .qits-config.yml}, read in-container right after the self-clone
+   * and held for {@link DescribeConfig} replies (and, in later parts, the bootstrap/daemon chains).
+   * Initialized to the empty config so a describe that races ahead of provisioning gets a benign
+   * empty answer rather than null.
+   */
+  private volatile ConfigReader.State configState =
+      new ConfigReader.State(ConfigJson.empty(), null);
+
+  /**
    * Frames emitted before the socket first connects (the boot self-clone can begin, and finish,
    * before the dial-home succeeds) — buffered here and flushed in {@link #onConnected} after the
    * {@link Hello}. Bounded so a never-connecting backend can't grow it without limit; the terminal
@@ -172,7 +183,14 @@ public class ControlSocket {
     if (provisionStarted.compareAndSet(false, true)) {
       Provisioner.Env env =
           new Provisioner.Env(workspaceId, repositoryId, branch, projectId, repoName, url.get());
-      workers.execute(() -> Provisioner.provision(env, this::send));
+      workers.execute(
+          () -> {
+            Provisioner.provision(env, this::send);
+            // Clone → config-read: the next step of the daemon's own startup sequence. Read the
+            // checkout's config even if the clone failed (absent file ⇒ empty), so a DescribeConfig
+            // always has an answer. Parts 3/4 run bootstrap/daemons from this same held state.
+            configState = ConfigReader.read();
+          });
     }
   }
 
@@ -259,6 +277,14 @@ public class ControlSocket {
       case Describe ignored ->
           workers.execute(
               () -> send(WorkspaceDescriber.describe(workspaceId, repositoryId, branch, parent)));
+      case DescribeConfig request ->
+          workers.execute(
+              () -> {
+                ConfigReader.State state = configState;
+                send(
+                    new ConfigView(
+                        workspaceId, request.correlationId(), state.configJson(), state.warning()));
+              });
       default ->
           // Ack and any workspace-daemon->qits echoes are informational here; nothing to do in Part
           // 1.
