@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
@@ -11,6 +12,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
+import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
@@ -99,6 +101,17 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.reconnect-max-backoff-ms", defaultValue = "30000")
   long maxBackoffMs;
 
+  // The provision-time bootstrap kill switch (host's qits.bootstrap.autorun-enabled, injected as
+  // QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN). When false the daemon skips the chain and reports a
+  // benign Bootstrapped{ok:true} so the workspace still proceeds to daemons; manual re-run stays
+  // available (docs/epics/qits-workspace-daemon/ Part 3).
+  @ConfigProperty(name = "qits.workspace-daemon.bootstrap-autorun", defaultValue = "true")
+  boolean bootstrapAutorun;
+
+  // Per-step (check/execute) timeout; a step that overruns it is terminated and reported FAILED.
+  @ConfigProperty(name = "qits.workspace-daemon.bootstrap-timeout-ms", defaultValue = "3600000")
+  long bootstrapTimeoutMs;
+
   /** Off-event-loop pool for blocking process/git work; one thread per in-flight request. */
   private final ExecutorService workers =
       Executors.newCachedThreadPool(
@@ -125,7 +138,12 @@ public class ControlSocket {
    * empty answer rather than null.
    */
   private volatile ConfigReader.State configState =
-      new ConfigReader.State(ConfigJson.empty(), null);
+      new ConfigReader.State(DaemonQitsConfig.EMPTY, ConfigJson.empty(), null);
+
+  /**
+   * Where the daemon runs the self-clone, config read, and bootstrap chain (image {@code WORKDIR}).
+   */
+  private static final java.io.File WORKSPACE_DIR = new java.io.File("/workspace");
 
   /**
    * Frames emitted before the socket first connects (the boot self-clone can begin, and finish,
@@ -185,13 +203,45 @@ public class ControlSocket {
           new Provisioner.Env(workspaceId, repositoryId, branch, projectId, repoName, url.get());
       workers.execute(
           () -> {
-            Provisioner.provision(env, this::send);
+            // A fresh clone (vs. a reconnect into an already-provisioned container) is the trigger
+            // for the one-shot bootstrap chain — captured before the clone materializes /workspace.
+            boolean freshClone = !new java.io.File(WORKSPACE_DIR, ".git").exists();
+            boolean provisioned = Provisioner.provision(env, this::send);
             // Clone → config-read: the next step of the daemon's own startup sequence. Read the
             // checkout's config even if the clone failed (absent file ⇒ empty), so a DescribeConfig
-            // always has an answer. Parts 3/4 run bootstrap/daemons from this same held state.
+            // always has an answer. Part 3 runs the bootstrap chain from this same held state; Part
+            // 4 will run the daemons.
             configState = ConfigReader.read();
+            runBootstrapOnBoot(freshClone, provisioned);
           });
     }
+  }
+
+  /**
+   * The bootstrap phase of the boot sequence (clone → config → <b>bootstrap</b> → [Part 4:
+   * daemons]). A failed provision means the host is tearing the workspace down (it acts on {@link
+   * ProvisionFailed}), so there's no bootstrap phase. A reconnect into an already-provisioned
+   * container ({@code !freshClone}) does not re-run the chain (bootstrap runs on fresh provision
+   * only) — but the host doesn't await a bootstrap on a restart either, so nothing is emitted. On a
+   * fresh clone the daemon runs the chain autonomously (or, with the autorun kill switch off, emits
+   * a benign terminal so the host's await still completes and daemons still start).
+   */
+  private void runBootstrapOnBoot(boolean freshClone, boolean provisioned) {
+    if (!provisioned || !freshClone) {
+      return;
+    }
+    if (!bootstrapAutorun) {
+      LOG.info("bootstrap autorun disabled — skipping the chain, reporting ready.");
+      send(new Bootstrapped(workspaceId, true));
+      return;
+    }
+    BootstrapRunner.run(
+        workspaceId,
+        configState.config().bootstrap(),
+        null,
+        WORKSPACE_DIR,
+        bootstrapTimeoutMs,
+        this::send);
   }
 
   private void connect(int attempt) {
@@ -285,6 +335,19 @@ public class ControlSocket {
                     new ConfigView(
                         workspaceId, request.correlationId(), state.configJson(), state.warning()));
               });
+      case RunBootstrap request ->
+          // Manual re-run: run the whole chain (blank name) or a single named step from the
+          // in-container config, streaming the same step/outcome messages + terminal Bootstrapped
+          // the autonomous boot run does (docs/epics/qits-workspace-daemon/ Part 3).
+          workers.execute(
+              () ->
+                  BootstrapRunner.run(
+                      workspaceId,
+                      configState.config().bootstrap(),
+                      request.name(),
+                      WORKSPACE_DIR,
+                      bootstrapTimeoutMs,
+                      this::send));
       default ->
           // Ack and any workspace-daemon->qits echoes are informational here; nothing to do in Part
           // 1.
@@ -301,10 +364,12 @@ public class ControlSocket {
 
   /**
    * Emit a message on the current socket, marshalling the write onto its event loop. When the
-   * socket isn't up yet (the boot self-provision can emit before the first connect), buffer it for
-   * {@link #flushPending}: terminal provisioning events always buffer; streamed clone chunks buffer
-   * only up to {@link #PENDING_OUTBOUND_CAP}, then drop (the exit code, not the log tail, is what
-   * the host needs).
+   * socket isn't up yet (the boot self-provision/bootstrap can emit before the first connect, or
+   * during a reconnect), buffer it for {@link #flushPending}: <b>terminal</b> events always buffer;
+   * streamed clone/bootstrap chunks buffer only up to {@link #PENDING_OUTBOUND_CAP}, then drop (the
+   * outcome, not the log tail, is what the host needs). {@link Bootstrapped} is terminal too — a
+   * verbose bootstrap step that fills the cap must not push its terminal out, or the host's await
+   * hangs to timeout.
    */
   private void send(DaemonMessage message) {
     synchronized (sendLock) {
@@ -313,7 +378,10 @@ public class ControlSocket {
         send(message, ws);
         return;
       }
-      boolean terminal = message instanceof Provisioned || message instanceof ProvisionFailed;
+      boolean terminal =
+          message instanceof Provisioned
+              || message instanceof ProvisionFailed
+              || message instanceof Bootstrapped;
       if (terminal || pendingOutbound.size() < PENDING_OUTBOUND_CAP) {
         pendingOutbound.offer(message);
       }

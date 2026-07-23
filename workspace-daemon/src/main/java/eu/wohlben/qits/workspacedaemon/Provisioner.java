@@ -66,8 +66,11 @@ public final class Provisioner {
    * Clone + submodule-materialize {@code /workspace} from {@code env}, emitting streamed output and
    * exactly one terminal {@link Provisioned}/{@link ProvisionFailed}. Never throws — any error is
    * reported as {@link ProvisionFailed}, keeping the daemon's "never exit on failure" invariant.
+   * Returns {@code true} when it emitted {@link Provisioned} (a usable checkout exists), {@code
+   * false} when it emitted {@link ProvisionFailed} — so the caller knows whether the daemon's next
+   * startup steps (config read, bootstrap) have a checkout to run against.
    */
-  public static void provision(Env env, Consumer<DaemonMessage> emit) {
+  public static boolean provision(Env env, Consumer<DaemonMessage> emit) {
     try {
       String gitBase = gitBase(env.dialHomeUrl());
       if (gitBase == null) {
@@ -75,7 +78,7 @@ public final class Provisioner {
             new ProvisionFailed(
                 env.workspaceId(),
                 "cannot derive git host from dial-home url: " + env.dialHomeUrl()));
-        return;
+        return false;
       }
       // Idempotent: an existing checkout (reconnect/restart in a still-provisioned container) is
       // never re-cloned — it may hold unpushed commits. But still re-run the submodule walk before
@@ -89,7 +92,7 @@ public final class Provisioner {
                 "/workspace already checked out — skipping root clone, re-checking submodules."));
         materializeSubmodules(gitBase, env, ".", 0, emit);
         emit.accept(new Provisioned(env.workspaceId(), head()));
-        return;
+        return true;
       }
       String rootUrl = rootUrl(gitBase, env);
       emit.accept(new DaemonLog("INFO", "self-cloning " + rootUrl + " into /workspace"));
@@ -105,13 +108,15 @@ public final class Provisioner {
         emit.accept(
             new ProvisionFailed(
                 env.workspaceId(), "git clone exited " + cloneExit + " (" + rootUrl + ")"));
-        return;
+        return false;
       }
       materializeSubmodules(gitBase, env, ".", 0, emit);
       emit.accept(new Provisioned(env.workspaceId(), head()));
+      return true;
     } catch (RuntimeException e) {
       emit.accept(
           new ProvisionFailed(env.workspaceId(), "self-provision error: " + e.getMessage()));
+      return false;
     }
   }
 

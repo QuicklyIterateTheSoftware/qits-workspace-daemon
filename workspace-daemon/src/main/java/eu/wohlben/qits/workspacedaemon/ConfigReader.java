@@ -17,8 +17,14 @@ public final class ConfigReader {
 
   private static final File CONFIG_FILE = new File("/workspace/.qits-config.yml");
 
-  /** The parsed config as {@code QitsConfig}-shaped JSON, plus a non-null warning when degraded. */
-  public record State(String configJson, String warning) {}
+  /**
+   * The parsed config, held three ways: the framework-free {@link DaemonQitsConfig} tree the daemon
+   * runs bootstrap/daemons from in-container (parts 3/4), the same tree as {@code
+   * QitsConfig}-shaped JSON for {@link eu.wohlben.qits.workspacedaemon.protocol.ConfigView}
+   * replies, and a non-null {@code warning} when the read degraded. A degraded read yields {@link
+   * DaemonQitsConfig#EMPTY} + empty JSON, so an empty chain and an empty view stay consistent.
+   */
+  public record State(DaemonQitsConfig config, String configJson, String warning) {}
 
   private ConfigReader() {}
 
@@ -31,16 +37,20 @@ public final class ConfigReader {
     String content;
     try {
       if (!file.isFile()) {
-        return new State(ConfigJson.empty(), null);
+        return new State(DaemonQitsConfig.EMPTY, ConfigJson.empty(), null);
       }
       content = Files.readString(file.toPath());
     } catch (IOException e) {
-      return new State(ConfigJson.empty(), "could not read .qits-config.yml: " + e.getMessage());
+      return new State(
+          DaemonQitsConfig.EMPTY,
+          ConfigJson.empty(),
+          "could not read .qits-config.yml: " + e.getMessage());
     }
     try {
-      return new State(ConfigJson.toJson(ConfigParser.parse(content)), null);
+      DaemonQitsConfig config = ConfigParser.parse(content);
+      return new State(config, ConfigJson.toJson(config), null);
     } catch (ConfigParser.ConfigException e) {
-      return new State(ConfigJson.empty(), e.getMessage());
+      return new State(DaemonQitsConfig.EMPTY, ConfigJson.empty(), e.getMessage());
     }
   }
 }
