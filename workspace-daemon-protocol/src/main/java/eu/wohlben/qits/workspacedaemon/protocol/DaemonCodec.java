@@ -74,6 +74,13 @@ public final class DaemonCodec {
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.MESSAGE, m.message());
       }
+      case ConfigView m -> {
+        map.put(Field.TYPE, Type.CONFIG_VIEW);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.CORRELATION_ID, m.correlationId());
+        map.put(Field.CONFIG_JSON, m.configJson());
+        map.put(Field.WARNING, m.warning());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -84,6 +91,10 @@ public final class DaemonCodec {
       }
       case Describe m -> {
         map.put(Field.TYPE, Type.DESCRIBE);
+        map.put(Field.CORRELATION_ID, m.correlationId());
+      }
+      case DescribeConfig m -> {
+        map.put(Field.TYPE, Type.DESCRIBE_CONFIG);
         map.put(Field.CORRELATION_ID, m.correlationId());
       }
     }
@@ -125,6 +136,12 @@ public final class DaemonCodec {
       case Type.PROVISIONED -> new Provisioned(str(map, Field.WORKSPACE_ID), str(map, Field.HEAD));
       case Type.PROVISION_FAILED ->
           new ProvisionFailed(str(map, Field.WORKSPACE_ID), str(map, Field.MESSAGE));
+      case Type.CONFIG_VIEW ->
+          new ConfigView(
+              str(map, Field.WORKSPACE_ID),
+              str(map, Field.CORRELATION_ID),
+              str(map, Field.CONFIG_JSON),
+              str(map, Field.WARNING));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -133,6 +150,7 @@ public final class DaemonCodec {
               str(map, Field.CWD),
               strMap(map, Field.ENV));
       case Type.DESCRIBE -> new Describe(str(map, Field.CORRELATION_ID));
+      case Type.DESCRIBE_CONFIG -> new DescribeConfig(str(map, Field.CORRELATION_ID));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };

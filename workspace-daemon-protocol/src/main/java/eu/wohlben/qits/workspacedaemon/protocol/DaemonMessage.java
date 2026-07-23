@@ -14,6 +14,8 @@ public sealed interface DaemonMessage
         WorkspaceInfo,
         Provisioned,
         ProvisionFailed,
+        ConfigView,
         Ack,
         RunCommand,
-        Describe {}
+        Describe,
+        DescribeConfig {}

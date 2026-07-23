@@ -105,6 +105,30 @@ class DaemonCodecTest {
   }
 
   @Test
+  void describeConfigRoundTrips() {
+    DescribeConfig describeConfig = new DescribeConfig("c1");
+    assertEquals(describeConfig, roundTrip(describeConfig));
+    assertEquals(
+        DaemonProtocol.Type.DESCRIBE_CONFIG,
+        DaemonCodec.encode(describeConfig).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void configViewRoundTrips() {
+    ConfigView view =
+        new ConfigView("ws-1", "c1", "{\"actions\":[],\"daemons\":[]}", "invalid version");
+    assertEquals(view, roundTrip(view));
+    assertEquals(
+        DaemonProtocol.Type.CONFIG_VIEW, DaemonCodec.encode(view).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void configViewToleratesNullWarning() {
+    ConfigView view = new ConfigView("ws-1", "c1", "{}", null);
+    assertEquals(view, roundTrip(view));
+  }
+
+  @Test
   void decodeRejectsMissingType() {
     assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(Map.of()));
   }

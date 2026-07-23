@@ -45,10 +45,12 @@ public final class DaemonProtocol {
     public static final String WORKSPACE_INFO = "workspaceInfo";
     public static final String PROVISIONED = "provisioned";
     public static final String PROVISION_FAILED = "provisionFailed";
+    public static final String CONFIG_VIEW = "configView";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
     public static final String DESCRIBE = "describe";
+    public static final String DESCRIBE_CONFIG = "describeConfig";
 
     private Type() {}
   }
@@ -72,6 +74,8 @@ public final class DaemonProtocol {
     public static final String ARGV = "argv";
     public static final String CWD = "cwd";
     public static final String ENV = "env";
+    public static final String CONFIG_JSON = "configJson";
+    public static final String WARNING = "warning";
 
     private Field() {}
   }
