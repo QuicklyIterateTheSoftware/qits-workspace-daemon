@@ -2,11 +2,11 @@ package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.DaemonDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ObserverDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.RepositorySection;
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.SourceDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.WebViewDecl;
 import java.util.ArrayList;
@@ -79,7 +79,10 @@ public final class ConfigParser {
         repositorySection(map.get("repository")),
         frameworks(map.get("frameworks")),
         actions(map.get("actions")),
-        daemons(map.get("daemons")),
+        // Accept the new `services:` key, falling back to the legacy `daemons:` (TEMPORARY — the
+        // fixtures still commit `daemons:`; drop once their submodule round-trip lands
+        // `services:`).
+        services(map.containsKey("services") ? map.get("services") : map.get("daemons")),
         bootstrap(map.get("bootstrap")));
   }
 
@@ -131,13 +134,13 @@ public final class ConfigParser {
     return out;
   }
 
-  private static List<DaemonDecl> daemons(Object raw) {
-    List<DaemonDecl> out = new ArrayList<>();
-    for (Object item : asList(raw, "daemons")) {
-      Map<String, Object> m = asMap(item, "daemons[]");
+  private static List<ServiceDecl> services(Object raw) {
+    List<ServiceDecl> out = new ArrayList<>();
+    for (Object item : asList(raw, "services")) {
+      Map<String, Object> m = asMap(item, "services[]");
       out.add(
-          new DaemonDecl(
-              reqStr(m, "name", "daemons[]"),
+          new ServiceDecl(
+              reqStr(m, "name", "services[]"),
               str(m, "description"),
               str(m, "start"),
               str(m, "ready-pattern"),
@@ -146,7 +149,7 @@ public final class ConfigParser {
               enumOf(m.get("restart-policy")),
               intOrNull(m.get("max-restarts"), "max-restarts"),
               str(m, "stop-signal"),
-              strMap(m.get("environment"), "daemons[].environment"),
+              strMap(m.get("environment"), "services[].environment"),
               webView(m.get("web-view")),
               observers(m.get("observers")),
               sources(m.get("sources")),

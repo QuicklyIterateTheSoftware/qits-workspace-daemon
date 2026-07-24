@@ -21,7 +21,7 @@ public record DaemonQitsConfig(
     RepositorySection repository,
     List<FrameworkDecl> frameworks,
     List<ActionDecl> actions,
-    List<DaemonDecl> daemons,
+    List<ServiceDecl> services,
     List<BootstrapDecl> bootstrap) {
 
   /** An absent/blank file — the empty config that keeps a config-free branch a no-op. */
@@ -40,7 +40,7 @@ public record DaemonQitsConfig(
       boolean interactive,
       Map<String, String> environment) {}
 
-  public record DaemonDecl(
+  public record ServiceDecl(
       String name,
       String description,
       String start,

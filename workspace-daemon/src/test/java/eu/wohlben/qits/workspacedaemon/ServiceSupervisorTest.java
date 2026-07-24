@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.DaemonDecl;
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
@@ -30,7 +30,7 @@ class ServiceSupervisorTest {
   @TempDir File workspace;
 
   private final CopyOnWriteArrayList<DaemonMessage> events = new CopyOnWriteArrayList<>();
-  private volatile List<DaemonDecl> decls = List.of();
+  private volatile List<ServiceDecl> decls = List.of();
   private ServiceSupervisor supervisor;
 
   private ServiceSupervisor supervisor() {
@@ -52,16 +52,16 @@ class ServiceSupervisorTest {
   @AfterEach
   void cleanup() {
     if (supervisor != null) {
-      for (DaemonDecl d : decls) {
+      for (ServiceDecl d : decls) {
         supervisor.signal(d.name(), "KILL");
       }
       supervisor.close();
     }
   }
 
-  private static DaemonDecl svc(
+  private static ServiceDecl svc(
       String name, String start, String readyPattern, String policy, Integer maxRestarts) {
-    return new DaemonDecl(
+    return new ServiceDecl(
         name,
         null,
         start,

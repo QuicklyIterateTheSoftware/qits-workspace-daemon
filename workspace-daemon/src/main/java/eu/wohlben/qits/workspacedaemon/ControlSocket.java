@@ -221,7 +221,7 @@ public class ControlSocket {
             workspaceId,
             WORKSPACE_DIR,
             this::send,
-            () -> configState.config().daemons(),
+            () -> configState.config().services(),
             serviceReadyGraceMs,
             serviceBackoffInitialMs,
             serviceBackoffMaxMs,

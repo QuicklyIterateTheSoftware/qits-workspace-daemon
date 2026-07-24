@@ -2,10 +2,10 @@ package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.DaemonDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ObserverDecl;
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.SourceDecl;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
@@ -60,11 +60,11 @@ public final class ConfigJson {
     }
     root.put("actions", actions);
 
-    JsonArray daemons = new JsonArray();
-    for (DaemonDecl d : config.daemons()) {
-      daemons.add(daemonJson(d));
+    JsonArray services = new JsonArray();
+    for (ServiceDecl d : config.services()) {
+      services.add(serviceJson(d));
     }
-    root.put("daemons", daemons);
+    root.put("services", services);
 
     JsonArray bootstrap = new JsonArray();
     for (BootstrapDecl b : config.bootstrap()) {
@@ -81,7 +81,7 @@ public final class ConfigJson {
     return root.encode();
   }
 
-  private static JsonObject daemonJson(DaemonDecl d) {
+  private static JsonObject serviceJson(ServiceDecl d) {
     JsonObject o = new JsonObject();
     putIfPresent(o, "name", d.name());
     putIfPresent(o, "description", d.description());

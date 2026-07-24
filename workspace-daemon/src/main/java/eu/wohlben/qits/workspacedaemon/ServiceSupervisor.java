@@ -1,6 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.DaemonDecl;
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
@@ -58,7 +58,7 @@ public final class ServiceSupervisor {
   private final String workspaceId;
   private final File workingDir;
   private final Consumer<DaemonMessage> emit;
-  private final Supplier<List<DaemonDecl>> configServices;
+  private final Supplier<List<ServiceDecl>> configServices;
   private final long readyGraceMs;
   private final long backoffInitialMs;
   private final long backoffMaxMs;
@@ -78,7 +78,7 @@ public final class ServiceSupervisor {
       String workspaceId,
       File workingDir,
       Consumer<DaemonMessage> emit,
-      Supplier<List<DaemonDecl>> configServices,
+      Supplier<List<ServiceDecl>> configServices,
       long readyGraceMs,
       long backoffInitialMs,
       long backoffMaxMs,
@@ -95,7 +95,7 @@ public final class ServiceSupervisor {
 
   /** Per-service supervision state, all mutated under {@link #lock}. */
   private static final class Supervised {
-    private final DaemonDecl decl;
+    private final ServiceDecl decl;
     private final Object lock = new Object();
     private volatile Process process;
     private volatile long sid;
@@ -104,7 +104,7 @@ public final class ServiceSupervisor {
     private volatile boolean stopRequested;
     private ScheduledFuture<?> pending;
 
-    Supervised(DaemonDecl decl) {
+    Supervised(ServiceDecl decl) {
       this.decl = decl;
     }
   }
@@ -115,7 +115,7 @@ public final class ServiceSupervisor {
    * left alone.
    */
   public void startAutoStart() {
-    for (DaemonDecl decl : configServices.get()) {
+    for (ServiceDecl decl : configServices.get()) {
       if (Boolean.TRUE.equals(decl.autoStart())) {
         launchNew(decl);
       }
@@ -134,7 +134,7 @@ public final class ServiceSupervisor {
       emit.accept(new DaemonEvent(workspaceId, name, existing.state, null));
       return;
     }
-    DaemonDecl decl = resolve(name, scriptOverride, envOverride);
+    ServiceDecl decl = resolve(name, scriptOverride, envOverride);
     if (decl == null) {
       emit.accept(
           new DaemonLog(
@@ -195,9 +195,9 @@ public final class ServiceSupervisor {
 
   // ---- internals -----------------------------------------------------------
 
-  private DaemonDecl resolve(String name, String scriptOverride, Map<String, String> envOverride) {
-    DaemonDecl fromConfig = null;
-    for (DaemonDecl decl : configServices.get()) {
+  private ServiceDecl resolve(String name, String scriptOverride, Map<String, String> envOverride) {
+    ServiceDecl fromConfig = null;
+    for (ServiceDecl decl : configServices.get()) {
       if (name.equals(decl.name())) {
         fromConfig = decl;
         break;
@@ -210,7 +210,7 @@ public final class ServiceSupervisor {
       }
       // A start of a service absent from the committed config: synthesize a minimal, never-restart
       // definition from the override so an ad-hoc "run this" still works.
-      return new DaemonDecl(
+      return new ServiceDecl(
           name,
           null,
           scriptOverride,
@@ -229,7 +229,7 @@ public final class ServiceSupervisor {
     if (!hasOverride && (envOverride == null || envOverride.isEmpty())) {
       return fromConfig;
     }
-    return new DaemonDecl(
+    return new ServiceDecl(
         fromConfig.name(),
         fromConfig.description(),
         hasOverride ? scriptOverride : fromConfig.start(),
@@ -246,7 +246,7 @@ public final class ServiceSupervisor {
         fromConfig.healthChecks());
   }
 
-  private void launchNew(DaemonDecl decl) {
+  private void launchNew(ServiceDecl decl) {
     Supervised s = new Supervised(decl);
     if (running.putIfAbsent(decl.name(), s) != null) {
       return; // already supervised
@@ -255,7 +255,7 @@ public final class ServiceSupervisor {
   }
 
   private void launch(Supervised s) {
-    DaemonDecl decl = s.decl;
+    ServiceDecl decl = s.decl;
     String name = decl.name();
     if (decl.start() == null || decl.start().isBlank()) {
       emit.accept(new DaemonLog("WARN", "service '" + name + "' has no start command — ignored."));

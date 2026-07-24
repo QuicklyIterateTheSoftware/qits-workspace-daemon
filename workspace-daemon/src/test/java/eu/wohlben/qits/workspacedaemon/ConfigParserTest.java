@@ -40,7 +40,7 @@ class ConfigParserTest {
           execute: mvn -B verify
           environment:
             CI: "true"
-      daemons:
+      services:
         - name: dev
           start: mvn quarkus:dev
           ready-pattern: Listening on
@@ -90,7 +90,7 @@ class ConfigParserTest {
     assertFalse(action.getBoolean("interactive"), "primitive interactive is always emitted");
     assertEquals("true", action.getJsonObject("environment").getString("CI"));
 
-    JsonObject daemon = root.getJsonArray("daemons").getJsonObject(0);
+    JsonObject daemon = root.getJsonArray("services").getJsonObject(0);
     assertEquals("dev", daemon.getString("name"));
     assertEquals("Listening on", daemon.getString("readyPattern"));
     assertTrue(daemon.getBoolean("otel"));
@@ -126,7 +126,7 @@ class ConfigParserTest {
     // round-trip into a nested (non-normalizing) QitsConfig record is equals-exact.
     JsonObject daemon =
         json("version: 1\ndaemons:\n  - name: bare\n    start: run")
-            .getJsonArray("daemons")
+            .getJsonArray("services")
             .getJsonObject(0);
     assertTrue(daemon.getJsonObject("environment").isEmpty());
     assertTrue(daemon.getJsonArray("observers").isEmpty());
@@ -136,13 +136,24 @@ class ConfigParserTest {
   }
 
   @Test
+  void legacyDaemonsKeyIsAcceptedAsServices() {
+    // TEMPORARY back-compat: committed fixtures still use `daemons:`; the parser accepts it as the
+    // `services:` key until the fixtures' submodule round-trip lands. Remove with the alias.
+    JsonObject service =
+        json("version: 1\ndaemons:\n  - name: dev\n    start: run")
+            .getJsonArray("services")
+            .getJsonObject(0);
+    assertEquals("dev", service.getString("name"));
+  }
+
+  @Test
   void emptyContentIsTheEmptyConfig() {
     assertEquals(DaemonQitsConfig.EMPTY, ConfigParser.parse(""));
     assertEquals(DaemonQitsConfig.EMPTY, ConfigParser.parse(null));
     JsonObject empty = new JsonObject(ConfigJson.empty());
     assertNull(empty.getJsonObject("repository"));
     assertTrue(empty.getJsonArray("actions").isEmpty());
-    assertTrue(empty.getJsonArray("daemons").isEmpty());
+    assertTrue(empty.getJsonArray("services").isEmpty());
     assertTrue(empty.getJsonArray("bootstrap").isEmpty());
     assertTrue(empty.getJsonArray("frameworks").isEmpty());
   }
