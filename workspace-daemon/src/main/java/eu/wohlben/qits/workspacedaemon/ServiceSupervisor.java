@@ -222,8 +222,6 @@ public final class ServiceSupervisor {
           DEFAULT_STOP_SIGNAL,
           envOverride,
           null,
-          List.of(),
-          List.of(),
           List.of());
     }
     if (!hasOverride && (envOverride == null || envOverride.isEmpty())) {
@@ -241,8 +239,6 @@ public final class ServiceSupervisor {
         fromConfig.stopSignal(),
         (envOverride != null && !envOverride.isEmpty()) ? envOverride : fromConfig.environment(),
         fromConfig.webView(),
-        fromConfig.observers(),
-        fromConfig.sources(),
         fromConfig.healthChecks());
   }
 

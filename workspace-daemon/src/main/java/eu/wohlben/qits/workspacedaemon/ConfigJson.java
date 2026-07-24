@@ -4,9 +4,7 @@ import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ObserverDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.SourceDecl;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
@@ -100,23 +98,6 @@ public final class ConfigJson {
       putIfPresent(w, "basePath", d.webView().basePath());
       o.put("webView", w);
     }
-    JsonArray observers = new JsonArray();
-    for (ObserverDecl obs : d.observers()) {
-      JsonObject o2 = new JsonObject();
-      putIfPresent(o2, "kind", obs.kind());
-      putIfPresent(o2, "pattern", obs.pattern());
-      putIfPresent(o2, "severity", obs.severity());
-      observers.add(o2);
-    }
-    o.put("observers", observers);
-    JsonArray sources = new JsonArray();
-    for (SourceDecl s : d.sources()) {
-      JsonObject o2 = new JsonObject();
-      putIfPresent(o2, "path", s.path());
-      putIfPresent(o2, "label", s.label());
-      sources.add(o2);
-    }
-    o.put("sources", sources);
     JsonArray healthChecks = new JsonArray();
     for (HealthCheckDecl h : d.healthChecks()) {
       JsonObject o2 = new JsonObject();

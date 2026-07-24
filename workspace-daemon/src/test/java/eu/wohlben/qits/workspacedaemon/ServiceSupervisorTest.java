@@ -73,8 +73,6 @@ class ServiceSupervisorTest {
         "TERM",
         Map.of(),
         null,
-        List.of(),
-        List.of(),
         List.of());
   }
 

@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.io.File;
 import java.nio.file.Files;
@@ -54,14 +53,6 @@ class ConfigParserTest {
           web-view:
             port: 8080
             entry-path: /
-          observers:
-            - kind: log-level
-              severity: warn
-            - kind: pattern
-              pattern: ERROR
-          sources:
-            - path: build.log
-              label: Build
           health-checks:
             - name: ready
               kind: http
@@ -103,15 +94,6 @@ class ConfigParserTest {
     assertEquals(8080, daemon.getJsonObject("webView").getInteger("port"));
     assertEquals("/", daemon.getJsonObject("webView").getString("entryPath"));
 
-    JsonArray observers = daemon.getJsonArray("observers");
-    assertEquals(2, observers.size());
-    assertEquals("LOG_LEVEL", observers.getJsonObject(0).getString("kind"));
-    assertEquals("WARN", observers.getJsonObject(0).getString("severity"));
-    assertEquals("PATTERN", observers.getJsonObject(1).getString("kind"));
-    assertEquals("ERROR", observers.getJsonObject(1).getString("pattern"));
-
-    assertEquals("build.log", daemon.getJsonArray("sources").getJsonObject(0).getString("path"));
-
     JsonObject health = daemon.getJsonArray("healthChecks").getJsonObject(0);
     assertEquals("HTTP", health.getString("kind"));
     assertEquals(8080, health.getInteger("port"));
@@ -122,15 +104,13 @@ class ConfigParserTest {
 
   @Test
   void nestedCollectionsAndEnvironmentAreAlwaysPresent() {
-    // A daemon with no observers/sources/health-checks/env still emits them as []/{} so the
-    // round-trip into a nested (non-normalizing) QitsConfig record is equals-exact.
+    // A daemon with no health-checks/env still emits them as []/{} so the round-trip into a nested
+    // (non-normalizing) QitsConfig record is equals-exact.
     JsonObject daemon =
         json("version: 1\ndaemons:\n  - name: bare\n    start: run")
             .getJsonArray("services")
             .getJsonObject(0);
     assertTrue(daemon.getJsonObject("environment").isEmpty());
-    assertTrue(daemon.getJsonArray("observers").isEmpty());
-    assertTrue(daemon.getJsonArray("sources").isEmpty());
     assertTrue(daemon.getJsonArray("healthChecks").isEmpty());
     assertNull(daemon.getJsonObject("webView"), "an absent web-view is omitted (decodes to null)");
   }

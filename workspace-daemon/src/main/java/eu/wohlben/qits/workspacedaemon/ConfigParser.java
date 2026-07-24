@@ -4,10 +4,8 @@ import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ObserverDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.RepositorySection;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.SourceDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.WebViewDecl;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -151,8 +149,6 @@ public final class ConfigParser {
               str(m, "stop-signal"),
               strMap(m.get("environment"), "services[].environment"),
               webView(m.get("web-view")),
-              observers(m.get("observers")),
-              sources(m.get("sources")),
               healthChecks(m.get("health-checks"))));
     }
     return out;
@@ -165,25 +161,6 @@ public final class ConfigParser {
     Map<String, Object> m = asMap(raw, "web-view");
     return new WebViewDecl(
         intOrNull(m.get("port"), "web-view.port"), str(m, "entry-path"), str(m, "base-path"));
-  }
-
-  private static List<ObserverDecl> observers(Object raw) {
-    List<ObserverDecl> out = new ArrayList<>();
-    for (Object item : asList(raw, "observers")) {
-      Map<String, Object> m = asMap(item, "observers[]");
-      out.add(
-          new ObserverDecl(enumOf(m.get("kind")), str(m, "pattern"), enumOf(m.get("severity"))));
-    }
-    return out;
-  }
-
-  private static List<SourceDecl> sources(Object raw) {
-    List<SourceDecl> out = new ArrayList<>();
-    for (Object item : asList(raw, "sources")) {
-      Map<String, Object> m = asMap(item, "sources[]");
-      out.add(new SourceDecl(reqStr(m, "path", "sources[]"), str(m, "label")));
-    }
-    return out;
   }
 
   private static List<HealthCheckDecl> healthChecks(Object raw) {

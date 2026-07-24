@@ -10,9 +10,9 @@ import java.util.Map;
  * QitsConfig} via Jackson — the single wire schema for {@link
  * eu.wohlben.qits.workspacedaemon.protocol.ConfigView}. The {@code workspace-daemon} module cannot
  * depend on {@code domain} (native-image leanness), so this is a deliberate, parity-tested copy;
- * enum-typed host fields ({@code archetype}, {@code restartPolicy}, observer {@code kind}/{@code
- * severity}, health-check {@code kind}) degrade to normalized {@code String}s (uppercase, {@code
- * -}→{@code _}) matching the host enum constant names.
+ * enum-typed host fields ({@code archetype}, {@code restartPolicy}, health-check {@code kind})
+ * degrade to normalized {@code String}s (uppercase, {@code -}→{@code _}) matching the host enum
+ * constant names.
  *
  * <p>Collections are non-null (empty when absent), matching the host parser's defaults so the
  * round-trip is {@code equals}-exact even for nested records with no config-declared entries.
@@ -52,8 +52,6 @@ public record DaemonQitsConfig(
       String stopSignal,
       Map<String, String> environment,
       WebViewDecl webView,
-      List<ObserverDecl> observers,
-      List<SourceDecl> sources,
       List<HealthCheckDecl> healthChecks) {}
 
   public record BootstrapDecl(
@@ -64,10 +62,6 @@ public record DaemonQitsConfig(
       Map<String, String> environment) {}
 
   public record WebViewDecl(Integer port, String entryPath, String basePath) {}
-
-  public record ObserverDecl(String kind, String pattern, String severity) {}
-
-  public record SourceDecl(String path, String label) {}
 
   public record HealthCheckDecl(
       String name,
