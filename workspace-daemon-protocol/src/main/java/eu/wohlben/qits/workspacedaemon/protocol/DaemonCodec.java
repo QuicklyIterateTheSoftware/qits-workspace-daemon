@@ -99,6 +99,13 @@ public final class DaemonCodec {
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.OK, m.ok());
       }
+      case DaemonEvent m -> {
+        map.put(Field.TYPE, Type.DAEMON_EVENT);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.ID, m.id());
+        map.put(Field.STATE, m.state());
+        map.put(Field.EXIT_CODE, m.exitCode());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -119,6 +126,19 @@ public final class DaemonCodec {
         map.put(Field.TYPE, Type.RUN_BOOTSTRAP);
         map.put(Field.CORRELATION_ID, m.correlationId());
         map.put(Field.NAME, m.name());
+      }
+      case StartDaemon m -> {
+        map.put(Field.TYPE, Type.START_DAEMON);
+        map.put(Field.CORRELATION_ID, m.correlationId());
+        map.put(Field.ID, m.id());
+        map.put(Field.SCRIPT, m.script());
+        map.put(Field.ENV, m.env() == null ? Map.of() : new LinkedHashMap<>(m.env()));
+      }
+      case SignalDaemon m -> {
+        map.put(Field.TYPE, Type.SIGNAL_DAEMON);
+        map.put(Field.CORRELATION_ID, m.correlationId());
+        map.put(Field.ID, m.id());
+        map.put(Field.SIGNAL, m.signal());
       }
     }
     return map;
@@ -176,6 +196,12 @@ public final class DaemonCodec {
               intVal(map, Field.EXIT_CODE));
       case Type.BOOTSTRAPPED ->
           new Bootstrapped(str(map, Field.WORKSPACE_ID), boolVal(map, Field.OK));
+      case Type.DAEMON_EVENT ->
+          new DaemonEvent(
+              str(map, Field.WORKSPACE_ID),
+              str(map, Field.ID),
+              str(map, Field.STATE),
+              intObj(map, Field.EXIT_CODE));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -187,6 +213,15 @@ public final class DaemonCodec {
       case Type.DESCRIBE_CONFIG -> new DescribeConfig(str(map, Field.CORRELATION_ID));
       case Type.RUN_BOOTSTRAP ->
           new RunBootstrap(str(map, Field.CORRELATION_ID), str(map, Field.NAME));
+      case Type.START_DAEMON ->
+          new StartDaemon(
+              str(map, Field.CORRELATION_ID),
+              str(map, Field.ID),
+              str(map, Field.SCRIPT),
+              strMap(map, Field.ENV));
+      case Type.SIGNAL_DAEMON ->
+          new SignalDaemon(
+              str(map, Field.CORRELATION_ID), str(map, Field.ID), str(map, Field.SIGNAL));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };
@@ -200,6 +235,11 @@ public final class DaemonCodec {
   private static int intVal(Map<String, Object> map, String key) {
     Object value = map.get(key);
     return value instanceof Number number ? number.intValue() : 0;
+  }
+
+  private static Integer intObj(Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    return value instanceof Number number ? number.intValue() : null;
   }
 
   private static boolean boolVal(Map<String, Object> map, String key) {

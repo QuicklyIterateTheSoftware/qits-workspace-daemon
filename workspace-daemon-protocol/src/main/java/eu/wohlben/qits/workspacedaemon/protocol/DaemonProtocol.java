@@ -49,6 +49,23 @@ public final class DaemonProtocol {
     return BOOTSTRAP_CORRELATION_PREFIX + stepName;
   }
 
+  /**
+   * The prefix a running service's streamed stdout/stderr ({@link CommandChunk}) is correlated
+   * with, so the backend routes those chunks to the workspace's {@code service:<name>} process
+   * segment / log observers (docs/epics/qits-workspace-daemon/ Part 4). Like {@link
+   * #BOOTSTRAP_CORRELATION_PREFIX}, a service's output is a continuous stream, not a request/reply
+   * round-trip, so its correlation is a well-known value both sides compute from the service name.
+   */
+  public static final String SERVICE_CORRELATION_PREFIX = "service:";
+
+  /**
+   * The output correlation id for a running service — {@link #SERVICE_CORRELATION_PREFIX}{@code +
+   * name}.
+   */
+  public static String serviceCorrelationId(String serviceName) {
+    return SERVICE_CORRELATION_PREFIX + serviceName;
+  }
+
   private DaemonProtocol() {}
 
   /** The {@code "type"} discriminator values. */
@@ -66,12 +83,15 @@ public final class DaemonProtocol {
     public static final String BOOTSTRAP_STEP = "bootstrapStep";
     public static final String BOOTSTRAP_OUTCOME = "bootstrapOutcome";
     public static final String BOOTSTRAPPED = "bootstrapped";
+    public static final String DAEMON_EVENT = "daemonEvent";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
     public static final String DESCRIBE = "describe";
     public static final String DESCRIBE_CONFIG = "describeConfig";
     public static final String RUN_BOOTSTRAP = "runBootstrap";
+    public static final String START_DAEMON = "startDaemon";
+    public static final String SIGNAL_DAEMON = "signalDaemon";
 
     private Type() {}
   }
@@ -101,6 +121,10 @@ public final class DaemonProtocol {
     public static final String PHASE = "phase";
     public static final String OUTCOME = "outcome";
     public static final String OK = "ok";
+    public static final String ID = "id";
+    public static final String SCRIPT = "script";
+    public static final String SIGNAL = "signal";
+    public static final String STATE = "state";
 
     private Field() {}
   }

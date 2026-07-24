@@ -18,8 +18,11 @@ public sealed interface DaemonMessage
         BootstrapStep,
         BootstrapOutcome,
         Bootstrapped,
+        DaemonEvent,
         Ack,
         RunCommand,
         Describe,
         DescribeConfig,
-        RunBootstrap {}
+        RunBootstrap,
+        StartDaemon,
+        SignalDaemon {}

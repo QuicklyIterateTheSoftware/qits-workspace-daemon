@@ -177,6 +177,49 @@ class DaemonCodecTest {
   }
 
   @Test
+  void startDaemonRoundTrips() {
+    StartDaemon start = new StartDaemon("c1", "dev", "quarkus dev", Map.of("PORT", "8080"));
+    assertEquals(start, roundTrip(start));
+    assertEquals(
+        DaemonProtocol.Type.START_DAEMON, DaemonCodec.encode(start).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void startDaemonRoundTripsWithBlankScriptAndEmptyEnv() {
+    StartDaemon start = new StartDaemon("c1", "dev", "", Map.of());
+    assertEquals(start, roundTrip(start));
+  }
+
+  @Test
+  void signalDaemonRoundTrips() {
+    SignalDaemon signal = new SignalDaemon("c1", "dev", "TERM");
+    assertEquals(signal, roundTrip(signal));
+    assertEquals(
+        DaemonProtocol.Type.SIGNAL_DAEMON,
+        DaemonCodec.encode(signal).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void daemonEventRoundTripsWithExitCode() {
+    DaemonEvent crashed = new DaemonEvent("ws-1", "dev", DaemonEvent.State.CRASHED, 3);
+    assertEquals(crashed, roundTrip(crashed));
+    assertEquals(
+        DaemonProtocol.Type.DAEMON_EVENT,
+        DaemonCodec.encode(crashed).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void daemonEventRoundTripsWithNullExitCode() {
+    DaemonEvent ready = new DaemonEvent("ws-1", "dev", DaemonEvent.State.READY, null);
+    assertEquals(ready, roundTrip(ready));
+  }
+
+  @Test
+  void serviceCorrelationIdIsPrefixed() {
+    assertEquals("service:dev", DaemonProtocol.serviceCorrelationId("dev"));
+  }
+
+  @Test
   void decodeRejectsMissingType() {
     assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(Map.of()));
   }
