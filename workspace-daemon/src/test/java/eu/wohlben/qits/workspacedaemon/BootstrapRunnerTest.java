@@ -31,11 +31,11 @@ class BootstrapRunnerTest {
   private static final long GENEROUS_TIMEOUT_MS = 30_000;
 
   private static BootstrapDecl step(String name, String execute) {
-    return new BootstrapDecl(name, null, execute, null, Map.of());
+    return new BootstrapDecl(name, name, null, execute, null, Map.of());
   }
 
   private static BootstrapDecl step(String name, String execute, String check) {
-    return new BootstrapDecl(name, null, execute, check, Map.of());
+    return new BootstrapDecl(name, name, null, execute, check, Map.of());
   }
 
   private static List<BootstrapOutcome> outcomes(List<DaemonMessage> messages) {

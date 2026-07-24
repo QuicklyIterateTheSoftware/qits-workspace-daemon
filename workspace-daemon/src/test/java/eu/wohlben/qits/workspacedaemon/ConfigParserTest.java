@@ -127,6 +127,43 @@ class ConfigParserTest {
   }
 
   @Test
+  void idIsParsedAndDefaultsToName() {
+    // The explicit `id:` is parsed and emitted; an absent one defaults to the entry's name (the
+    // stopgap that keeps id-less fixtures working until they declare real ids).
+    JsonObject root =
+        json(
+            """
+            version: 1
+            actions:
+              - id: build-backend
+                name: build
+                execute: mvn -B verify
+            services:
+              - name: dev
+                start: run
+            bootstrap:
+              - name: install
+                execute: ./install.sh
+            """);
+    JsonObject action = root.getJsonArray("actions").getJsonObject(0);
+    assertEquals("build-backend", action.getString("id"), "explicit id round-trips");
+    assertEquals("build", action.getString("name"));
+    assertEquals(
+        "dev",
+        root.getJsonArray("services").getJsonObject(0).getString("id"),
+        "id defaults to name");
+    assertEquals(
+        "install",
+        root.getJsonArray("bootstrap").getJsonObject(0).getString("id"),
+        "id defaults to name");
+
+    DaemonQitsConfig parsed = ConfigParser.parse(FULL_CONFIG);
+    assertEquals("build", parsed.actions().get(0).id());
+    assertEquals("dev", parsed.services().get(0).id());
+    assertEquals("install", parsed.bootstrap().get(0).id());
+  }
+
+  @Test
   void emptyContentIsTheEmptyConfig() {
     assertEquals(DaemonQitsConfig.EMPTY, ConfigParser.parse(""));
     assertEquals(DaemonQitsConfig.EMPTY, ConfigParser.parse(null));

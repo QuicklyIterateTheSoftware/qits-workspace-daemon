@@ -212,6 +212,7 @@ public final class ServiceSupervisor {
       // definition from the override so an ad-hoc "run this" still works.
       return new ServiceDecl(
           name,
+          name,
           null,
           scriptOverride,
           null,
@@ -228,6 +229,7 @@ public final class ServiceSupervisor {
       return fromConfig;
     }
     return new ServiceDecl(
+        fromConfig.id(),
         fromConfig.name(),
         fromConfig.description(),
         hasOverride ? scriptOverride : fromConfig.start(),

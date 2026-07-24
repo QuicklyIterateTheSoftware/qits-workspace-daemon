@@ -63,6 +63,7 @@ class ServiceSupervisorTest {
       String name, String start, String readyPattern, String policy, Integer maxRestarts) {
     return new ServiceDecl(
         name,
+        name,
         null,
         start,
         readyPattern,

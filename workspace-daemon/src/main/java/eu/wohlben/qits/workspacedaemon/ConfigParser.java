@@ -107,6 +107,7 @@ public final class ConfigParser {
       Map<String, Object> m = asMap(item, "actions[]");
       out.add(
           new ActionDecl(
+              str(m, "id"),
               reqStr(m, "name", "actions[]"),
               str(m, "description"),
               str(m, "execute"),
@@ -123,6 +124,7 @@ public final class ConfigParser {
       Map<String, Object> m = asMap(item, "bootstrap[]");
       out.add(
           new BootstrapDecl(
+              str(m, "id"),
               reqStr(m, "name", "bootstrap[]"),
               str(m, "description"),
               str(m, "execute"),
@@ -138,6 +140,7 @@ public final class ConfigParser {
       Map<String, Object> m = asMap(item, "services[]");
       out.add(
           new ServiceDecl(
+              str(m, "id"),
               reqStr(m, "name", "services[]"),
               str(m, "description"),
               str(m, "start"),

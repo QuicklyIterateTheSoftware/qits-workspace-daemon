@@ -48,6 +48,7 @@ public final class ConfigJson {
     JsonArray actions = new JsonArray();
     for (ActionDecl a : config.actions()) {
       JsonObject o = new JsonObject();
+      putIfPresent(o, "id", a.id());
       putIfPresent(o, "name", a.name());
       putIfPresent(o, "description", a.description());
       putIfPresent(o, "execute", a.execute());
@@ -67,6 +68,7 @@ public final class ConfigJson {
     JsonArray bootstrap = new JsonArray();
     for (BootstrapDecl b : config.bootstrap()) {
       JsonObject o = new JsonObject();
+      putIfPresent(o, "id", b.id());
       putIfPresent(o, "name", b.name());
       putIfPresent(o, "description", b.description());
       putIfPresent(o, "execute", b.execute());
@@ -81,6 +83,7 @@ public final class ConfigJson {
 
   private static JsonObject serviceJson(ServiceDecl d) {
     JsonObject o = new JsonObject();
+    putIfPresent(o, "id", d.id());
     putIfPresent(o, "name", d.name());
     putIfPresent(o, "description", d.description());
     putIfPresent(o, "start", d.start());

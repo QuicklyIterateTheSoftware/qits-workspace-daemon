@@ -33,14 +33,23 @@ public record DaemonQitsConfig(
   public record FrameworkDecl(String kind, String root) {}
 
   public record ActionDecl(
+      String id,
       String name,
       String description,
       String execute,
       String check,
       boolean interactive,
-      Map<String, String> environment) {}
+      Map<String, String> environment) {
+    /**
+     * {@code id} defaults to {@code name} when absent/blank (mirrors the host {@code QitsConfig}).
+     */
+    public ActionDecl {
+      id = id == null || id.isBlank() ? name : id;
+    }
+  }
 
   public record ServiceDecl(
+      String id,
       String name,
       String description,
       String start,
@@ -52,14 +61,29 @@ public record DaemonQitsConfig(
       String stopSignal,
       Map<String, String> environment,
       WebViewDecl webView,
-      List<HealthCheckDecl> healthChecks) {}
+      List<HealthCheckDecl> healthChecks) {
+    /**
+     * {@code id} defaults to {@code name} when absent/blank (mirrors the host {@code QitsConfig}).
+     */
+    public ServiceDecl {
+      id = id == null || id.isBlank() ? name : id;
+    }
+  }
 
   public record BootstrapDecl(
+      String id,
       String name,
       String description,
       String execute,
       String check,
-      Map<String, String> environment) {}
+      Map<String, String> environment) {
+    /**
+     * {@code id} defaults to {@code name} when absent/blank (mirrors the host {@code QitsConfig}).
+     */
+    public BootstrapDecl {
+      id = id == null || id.isBlank() ? name : id;
+    }
+  }
 
   public record WebViewDecl(Integer port, String entryPath, String basePath) {}
 
