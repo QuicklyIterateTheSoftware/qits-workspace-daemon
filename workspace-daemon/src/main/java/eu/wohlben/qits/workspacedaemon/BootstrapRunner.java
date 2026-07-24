@@ -48,8 +48,9 @@ public final class BootstrapRunner {
    * Run {@code chain} (whole chain when {@code onlyName} is null/blank, else just that one step) at
    * {@code workingDir}, emitting {@link BootstrapStep}/{@link BootstrapOutcome} per step and a
    * terminal {@link Bootstrapped}. {@code stepTimeoutMs} bounds each {@code check}/{@code execute}.
+   * Returns whether the chain succeeded, so the boot sequence can gate service auto-start on it.
    */
-  public static void run(
+  public static boolean run(
       String workspaceId,
       List<BootstrapDecl> chain,
       String onlyName,
@@ -74,6 +75,7 @@ public final class BootstrapRunner {
       ok = false;
     }
     emit.accept(new Bootstrapped(workspaceId, ok));
+    return ok;
   }
 
   /**

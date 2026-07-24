@@ -14,6 +14,8 @@ import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
+import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
+import eu.wohlben.qits.workspacedaemon.protocol.StartDaemon;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.WebSocket;
@@ -112,6 +114,30 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.bootstrap-timeout-ms", defaultValue = "3600000")
   long bootstrapTimeoutMs;
 
+  // The service auto-start kill switch (host's qits.services.autostart-enabled, injected as
+  // QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART). When false the daemon supervises no auto-start
+  // services on boot; manual StartDaemon still works (docs/epics/qits-workspace-daemon/ Part 4).
+  @ConfigProperty(name = "qits.workspace-daemon.services-autostart", defaultValue = "true")
+  boolean servicesAutostart;
+
+  // Service supervision knobs, injected from the host's qits.services.* so host and container agree
+  // (grace before READY without a readyPattern; restart backoff bounds; stop grace before SIGKILL).
+  @ConfigProperty(name = "qits.workspace-daemon.service-ready-grace-ms", defaultValue = "10000")
+  long serviceReadyGraceMs;
+
+  @ConfigProperty(
+      name = "qits.workspace-daemon.service-restart-backoff-initial-ms",
+      defaultValue = "1000")
+  long serviceBackoffInitialMs;
+
+  @ConfigProperty(
+      name = "qits.workspace-daemon.service-restart-backoff-max-ms",
+      defaultValue = "30000")
+  long serviceBackoffMaxMs;
+
+  @ConfigProperty(name = "qits.workspace-daemon.service-stop-grace-ms", defaultValue = "5000")
+  long serviceStopGraceMs;
+
   /** Off-event-loop pool for blocking process/git work; one thread per in-flight request. */
   private final ExecutorService workers =
       Executors.newCachedThreadPool(
@@ -124,6 +150,14 @@ public class ControlSocket {
   private volatile WebSocketClient client;
   private volatile WebSocket socket;
   private volatile Context socketContext;
+
+  /**
+   * Supervises the workspace's services (dev servers) in-container — the tail of the boot sequence
+   * and PID-1 owner of their lifecycle (docs/epics/qits-workspace-daemon/ Part 4). Created in
+   * {@link #start()} once the identity/knobs resolve; reads the held {@link #configState} live so a
+   * reconnect that re-reads config sees the current service set.
+   */
+  private volatile ServiceSupervisor services;
 
   /**
    * Ensures the autonomous self-provision (clone on boot) runs at most once per daemon lifetime.
@@ -182,6 +216,16 @@ public class ControlSocket {
               + " paths unaffected).");
       return;
     }
+    services =
+        new ServiceSupervisor(
+            workspaceId,
+            WORKSPACE_DIR,
+            this::send,
+            () -> configState.config().daemons(),
+            serviceReadyGraceMs,
+            serviceBackoffInitialMs,
+            serviceBackoffMaxMs,
+            serviceStopGraceMs);
     // Autonomous self-provision: clone /workspace + materialize submodules from env, on boot, off
     // the
     // event loop — independent of whether the socket is up yet (its results buffer until it is).
@@ -227,21 +271,45 @@ public class ControlSocket {
    * a benign terminal so the host's await still completes and daemons still start).
    */
   private void runBootstrapOnBoot(boolean freshClone, boolean provisioned) {
-    if (!provisioned || !freshClone) {
+    if (!provisioned) {
+      return; // failed provision ⇒ host is tearing the workspace down
+    }
+    if (!freshClone) {
+      // Reconnect/restart into an already-provisioned checkout: no bootstrap (it ran on the fresh
+      // clone), but resume the auto-start services so a restarted container comes back up. The host
+      // doesn't await a Bootstrapped here.
+      startServicesOnBoot();
       return;
     }
+    boolean ok;
     if (!bootstrapAutorun) {
       LOG.info("bootstrap autorun disabled — skipping the chain, reporting ready.");
       send(new Bootstrapped(workspaceId, true));
-      return;
+      ok = true;
+    } else {
+      ok =
+          BootstrapRunner.run(
+              workspaceId,
+              configState.config().bootstrap(),
+              null,
+              WORKSPACE_DIR,
+              bootstrapTimeoutMs,
+              this::send);
     }
-    BootstrapRunner.run(
-        workspaceId,
-        configState.config().bootstrap(),
-        null,
-        WORKSPACE_DIR,
-        bootstrapTimeoutMs,
-        this::send);
+    // Services are the tail of the startup sequence — started only after a successful bootstrap (a
+    // dev server on an unbootstrapped checkout would only crash-loop). A failed chain withholds
+    // them, mirroring the host's ReadyForDaemons gate.
+    if (ok) {
+      startServicesOnBoot();
+    }
+  }
+
+  /** Start the auto-start service set, honouring the kill switch. */
+  private void startServicesOnBoot() {
+    ServiceSupervisor s = services;
+    if (servicesAutostart && s != null) {
+      s.startAutoStart();
+    }
   }
 
   private void connect(int attempt) {
@@ -299,6 +367,14 @@ public class ControlSocket {
       flushPending(ws);
       socket = ws;
     }
+    // Reconnect adoption: re-report every running service's current state so the host (which lost
+    // its in-memory projection on a qits restart) rebuilds it from the live children — replacing
+    // the old tmux/proc adoption probe. Off the socket-publish path (after `socket = ws`) so the
+    // re-report writes directly. A no-op on first connect (nothing running yet).
+    ServiceSupervisor s = services;
+    if (s != null) {
+      workers.execute(s::reportAll);
+    }
     LOG.infof("workspace-daemon control socket established for workspace %s", workspaceId);
   }
 
@@ -348,6 +424,18 @@ public class ControlSocket {
                       WORKSPACE_DIR,
                       bootstrapTimeoutMs,
                       this::send));
+      case StartDaemon request -> {
+        ServiceSupervisor s = services;
+        if (s != null) {
+          workers.execute(() -> s.start(request.id(), request.script(), request.env()));
+        }
+      }
+      case SignalDaemon request -> {
+        ServiceSupervisor s = services;
+        if (s != null) {
+          workers.execute(() -> s.signal(request.id(), request.signal()));
+        }
+      }
       default ->
           // Ack and any workspace-daemon->qits echoes are informational here; nothing to do in Part
           // 1.
@@ -406,6 +494,10 @@ public class ControlSocket {
 
   @PreDestroy
   void stop() {
+    ServiceSupervisor s = services;
+    if (s != null) {
+      s.close();
+    }
     workers.shutdownNow();
     WebSocket ws = socket;
     if (ws != null) {
