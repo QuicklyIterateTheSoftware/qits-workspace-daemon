@@ -116,12 +116,14 @@ public class ControlSocket {
   long maxBackoffMs;
 
   // Trailing-debounce quiet period: the tree must fall silent this long before one marker check +
-  // at-most-one GitStatus report. Deliberately generous (20s) so a git commit/push — a short burst
-  // of writes under .git/index/refs — settles fully before `git status` reads it, rather than
-  // racing
-  // the committer for index.lock. Each inotify event re-arms the timer (mirrors the old host
-  // qits.workspace.watch.coalesce-ms, but as a resetting debounce rather than a fixed window).
-  @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "20000")
+  // at-most-one GitStatus report. Short (1.5s) so the dirty→clean badge flips promptly after a
+  // commit. It can be short because the monitor runs `git status`/`git diff` with
+  // --no-optional-locks (GitStatusMonitor.settleFromGit), so the recompute never takes
+  // .git/index.lock and can't race a commit for it — the 20s window that once had to swallow the
+  // whole commit burst is no longer needed (see resolved 2026-07-25 index.lock-contention issue).
+  // Each inotify event re-arms the timer, so the window now just coalesces a commit's write burst
+  // into one non-flickering settle.
+  @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "1500")
   long gitStatusCoalesceMs;
 
   // Upper bound on the debounce above: under sustained churn the resetting timer would never fire,
