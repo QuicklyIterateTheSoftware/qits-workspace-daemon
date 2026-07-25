@@ -12,6 +12,16 @@
     <artifactId>workspace-daemon</artifactId>
     <packaging>quarkus</packaging>
 
+    <properties>
+        <!-- Build identity baked into the native binary and announced in the daemon's Hello
+             (docs/epics/qits-workspace-registry/): project.version distinguishes numbered releases,
+             the build timestamp distinguishes floating -SNAPSHOT builds. `timestamp` aliases
+             maven.build.timestamp so it can be referenced with the @-delimited filtering below
+             (maven.build.timestamp is not itself interpolable as a resource token). -->
+        <timestamp>${maven.build.timestamp}</timestamp>
+        <maven.build.timestamp.format>yyyy-MM-dd'T'HH:mm:ss'Z'</maven.build.timestamp.format>
+    </properties>
+
     <!-- The in-container client daemon (docs/epics/qits-workspace-daemon/): a Quarkus command-mode
          app compiled to a GraalVM native binary (Dockerfile `workspace-daemon-build` stage) that becomes each
          workspace container's process. It dials home over a WebSocket and, part by part, takes over
@@ -51,7 +61,37 @@
     </dependencies>
 
     <build>
+        <!-- Filter ONLY application.properties, so `@project.version@` / `@timestamp@` in it are
+             replaced at build time and baked into the native image as MicroProfile config (read via
+             @ConfigProperty in ControlSocket). Every other resource stays unfiltered. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>application.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>application.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
+            <plugin>
+                <!-- @-only delimiters: never expand ${...}, which would clobber Quarkus's own
+                     ${config.expression} references in application.properties. -->
+                <artifactId>maven-resources-plugin</artifactId>
+                <configuration>
+                    <useDefaultDelimiters>false</useDefaultDelimiters>
+                    <delimiters>
+                        <delimiter>@</delimiter>
+                    </delimiters>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>${quarkus.platform.group-id}</groupId>
                 <artifactId>quarkus-maven-plugin</artifactId>

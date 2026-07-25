@@ -92,6 +92,16 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.repo-name")
   Optional<String> repoNameConfig;
 
+  // Build identity baked into the native image (filtered from Maven at build time, see pom.xml +
+  // application.properties). Announced in the Hello so the backend's workspace registry can show
+  // which daemon build a running container is on (docs/epics/qits-workspace-registry/). Optional so
+  // a dev jar built without filtering (unresolved tokens absent) still boots.
+  @ConfigProperty(name = "qits.workspace-daemon.build.version")
+  Optional<String> buildVersionConfig;
+
+  @ConfigProperty(name = "qits.workspace-daemon.build.time")
+  Optional<String> buildTimeConfig;
+
   private String workspaceId = "";
   private String repositoryId = "";
   private String branch = "";
@@ -459,7 +469,14 @@ public class ControlSocket {
       // directly, after the flushed chunks). This closes both the stranding and the reordering
       // race.
       send(
-          new Hello(workspaceId, repositoryId, branch, parent, DaemonProtocol.CAPABILITY_VERSION),
+          new Hello(
+              workspaceId,
+              repositoryId,
+              branch,
+              parent,
+              DaemonProtocol.CAPABILITY_VERSION,
+              buildVersionConfig.orElse(null),
+              buildTimeConfig.orElse(null)),
           ws);
       // Prove the thin-client log direction: workspace-daemon's own events reach qits over the
       // socket, so a crashing/misbehaving client is visible without `docker logs`. Later parts
