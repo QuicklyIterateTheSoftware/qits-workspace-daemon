@@ -146,6 +146,11 @@ public final class DaemonCodec {
         map.put(Field.ID, m.id());
         map.put(Field.SIGNAL, m.signal());
       }
+      case PullBranch m -> {
+        map.put(Field.TYPE, Type.PULL_BRANCH);
+        map.put(Field.CORRELATION_ID, m.correlationId());
+        map.put(Field.BRANCH, m.branch());
+      }
     }
     return map;
   }
@@ -231,6 +236,8 @@ public final class DaemonCodec {
       case Type.SIGNAL_DAEMON ->
           new SignalDaemon(
               str(map, Field.CORRELATION_ID), str(map, Field.ID), str(map, Field.SIGNAL));
+      case Type.PULL_BRANCH ->
+          new PullBranch(str(map, Field.CORRELATION_ID), str(map, Field.BRANCH));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };

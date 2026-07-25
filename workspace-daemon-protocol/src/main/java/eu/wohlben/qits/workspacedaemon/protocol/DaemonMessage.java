@@ -26,4 +26,5 @@ public sealed interface DaemonMessage
         DescribeConfig,
         RunBootstrap,
         StartDaemon,
-        SignalDaemon {}
+        SignalDaemon,
+        PullBranch {}

@@ -230,6 +230,14 @@ class DaemonCodecTest {
   }
 
   @Test
+  void pullBranchRoundTrips() {
+    PullBranch pull = new PullBranch("c1", "feature");
+    assertEquals(pull, roundTrip(pull));
+    assertEquals(
+        DaemonProtocol.Type.PULL_BRANCH, DaemonCodec.encode(pull).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
   void decodeRejectsMissingType() {
     assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(Map.of()));
   }

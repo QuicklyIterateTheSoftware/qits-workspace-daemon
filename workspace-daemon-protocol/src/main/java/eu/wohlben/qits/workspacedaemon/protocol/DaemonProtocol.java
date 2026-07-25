@@ -93,6 +93,7 @@ public final class DaemonProtocol {
     public static final String RUN_BOOTSTRAP = "runBootstrap";
     public static final String START_DAEMON = "startDaemon";
     public static final String SIGNAL_DAEMON = "signalDaemon";
+    public static final String PULL_BRANCH = "pullBranch";
 
     private Type() {}
   }
