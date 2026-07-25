@@ -34,6 +34,8 @@ public final class DaemonCodec {
         map.put(Field.BRANCH, m.branch());
         map.put(Field.PARENT, m.parent());
         map.put(Field.CAPABILITY_VERSION, m.capabilityVersion());
+        map.put(Field.DAEMON_VERSION, m.daemonVersion());
+        map.put(Field.DAEMON_BUILD_TIME, m.daemonBuildTime());
       }
       case Heartbeat m -> {
         map.put(Field.TYPE, Type.HEARTBEAT);
@@ -169,7 +171,9 @@ public final class DaemonCodec {
               str(map, Field.REPO_ID),
               str(map, Field.BRANCH),
               str(map, Field.PARENT),
-              intVal(map, Field.CAPABILITY_VERSION));
+              intVal(map, Field.CAPABILITY_VERSION),
+              str(map, Field.DAEMON_VERSION),
+              str(map, Field.DAEMON_BUILD_TIME));
       case Type.HEARTBEAT -> new Heartbeat(str(map, Field.WORKSPACE_ID));
       case Type.CLIENT_LOG -> new DaemonLog(str(map, Field.LEVEL), str(map, Field.MESSAGE));
       case Type.COMMAND_CHUNK ->

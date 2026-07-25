@@ -106,6 +106,8 @@ public final class DaemonProtocol {
     public static final String BRANCH = "branch";
     public static final String PARENT = "parent";
     public static final String CAPABILITY_VERSION = "capabilityVersion";
+    public static final String DAEMON_VERSION = "daemonVersion";
+    public static final String DAEMON_BUILD_TIME = "daemonBuildTime";
     public static final String LEVEL = "level";
     public static final String MESSAGE = "message";
     public static final String CORRELATION_ID = "correlationId";

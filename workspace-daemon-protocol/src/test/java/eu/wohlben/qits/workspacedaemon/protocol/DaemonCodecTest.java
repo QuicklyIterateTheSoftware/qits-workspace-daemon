@@ -21,10 +21,34 @@ class DaemonCodecTest {
 
   @Test
   void helloRoundTrips() {
-    Hello hello = new Hello("ws-1", "repo-1", "feature", "main", DaemonProtocol.CAPABILITY_VERSION);
+    Hello hello =
+        new Hello(
+            "ws-1",
+            "repo-1",
+            "feature",
+            "main",
+            DaemonProtocol.CAPABILITY_VERSION,
+            "1.0.0-SNAPSHOT",
+            "2026-07-25T09:14:03Z");
     assertEquals(hello, roundTrip(hello));
     assertEquals(
         DaemonProtocol.Type.HELLO, DaemonCodec.encode(hello).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void helloFromAnOlderDaemonDecodesMissingBuildIdentityAsNull() {
+    // An older daemon image predating the build-identity fields sends a Hello without them; the map
+    // simply lacks those keys and they must decode to null (the backend records the connection all
+    // the same). Simulate by encoding a full Hello and dropping the two keys before decode.
+    var map =
+        new java.util.LinkedHashMap<>(
+            DaemonCodec.encode(
+                new Hello(
+                    "ws-1", "repo-1", "feature", "main", 1, "1.0.0", "2026-07-25T09:14:03Z")));
+    map.remove(DaemonProtocol.Field.DAEMON_VERSION);
+    map.remove(DaemonProtocol.Field.DAEMON_BUILD_TIME);
+    Hello decoded = (Hello) DaemonCodec.decode(map);
+    assertEquals(new Hello("ws-1", "repo-1", "feature", "main", 1, null, null), decoded);
   }
 
   @Test
