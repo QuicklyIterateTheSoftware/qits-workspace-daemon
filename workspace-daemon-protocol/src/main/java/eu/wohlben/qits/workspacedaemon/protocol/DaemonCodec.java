@@ -106,6 +106,12 @@ public final class DaemonCodec {
         map.put(Field.STATE, m.state());
         map.put(Field.EXIT_CODE, m.exitCode());
       }
+      case GitStatus m -> {
+        map.put(Field.TYPE, Type.GIT_STATUS);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.CLEAN, m.clean());
+        map.put(Field.HEAD, m.head());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -202,6 +208,9 @@ public final class DaemonCodec {
               str(map, Field.ID),
               str(map, Field.STATE),
               intObj(map, Field.EXIT_CODE));
+      case Type.GIT_STATUS ->
+          new GitStatus(
+              str(map, Field.WORKSPACE_ID), boolVal(map, Field.CLEAN), str(map, Field.HEAD));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(

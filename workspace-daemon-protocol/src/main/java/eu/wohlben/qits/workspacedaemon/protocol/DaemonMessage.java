@@ -19,6 +19,7 @@ public sealed interface DaemonMessage
         BootstrapOutcome,
         Bootstrapped,
         DaemonEvent,
+        GitStatus,
         Ack,
         RunCommand,
         Describe,

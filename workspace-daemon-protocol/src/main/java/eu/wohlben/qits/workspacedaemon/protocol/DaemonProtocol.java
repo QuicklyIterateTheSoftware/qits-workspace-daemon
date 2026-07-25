@@ -84,6 +84,7 @@ public final class DaemonProtocol {
     public static final String BOOTSTRAP_OUTCOME = "bootstrapOutcome";
     public static final String BOOTSTRAPPED = "bootstrapped";
     public static final String DAEMON_EVENT = "daemonEvent";
+    public static final String GIT_STATUS = "gitStatus";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
@@ -112,6 +113,7 @@ public final class DaemonProtocol {
     public static final String EXIT_CODE = "exitCode";
     public static final String HEAD = "head";
     public static final String DIRTY = "dirty";
+    public static final String CLEAN = "clean";
     public static final String ARGV = "argv";
     public static final String CWD = "cwd";
     public static final String ENV = "env";

@@ -215,6 +215,16 @@ class DaemonCodecTest {
   }
 
   @Test
+  void gitStatusRoundTripsBothCleanStates() {
+    GitStatus clean = new GitStatus("ws-1", true, "abc123");
+    GitStatus dirty = new GitStatus("ws-1", false, "abc123");
+    assertEquals(clean, roundTrip(clean));
+    assertEquals(dirty, roundTrip(dirty));
+    assertEquals(
+        DaemonProtocol.Type.GIT_STATUS, DaemonCodec.encode(clean).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
   void serviceCorrelationIdIsPrefixed() {
     assertEquals("service:dev", DaemonProtocol.serviceCorrelationId("dev"));
   }
