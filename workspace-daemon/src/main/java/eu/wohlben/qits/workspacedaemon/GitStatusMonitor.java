@@ -12,10 +12,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.jboss.logging.Logger;
@@ -29,9 +28,17 @@ import org.jboss.logging.Logger;
  * with {@code docker exec inotifywait}.
  *
  * <p>The watch is a single local {@code inotifywait -m -r} fork (no {@code docker exec} prefix — it
- * already runs in the container, like {@link Provisioner}/{@link WorkspaceDescriber} fork git). A
- * burst of raw events opens one coalescing window; when it settles the marker is recomputed once
- * and a {@link GitStatus} is emitted only if it moved.
+ * already runs in the container, like {@link Provisioner}/{@link WorkspaceDescriber} fork git). Raw
+ * events feed a <b>trailing debounce</b>: every event (re)arms a timer, so the marker is recomputed
+ * only once the tree has been <em>quiet</em> for {@code coalesceMs} (default 20s), and a {@link
+ * GitStatus} is emitted only if the marker moved. This quiescence gate is deliberate — a {@code git
+ * commit}/{@code push} is a short burst of writes under {@code .git/index}/{@code refs}, and firing
+ * {@code git status} into the middle of it races the committer for {@code index.lock}. Debouncing
+ * to a quiet tree means the recompute lands <em>after</em> the commit released its lock, not during
+ * it. A {@code maxWaitMs} cap (default 120s) bounds the wait so a workspace under sustained churn
+ * (an editor autosaving, a watch-mode task) still refreshes its badge at a bounded cadence instead
+ * of going silent forever; the cap is far longer than any commit burst, so it does not reintroduce
+ * the contention.
  *
  * <p>Dedup is on the full working-tree <b>marker</b> (sha256 of {@code git status --porcelain=v2
  * --branch -uall} + {@code git diff}), not the {@code clean} boolean — the same algorithm the host
@@ -55,6 +62,7 @@ final class GitStatusMonitor {
   private final String parent;
   private final Consumer<DaemonMessage> send;
   private final long coalesceMs;
+  private final long maxWaitMs;
 
   private final ScheduledExecutorService scheduler =
       Executors.newSingleThreadScheduledExecutor(
@@ -63,7 +71,22 @@ final class GitStatusMonitor {
             thread.setDaemon(true);
             return thread;
           });
-  private final Set<String> openWindow = ConcurrentHashMap.newKeySet();
+
+  /** Debounce bookkeeping — all reads/writes guarded by {@link #debounceLock}. */
+  private final Object debounceLock = new Object();
+
+  /** The armed trailing-debounce timer, or {@code null} between bursts. */
+  private ScheduledFuture<?> pending;
+
+  /** {@code System.nanoTime()} deadline at which the current burst must settle regardless. */
+  private long burstDeadlineNanos;
+
+  /**
+   * Monotonic id of the currently-armed timer. A timer that fires but no longer matches (a newer
+   * event re-armed after it had already started running, so {@link ScheduledFuture#cancel} came too
+   * late) is a stale wake-up and bows out — preventing two concurrent recomputes.
+   */
+  private long generation;
 
   private volatile Process process;
   private volatile Thread reader;
@@ -75,19 +98,45 @@ final class GitStatusMonitor {
   /** The last {@link GitStatus} emitted, replayed by {@link #reportCurrent()} on reconnect. */
   private volatile GitStatus last;
 
+  /**
+   * What runs when a debounce window elapses — {@link #settleFromGit()} in production; a test
+   * injects a git-free counter so the debounce/reset/cap timing can be driven without a real tree.
+   */
+  private final Runnable settleAction;
+
   GitStatusMonitor(
       String workspaceId,
       String repoId,
       String branch,
       String parent,
       Consumer<DaemonMessage> send,
-      long coalesceMs) {
+      long coalesceMs,
+      long maxWaitMs) {
+    this(workspaceId, repoId, branch, parent, send, coalesceMs, maxWaitMs, null);
+  }
+
+  /**
+   * Full constructor with a settle-action override ({@code null} ⇒ the real {@code git} recompute).
+   */
+  GitStatusMonitor(
+      String workspaceId,
+      String repoId,
+      String branch,
+      String parent,
+      Consumer<DaemonMessage> send,
+      long coalesceMs,
+      long maxWaitMs,
+      Runnable settleActionOverride) {
     this.workspaceId = workspaceId;
     this.repoId = repoId;
     this.branch = branch;
     this.parent = parent;
     this.send = send;
     this.coalesceMs = coalesceMs;
+    // The cap must never undercut the quiet period, or the burst would settle before the debounce
+    // could coalesce it. A non-positive cap disables the ceiling (pure trailing debounce).
+    this.maxWaitMs = maxWaitMs <= 0 ? Long.MAX_VALUE : Math.max(maxWaitMs, coalesceMs);
+    this.settleAction = settleActionOverride != null ? settleActionOverride : this::settleFromGit;
   }
 
   /**
@@ -136,23 +185,56 @@ final class GitStatusMonitor {
     }
   }
 
-  /** A raw inotify line arrived: open a coalescing window if one isn't already pending. */
-  private void onRawChange() {
-    if (openWindow.add("w")) {
-      scheduler.schedule(this::settleWindow, coalesceMs, TimeUnit.MILLISECONDS);
+  /**
+   * A raw inotify line arrived: (re)arm the trailing-debounce timer so the recompute lands only
+   * once the tree falls quiet for {@code coalesceMs}. Each event cancels the previous timer and
+   * schedules a fresh one — so a sustained burst (e.g. a {@code git commit} scribbling under {@code
+   * .git/index}/{@code refs}) keeps pushing the recompute out rather than firing {@code git status}
+   * into the middle of it and racing for {@code index.lock}. The {@code maxWaitMs} cap keeps the
+   * settle from being starved forever under continuous churn: the delay is clamped so the recompute
+   * never lands later than {@code maxWaitMs} after the first event of the burst. Package-private so
+   * the debounce timing can be driven in a test without a real {@code inotifywait} fork.
+   */
+  void onRawChange() {
+    synchronized (debounceLock) {
+      if (closed) {
+        return;
+      }
+      long now = System.nanoTime();
+      if (pending == null) {
+        // First event of a new burst — anchor the ceiling (guard against maxWaitMs == MAX_VALUE).
+        long capNanos = maxWaitMs == Long.MAX_VALUE ? Long.MAX_VALUE : maxWaitMs * 1_000_000L;
+        burstDeadlineNanos = capNanos == Long.MAX_VALUE ? Long.MAX_VALUE : now + capNanos;
+      } else {
+        pending.cancel(false);
+      }
+      long remainingToDeadlineMs =
+          burstDeadlineNanos == Long.MAX_VALUE
+              ? Long.MAX_VALUE
+              : Math.max(0L, (burstDeadlineNanos - now) / 1_000_000L);
+      long delayMs = Math.min(coalesceMs, remainingToDeadlineMs);
+      long mine = ++generation;
+      pending = scheduler.schedule(() -> onWindowElapsed(mine), delayMs, TimeUnit.MILLISECONDS);
     }
   }
 
   /**
-   * The coalescing window closed: clear it <em>before</em> the git-touching recompute (so an event
-   * arriving mid-computation opens a fresh window rather than being swallowed), then recompute the
-   * marker and report if it moved.
+   * The debounce timer elapsed: close the burst <em>before</em> the git-touching recompute (so an
+   * event arriving mid-computation starts a fresh burst rather than being swallowed), then
+   * recompute the marker and report if it moved. The git forks run <em>outside</em> {@link
+   * #debounceLock} so they never block the reader thread's {@link #onRawChange}.
    */
-  private void settleWindow() {
-    openWindow.remove("w");
-    if (!closed) {
-      settleFromGit();
+  private void onWindowElapsed(long mine) {
+    synchronized (debounceLock) {
+      if (mine != generation) {
+        return; // a newer event re-armed after this timer began firing — this wake-up is stale
+      }
+      pending = null; // burst closed; the next event begins a new one
+      if (closed) {
+        return;
+      }
     }
+    settleAction.run();
   }
 
   /** Fork the two git reads and feed them to {@link #settle}. */

@@ -105,10 +105,22 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.reconnect-max-backoff-ms", defaultValue = "30000")
   long maxBackoffMs;
 
-  // How long a burst of inotify events is coalesced before one marker check + at-most-one GitStatus
-  // report (mirrors the old host qits.workspace.watch.coalesce-ms).
-  @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "250")
+  // Trailing-debounce quiet period: the tree must fall silent this long before one marker check +
+  // at-most-one GitStatus report. Deliberately generous (20s) so a git commit/push — a short burst
+  // of writes under .git/index/refs — settles fully before `git status` reads it, rather than
+  // racing
+  // the committer for index.lock. Each inotify event re-arms the timer (mirrors the old host
+  // qits.workspace.watch.coalesce-ms, but as a resetting debounce rather than a fixed window).
+  @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "20000")
   long gitStatusCoalesceMs;
+
+  // Upper bound on the debounce above: under sustained churn the resetting timer would never fire,
+  // so force a settle at most this long after a burst's first event. Far longer than any commit
+  // burst, so it keeps the badge alive without reintroducing the index.lock contention. <=0
+  // disables
+  // the ceiling (pure trailing debounce).
+  @ConfigProperty(name = "qits.workspace-daemon.git-status.max-wait-ms", defaultValue = "120000")
+  long gitStatusMaxWaitMs;
 
   // Auto-push kill switch (host's qits.workspace.auto-push.enabled, injected as
   // QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED). When false the daemon never pushes committed work on
@@ -347,7 +359,8 @@ public class ControlSocket {
                 sync.onWorkingTreeSettled();
               }
             },
-            gitStatusCoalesceMs);
+            gitStatusCoalesceMs,
+            gitStatusMaxWaitMs);
     gitStatus = monitor;
     monitor.start();
   }
