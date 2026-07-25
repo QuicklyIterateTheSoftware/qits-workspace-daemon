@@ -30,22 +30,25 @@ import org.jboss.logging.Logger;
  * <p>The watch is a single local {@code inotifywait -m -r} fork (no {@code docker exec} prefix — it
  * already runs in the container, like {@link Provisioner}/{@link WorkspaceDescriber} fork git). Raw
  * events feed a <b>trailing debounce</b>: every event (re)arms a timer, so the marker is recomputed
- * only once the tree has been <em>quiet</em> for {@code coalesceMs} (default 20s), and a {@link
- * GitStatus} is emitted only if the marker moved. This quiescence gate is deliberate — a {@code git
- * commit}/{@code push} is a short burst of writes under {@code .git/index}/{@code refs}, and firing
- * {@code git status} into the middle of it races the committer for {@code index.lock}. Debouncing
- * to a quiet tree means the recompute lands <em>after</em> the commit released its lock, not during
- * it. A {@code maxWaitMs} cap (default 120s) bounds the wait so a workspace under sustained churn
- * (an editor autosaving, a watch-mode task) still refreshes its badge at a bounded cadence instead
- * of going silent forever; the cap is far longer than any commit burst, so it does not reintroduce
- * the contention.
+ * only once the tree has been <em>quiet</em> for {@code coalesceMs} (default 1.5s), and a {@link
+ * GitStatus} is emitted only if the marker moved. The recompute runs {@code git status}/{@code git
+ * diff} with {@code --no-optional-locks}, so it never takes {@code .git/index.lock} and thus can
+ * never race a concurrent {@code git commit}/{@code push} for it (the {@code index.lock} contention
+ * that once forced a 20s window — see the resolved contention issue). With the lock race gone the
+ * debounce is now just a short coalescing gate: it collapses a commit's write burst to a single
+ * recompute and keeps the badge from flickering, landing the dirty→clean report ~1.5s after the
+ * commit instead of 20s. A {@code maxWaitMs} cap (default 120s) bounds the wait so a workspace
+ * under sustained churn (an editor autosaving, a watch-mode task) still refreshes its badge at a
+ * bounded cadence instead of going silent forever.
  *
  * <p>Dedup is on the full working-tree <b>marker</b> (sha256 of {@code git status --porcelain=v2
  * --branch -uall} + {@code git diff}), not the {@code clean} boolean — the same algorithm the host
  * {@code WorkingTreeMarker} used. This preserves the "files changed" signal on a dirty→dirty edit
  * (a second file touched while the tree is already dirty) that a bare boolean would swallow, while
- * still ignoring churn under an excluded/gitignored path. The heavy build dirs and the noisy {@code
- * .git/objects}/{@code .git/logs} are excluded, but {@code .git/index}/{@code HEAD}/{@code refs}
+ * still ignoring churn under an excluded/gitignored path. The heavy build dirs, the noisy {@code
+ * .git/objects}/{@code .git/logs}, and the remote-tracking bookkeeping ({@code
+ * .git/refs/remotes}/{@code .git/FETCH_HEAD}/{@code .git/ORIG_HEAD}, which a push/fetch writes but
+ * which never move the marker) are excluded, but {@code .git/index}/{@code HEAD}/{@code refs/heads}
  * stay watched so a {@code git commit} (which touches only {@code .git}, never a work-tree file) is
  * seen and reported clean.
  */
@@ -144,7 +147,9 @@ final class GitStatusMonitor {
    * provisioned so {@code git status} has a tree to read.
    */
   void start() {
-    settleFromGit(); // lastMarker is null ⇒ this always emits the boot report
+    // lastMarker is null ⇒ this emits the boot report — unless the read comes back blank (git
+    // failed), in which case settle() skips it and the first live event re-reads.
+    settleFromGit();
     List<String> argv = watchArgv();
     try {
       Process started =
@@ -189,11 +194,13 @@ final class GitStatusMonitor {
    * A raw inotify line arrived: (re)arm the trailing-debounce timer so the recompute lands only
    * once the tree falls quiet for {@code coalesceMs}. Each event cancels the previous timer and
    * schedules a fresh one — so a sustained burst (e.g. a {@code git commit} scribbling under {@code
-   * .git/index}/{@code refs}) keeps pushing the recompute out rather than firing {@code git status}
-   * into the middle of it and racing for {@code index.lock}. The {@code maxWaitMs} cap keeps the
-   * settle from being starved forever under continuous churn: the delay is clamped so the recompute
-   * never lands later than {@code maxWaitMs} after the first event of the burst. Package-private so
-   * the debounce timing can be driven in a test without a real {@code inotifywait} fork.
+   * .git/index}/{@code refs/heads}) collapses to a single recompute after the burst settles rather
+   * than firing {@code git status} on every event. (The recompute is lock-free via {@code
+   * --no-optional-locks}, so this coalescing is for a stable, non-flickering badge — not to dodge
+   * {@code index.lock}, which the flag already handles.) The {@code maxWaitMs} cap keeps the settle
+   * from being starved forever under continuous churn: the delay is clamped so the recompute never
+   * lands later than {@code maxWaitMs} after the first event of the burst. Package-private so the
+   * debounce timing can be driven in a test without a real {@code inotifywait} fork.
    */
   void onRawChange() {
     synchronized (debounceLock) {
@@ -239,7 +246,15 @@ final class GitStatusMonitor {
 
   /** Fork the two git reads and feed them to {@link #settle}. */
   private void settleFromGit() {
-    settle(capture("git", "status", "--porcelain=v2", "--branch", "-uall"), capture("git", "diff"));
+    // --no-optional-locks: neither read takes .git/index.lock (git skips the opportunistic index
+    // refresh), so the recompute can never race a concurrent commit/push for that lock. This is
+    // what
+    // lets the debounce be a short quiescence gate rather than the 20s lock-avoidance window it
+    // once
+    // had to be (see the class javadoc and the resolved index.lock-contention issue).
+    settle(
+        capture("git", "--no-optional-locks", "status", "--porcelain=v2", "--branch", "-uall"),
+        capture("git", "--no-optional-locks", "diff"));
   }
 
   /**
@@ -248,6 +263,17 @@ final class GitStatusMonitor {
    * capturing {@code send}, without a real git tree.
    */
   void settle(String statusV2, String diff) {
+    if (statusV2.isBlank()) {
+      // A clean tree's `status --porcelain=v2 --branch` always carries the `# branch.*` headers, so
+      // blank output means the git read itself failed (non-zero exit ⇒ capture() returned ""), not
+      // a
+      // clean tree. WorkspaceDescriber.parse would read blank as not-dirty and we'd flip the badge
+      // falsely clean — so skip. The shorter debounce can land a read mid-operation, making this
+      // reachable; the next inotify event (or a reconnect) re-reads. Never overwrites lastMarker,
+      // so
+      // a real change after a transient failure still reports.
+      return;
+    }
     String marker = sha256(statusV2 + " " + diff);
     if (marker.equals(lastMarker)) {
       return; // nothing meaningful changed — no report
@@ -288,9 +314,15 @@ final class GitStatusMonitor {
   /**
    * The {@code inotifywait} command over {@code /workspace}: monitor continuously ({@code -m}),
    * recursively ({@code -r}), quietly ({@code -q}), on the mutating events. Exclude the heavy
-   * build/VCS dirs whose churn never moves the marker <em>and</em> {@code .git/objects}/{@code
-   * .git/logs} (a commit's blob writes + reflog), but keep {@code .git/index}/{@code HEAD}/{@code
-   * refs} watched so a commit/checkout is observed. Package-private for the watcher test.
+   * build/VCS dirs whose churn never moves the marker <em>and</em> the {@code .git} bookkeeping
+   * that never changes working-tree cleanliness or {@code branch.oid}: {@code .git/objects}/{@code
+   * .git/logs} (a commit's blob writes + reflog) plus {@code .git/refs/remotes}/{@code
+   * .git/FETCH_HEAD}/{@code .git/ORIG_HEAD} (a push/fetch/auto-push's remote-tracking bookkeeping,
+   * top-level or a submodule's gitdir) — so a push's ordinary loose-ref writes don't re-arm the
+   * badge debounce. (A periodic {@code packed-refs} rewrite still can, but a re-arm is harmless now
+   * that the recompute is lock-free and short.) But keep {@code .git/index}/{@code HEAD}/{@code
+   * refs/heads} watched so a commit/checkout — and a pull/merge that advances the local branch and
+   * rewrites work-tree files — is observed. Package-private for the watcher test.
    */
   List<String> watchArgv() {
     return List.of(
@@ -309,7 +341,13 @@ final class GitStatusMonitor {
         "-e",
         "close_write",
         "--exclude",
-        "(^|/)(node_modules|target|dist|build|\\.angular|\\.gradle)(/|$)|(^|/)\\.git/(objects|logs)(/|$)",
+        // The `(modules/[^/]+/)*` hop matches a submodule's own gitdir (`.git/modules/<name>/…`, at
+        // any nesting depth) as well as the top-level `.git/`, so a submodule fetch/push's remote
+        // bookkeeping is excluded too — otherwise it would still re-arm the debounce in a workspace
+        // with submodules.
+        "(^|/)(node_modules|target|dist|build|\\.angular|\\.gradle)(/|$)"
+            + "|(^|/)\\.git/(modules/[^/]+/)*(objects|logs|refs/remotes)(/|$)"
+            + "|(^|/)\\.git/(modules/[^/]+/)*(FETCH_HEAD|ORIG_HEAD)$",
         "/workspace");
   }
 
