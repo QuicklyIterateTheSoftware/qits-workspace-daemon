@@ -8,10 +8,12 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
+import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
+import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
@@ -108,6 +110,29 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "250")
   long gitStatusCoalesceMs;
 
+  // Auto-push kill switch (host's qits.workspace.auto-push.enabled, injected as
+  // QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED). When false the daemon never pushes committed work on
+  // its own; incoming pulls (host-triggered) are unaffected
+  // (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
+  @ConfigProperty(name = "qits.workspace-daemon.auto-push-enabled", defaultValue = "true")
+  boolean autoPushEnabled;
+
+  // How long a burst of working-tree reports is coalesced before one push cycle (a rapid
+  // commit+edit shouldn't push twice).
+  @ConfigProperty(name = "qits.workspace-daemon.auto-push.coalesce-ms", defaultValue = "500")
+  long autoPushCoalesceMs;
+
+  // Push-conflict retry bounds: a push rejected by origin's ref lock (a concurrent host push) is
+  // retried up to max-attempts with exponential backoff between backoff-initial and backoff-max.
+  @ConfigProperty(name = "qits.workspace-daemon.auto-push.max-attempts", defaultValue = "5")
+  int autoPushMaxAttempts;
+
+  @ConfigProperty(name = "qits.workspace-daemon.auto-push.backoff-initial-ms", defaultValue = "500")
+  long autoPushBackoffInitialMs;
+
+  @ConfigProperty(name = "qits.workspace-daemon.auto-push.backoff-max-ms", defaultValue = "5000")
+  long autoPushBackoffMaxMs;
+
   // The provision-time bootstrap kill switch (host's qits.bootstrap.autorun-enabled, injected as
   // QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN). When false the daemon skips the chain and reports a
   // benign Bootstrapped{ok:true} so the workspace still proceeds to daemons; manual re-run stays
@@ -171,6 +196,17 @@ public class ControlSocket {
    * reconnect.
    */
   private volatile GitStatusMonitor gitStatus;
+
+  /**
+   * Keeps the checkout and its origin ref in sync both ways: auto-pushes committed work as the
+   * {@link GitStatusMonitor} observes it, and applies host-triggered incoming {@link PullBranch}
+   * pulls (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
+   * Created alongside the monitor once the checkout is provisioned.
+   */
+  private volatile OriginSync originSync;
+
+  /** Timeout (seconds) for a single auto-push/incoming-pull git invocation. */
+  private static final long GIT_SYNC_TIMEOUT_SECONDS = 300;
 
   /**
    * Ensures the autonomous self-provision (clone on boot) runs at most once per daemon lifetime.
@@ -285,9 +321,33 @@ public class ControlSocket {
     if (!provisioned) {
       return;
     }
+    OriginSync sync =
+        new OriginSync(
+            workspaceId,
+            branch,
+            GitRunner.forking(WORKSPACE_DIR, GIT_SYNC_TIMEOUT_SECONDS),
+            autoPushEnabled,
+            autoPushCoalesceMs,
+            autoPushMaxAttempts,
+            autoPushBackoffInitialMs,
+            autoPushBackoffMaxMs);
+    originSync = sync;
+    // Every GitStatus the monitor emits means its working-tree marker moved — which includes every
+    // commit — so nudge the auto-pusher off the same signal. It cheaply no-ops when the branch has
+    // nothing unpushed (a content-only edit), and pushes right away when a commit ran.
     GitStatusMonitor monitor =
         new GitStatusMonitor(
-            workspaceId, repositoryId, branch, parent, this::send, gitStatusCoalesceMs);
+            workspaceId,
+            repositoryId,
+            branch,
+            parent,
+            message -> {
+              send(message);
+              if (message instanceof GitStatus) {
+                sync.onWorkingTreeSettled();
+              }
+            },
+            gitStatusCoalesceMs);
     gitStatus = monitor;
     monitor.start();
   }
@@ -473,6 +533,20 @@ public class ControlSocket {
           workers.execute(() -> s.signal(request.id(), request.signal()));
         }
       }
+      case PullBranch request -> {
+        // The host advanced this workspace's branch on origin (a merge/integration into it); pull
+        // it
+        // into the checkout. OriginSync serializes this behind any in-flight auto-push and refuses
+        // anything but a fast-forward.
+        OriginSync s = originSync;
+        if (s != null) {
+          s.pull(request.branch());
+        } else {
+          LOG.debugf(
+              "PullBranch for %s but origin-sync isn't up yet (not provisioned) — ignoring",
+              workspaceId);
+        }
+      }
       default ->
           // Ack and any workspace-daemon->qits echoes are informational here; nothing to do in Part
           // 1.
@@ -538,6 +612,10 @@ public class ControlSocket {
     GitStatusMonitor g = gitStatus;
     if (g != null) {
       g.close();
+    }
+    OriginSync o = originSync;
+    if (o != null) {
+      o.close();
     }
     workers.shutdownNow();
     WebSocket ws = socket;
