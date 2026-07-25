@@ -20,6 +20,7 @@ public sealed interface DaemonMessage
         Bootstrapped,
         DaemonEvent,
         GitStatus,
+        AgentActivity,
         Ack,
         RunCommand,
         Describe,

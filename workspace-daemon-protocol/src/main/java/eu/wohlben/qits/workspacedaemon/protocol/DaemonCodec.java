@@ -114,6 +114,16 @@ public final class DaemonCodec {
         map.put(Field.CLEAN, m.clean());
         map.put(Field.HEAD, m.head());
       }
+      case AgentActivity m -> {
+        map.put(Field.TYPE, Type.AGENT_ACTIVITY);
+        map.put(Field.COMMAND_ID, m.commandId());
+        map.put(Field.SESSION_ID, m.sessionId());
+        map.put(Field.STATE, m.state());
+        map.put(Field.HOOK_EVENT, m.hookEvent());
+        map.put(Field.SOURCE, m.source());
+        map.put(Field.TRANSCRIPT_PATH, m.transcriptPath());
+        map.put(Field.AT, m.at());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -220,6 +230,15 @@ public final class DaemonCodec {
       case Type.GIT_STATUS ->
           new GitStatus(
               str(map, Field.WORKSPACE_ID), boolVal(map, Field.CLEAN), str(map, Field.HEAD));
+      case Type.AGENT_ACTIVITY ->
+          new AgentActivity(
+              str(map, Field.COMMAND_ID),
+              str(map, Field.SESSION_ID),
+              str(map, Field.STATE),
+              str(map, Field.HOOK_EVENT),
+              str(map, Field.SOURCE),
+              str(map, Field.TRANSCRIPT_PATH),
+              longVal(map, Field.AT));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -260,6 +279,11 @@ public final class DaemonCodec {
   private static Integer intObj(Map<String, Object> map, String key) {
     Object value = map.get(key);
     return value instanceof Number number ? number.intValue() : null;
+  }
+
+  private static long longVal(Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    return value instanceof Number number ? number.longValue() : 0L;
   }
 
   private static boolean boolVal(Map<String, Object> map, String key) {

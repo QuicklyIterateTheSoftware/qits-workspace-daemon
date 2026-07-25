@@ -249,6 +249,27 @@ class DaemonCodecTest {
   }
 
   @Test
+  void agentActivityRoundTrips() {
+    AgentActivity sessionStart =
+        new AgentActivity(
+            "cmd-1",
+            "11111111-1111-1111-1111-111111111111",
+            DaemonProtocol.AgentState.IDLE,
+            "SessionStart",
+            "startup",
+            "projects/-workspace/session.jsonl",
+            1_700_000_000_000L);
+    AgentActivity busy =
+        new AgentActivity(
+            "cmd-1", null, DaemonProtocol.AgentState.BUSY, "UserPromptSubmit", null, null, 42L);
+    assertEquals(sessionStart, roundTrip(sessionStart));
+    assertEquals(busy, roundTrip(busy));
+    assertEquals(
+        DaemonProtocol.Type.AGENT_ACTIVITY,
+        DaemonCodec.encode(busy).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
   void serviceCorrelationIdIsPrefixed() {
     assertEquals("service:dev", DaemonProtocol.serviceCorrelationId("dev"));
   }

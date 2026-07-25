@@ -22,7 +22,7 @@ public final class DaemonProtocol {
    * wire contract changes in a way the backend must branch on; the backend records it but Part 1
    * does not gate on it.
    */
-  public static final int CAPABILITY_VERSION = 1;
+  public static final int CAPABILITY_VERSION = 2;
 
   /**
    * The fixed {@code correlationId} the daemon tags its autonomous-self-provision output ({@link
@@ -85,6 +85,7 @@ public final class DaemonProtocol {
     public static final String BOOTSTRAPPED = "bootstrapped";
     public static final String DAEMON_EVENT = "daemonEvent";
     public static final String GIT_STATUS = "gitStatus";
+    public static final String AGENT_ACTIVITY = "agentActivity";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
@@ -130,7 +131,35 @@ public final class DaemonProtocol {
     public static final String SCRIPT = "script";
     public static final String SIGNAL = "signal";
     public static final String STATE = "state";
+    public static final String COMMAND_ID = "commandId";
+    public static final String SESSION_ID = "sessionId";
+    public static final String HOOK_EVENT = "hookEvent";
+    public static final String SOURCE = "source";
+    public static final String TRANSCRIPT_PATH = "transcriptPath";
+    public static final String AT = "at";
 
     private Field() {}
+  }
+
+  /**
+   * The {@code state} values an {@link AgentActivity} frame carries. The wire uses a plain String
+   * (like {@link GitStatus}'s primitive {@code boolean}) so the framework-free protocol module
+   * stays free of any {@code domain} enum; the daemon renders these constants and the backend's
+   * {@code AgentActivityState} enum mirrors them by name.
+   */
+  public static final class AgentState {
+    /** Session established, or a turn finished and control yielded back. */
+    public static final String IDLE = "IDLE";
+
+    /** Prompt submitted — the agent is generating a response. */
+    public static final String BUSY = "BUSY";
+
+    /** Blocked on the user (permission prompt / idle input). */
+    public static final String WAITING = "WAITING";
+
+    /** Session over. */
+    public static final String ENDED = "ENDED";
+
+    private AgentState() {}
   }
 }
