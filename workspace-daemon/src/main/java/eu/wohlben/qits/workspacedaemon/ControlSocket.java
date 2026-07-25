@@ -103,6 +103,11 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.reconnect-max-backoff-ms", defaultValue = "30000")
   long maxBackoffMs;
 
+  // How long a burst of inotify events is coalesced before one marker check + at-most-one GitStatus
+  // report (mirrors the old host qits.workspace.watch.coalesce-ms).
+  @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "250")
+  long gitStatusCoalesceMs;
+
   // The provision-time bootstrap kill switch (host's qits.bootstrap.autorun-enabled, injected as
   // QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN). When false the daemon skips the chain and reports a
   // benign Bootstrapped{ok:true} so the workspace still proceeds to daemons; manual re-run stays
@@ -158,6 +163,14 @@ public class ControlSocket {
    * reconnect that re-reads config sees the current service set.
    */
   private volatile ServiceSupervisor services;
+
+  /**
+   * Watches {@code /workspace} and reports working-tree cleanliness ({@link
+   * eu.wohlben.qits.workspacedaemon.protocol.GitStatus}) — the in-daemon successor to the host's
+   * {@code WorkspaceWatchService}. Created once the checkout is provisioned; re-reports on
+   * reconnect.
+   */
+  private volatile GitStatusMonitor gitStatus;
 
   /**
    * Ensures the autonomous self-provision (clone on boot) runs at most once per daemon lifetime.
@@ -257,8 +270,26 @@ public class ControlSocket {
             // 4 will run the daemons.
             configState = ConfigReader.read();
             runBootstrapOnBoot(freshClone, provisioned);
+            startGitStatusMonitor(provisioned);
           });
     }
+  }
+
+  /**
+   * Start the working-tree watcher once the checkout exists (both a fresh clone and a reconnect
+   * into an already-provisioned container). Its {@link GitStatusMonitor#start()} emits the boot
+   * report and begins watching. A failed provision means the host is tearing the workspace down, so
+   * there is no tree to watch.
+   */
+  private void startGitStatusMonitor(boolean provisioned) {
+    if (!provisioned) {
+      return;
+    }
+    GitStatusMonitor monitor =
+        new GitStatusMonitor(
+            workspaceId, repositoryId, branch, parent, this::send, gitStatusCoalesceMs);
+    gitStatus = monitor;
+    monitor.start();
   }
 
   /**
@@ -374,6 +405,12 @@ public class ControlSocket {
     ServiceSupervisor s = services;
     if (s != null) {
       workers.execute(s::reportAll);
+    }
+    // Likewise re-report the working-tree status so a qits restart that lost its in-memory dirty
+    // cache gets the current value re-pushed (a no-op before the boot report).
+    GitStatusMonitor g = gitStatus;
+    if (g != null) {
+      workers.execute(g::reportCurrent);
     }
     LOG.infof("workspace-daemon control socket established for workspace %s", workspaceId);
   }
@@ -497,6 +534,10 @@ public class ControlSocket {
     ServiceSupervisor s = services;
     if (s != null) {
       s.close();
+    }
+    GitStatusMonitor g = gitStatus;
+    if (g != null) {
+      g.close();
     }
     workers.shutdownNow();
     WebSocket ws = socket;
