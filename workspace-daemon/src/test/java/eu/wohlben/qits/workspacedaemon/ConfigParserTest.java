@@ -202,6 +202,40 @@ class ConfigParserTest {
   }
 
   @Test
+  void readerPrefersDefaultLocationOverLegacy() throws Exception {
+    Path dir = Files.createTempDirectory("cfg");
+    Path preferred = dir.resolve(".config/qits/repository.yml");
+    Files.createDirectories(preferred.getParent());
+    Files.writeString(preferred, FULL_CONFIG);
+    Path legacy = dir.resolve(".qits-config.yml");
+    Files.writeString(legacy, "version: 1\nactions:\n  - name: legacy-only\n    execute: ls\n");
+    ConfigReader.State state = ConfigReader.read(preferred.toFile(), legacy.toFile());
+    assertNull(state.warning());
+    assertEquals(
+        "build",
+        new JsonObject(state.configJson())
+            .getJsonArray("actions")
+            .getJsonObject(0)
+            .getString("name"));
+  }
+
+  @Test
+  void readerFallsBackToLegacyLocation() throws Exception {
+    Path dir = Files.createTempDirectory("cfg");
+    Path legacy = dir.resolve(".qits-config.yml");
+    Files.writeString(legacy, FULL_CONFIG);
+    ConfigReader.State state =
+        ConfigReader.read(dir.resolve(".config/qits/repository.yml").toFile(), legacy.toFile());
+    assertNull(state.warning());
+    assertEquals(
+        "build",
+        new JsonObject(state.configJson())
+            .getJsonArray("actions")
+            .getJsonObject(0)
+            .getString("name"));
+  }
+
+  @Test
   void readerParsesAValidFile() throws Exception {
     File file = Files.createTempFile("cfg", ".yml").toFile();
     Files.writeString(file.toPath(), FULL_CONFIG);

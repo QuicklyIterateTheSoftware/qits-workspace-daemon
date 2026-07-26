@@ -5,7 +5,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 
 /**
- * Reads {@code /workspace/.qits-config.yml} from the branch's checkout and parses it into the
+ * Reads the branch's checkout's qits config — {@code /workspace/.config/qits/repository.yml},
+ * falling back to the legacy {@code /workspace/.qits-config.yml} — and parses it into the
  * wire-ready {@link State} the daemon holds and answers {@link
  * eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig} from (docs/epics/qits-workspace-daemon/
  * Part 2). "Degrade loudly, never block": an absent/blank file yields the empty config with no
@@ -15,7 +16,8 @@ import java.nio.file.Files;
  */
 public final class ConfigReader {
 
-  private static final File CONFIG_FILE = new File("/workspace/.qits-config.yml");
+  private static final File CONFIG_FILE = new File("/workspace/.config/qits/repository.yml");
+  private static final File LEGACY_CONFIG_FILE = new File("/workspace/.qits-config.yml");
 
   /**
    * The parsed config, held three ways: the framework-free {@link DaemonQitsConfig} tree the daemon
@@ -28,9 +30,16 @@ public final class ConfigReader {
 
   private ConfigReader() {}
 
-  /** Read + parse the checkout's config file (defaults to {@code /workspace/.qits-config.yml}). */
+  /**
+   * Read + parse the checkout's config file: {@code /workspace/.config/qits/repository.yml} if
+   * present, else the legacy {@code /workspace/.qits-config.yml}.
+   */
   public static State read() {
-    return read(CONFIG_FILE);
+    return read(CONFIG_FILE, LEGACY_CONFIG_FILE);
+  }
+
+  static State read(File file, File legacyFile) {
+    return read(file.isFile() ? file : legacyFile);
   }
 
   static State read(File file) {
@@ -44,7 +53,7 @@ public final class ConfigReader {
       return new State(
           DaemonQitsConfig.EMPTY,
           ConfigJson.empty(),
-          "could not read .qits-config.yml: " + e.getMessage());
+          "could not read " + file.getName() + ": " + e.getMessage());
     }
     try {
       DaemonQitsConfig config = ConfigParser.parse(content);
