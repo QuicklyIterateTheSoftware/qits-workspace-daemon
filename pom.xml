@@ -17,8 +17,10 @@
     <packaging>pom</packaging>
 
     <modules>
-        <!-- Listed first: workspace-daemon depends on it. -->
+        <!-- Dependency order: workspace-daemon depends on all three; detection depends on files. -->
         <module>workspace-daemon-protocol</module>
+        <module>workspace-daemon-files</module>
+        <module>workspace-daemon-detection</module>
         <module>workspace-daemon</module>
     </modules>
 
@@ -51,6 +53,16 @@
             <dependency>
                 <groupId>eu.wohlben</groupId>
                 <artifactId>workspace-daemon-protocol</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>workspace-daemon-files</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>workspace-daemon-detection</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

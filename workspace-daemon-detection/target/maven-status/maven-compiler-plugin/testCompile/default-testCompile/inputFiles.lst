@@ -1,0 +1,5 @@
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-detection/src/test/java/eu/wohlben/qits/workspacedaemon/detection/AngularComponentParserTest.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-detection/src/test/java/eu/wohlben/qits/workspacedaemon/detection/ComponentMapServiceTest.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-detection/src/test/java/eu/wohlben/qits/workspacedaemon/detection/DetectionServiceTest.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-detection/src/test/java/eu/wohlben/qits/workspacedaemon/detection/FakeWorkspaceFiles.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-detection/src/test/java/eu/wohlben/qits/workspacedaemon/detection/FrameworkDetectionTest.java

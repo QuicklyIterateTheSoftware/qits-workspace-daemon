@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>workspace-daemon-files</artifactId>
+
+    <!-- Read-only file browsing over the checkout this daemon owns: the `WorkspaceFiles` seam, its
+         java.nio implementation, and the path-safety policy the host used to run as
+         `docker exec find/cat/realpath`. Framework-free on purpose — no Quarkus, no CDI, no JSON
+         library. This jar is linked into a GraalVM native image, so it must contain nothing the
+         image builder has to be told about: no reflection, no dynamic proxies, no ServiceLoader.
+         That also keeps it usable from a plain unit test (and from workspace-daemon-detection)
+         without a container or an injection context. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

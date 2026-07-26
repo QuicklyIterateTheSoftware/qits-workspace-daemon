@@ -1,0 +1,10 @@
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/FileContent.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/FileListing.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/GitignoreLazyDirectoryStrategy.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/LazyDir.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/LazyDirectoryStrategy.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/LocalWorkspaceFiles.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/WorkspaceFileBrowser.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/WorkspaceFiles.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/WorkspaceFilesException.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon-files/src/main/java/eu/wohlben/qits/workspacedaemon/files/WorkspaceTreeFingerprint.java

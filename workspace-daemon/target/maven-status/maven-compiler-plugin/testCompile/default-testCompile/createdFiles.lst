@@ -1,0 +1,10 @@
+eu/wohlben/qits/workspacedaemon/ConfigParserTest.class
+eu/wohlben/qits/workspacedaemon/OriginSyncTest.class
+eu/wohlben/qits/workspacedaemon/GitStatusMonitorTest.class
+eu/wohlben/qits/workspacedaemon/CommandExecutorTest.class
+eu/wohlben/qits/workspacedaemon/HookWebhookTest.class
+eu/wohlben/qits/workspacedaemon/ServiceSupervisorTest.class
+eu/wohlben/qits/workspacedaemon/WorkspaceDescriberTest.class
+eu/wohlben/qits/workspacedaemon/BootstrapRunnerTest.class
+eu/wohlben/qits/workspacedaemon/ProvisionerTest.class
+eu/wohlben/qits/workspacedaemon/OriginSyncTest$ScriptedGit.class

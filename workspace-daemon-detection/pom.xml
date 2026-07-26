@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>workspace-daemon-detection</artifactId>
+
+    <!-- Framework detection and the Angular component map, moved off the qits host into the
+         container (docs/epics/qits-workspace-daemon/). On the host both were N small `docker exec`
+         reads per cache miss — that per-read process spawn *was* their entire cost, so the code
+         moved to where the files already are.
+
+         Deliberately framework-free: no Quarkus, no CDI, no Jackson, no reflection and no
+         ServiceLoader, so it links into the GraalVM native image with nothing to register and stays
+         a plain unit-testable library. Its only compile dependency is `workspace-daemon-files` —
+         the `WorkspaceFiles` read primitives it runs over. Result records are plain records; the
+         `workspace-daemon` module serializes them with whatever it already carries (Vert.x
+         JsonObject), the same division of labour as `workspace-daemon-protocol`. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.wohlben</groupId>
+            <artifactId>workspace-daemon-files</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

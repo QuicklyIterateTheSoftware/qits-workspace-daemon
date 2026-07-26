@@ -1,0 +1,15 @@
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/BootstrapRunner.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/CommandExecutor.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/ConfigJson.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/ConfigParser.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/ConfigReader.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/ControlSocket.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/DaemonQitsConfig.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/GitRunner.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/GitStatusMonitor.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/HookWebhook.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/Main.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/OriginSync.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/Provisioner.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/ServiceSupervisor.java
+/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/main/java/eu/wohlben/qits/workspacedaemon/WorkspaceDescriber.java
