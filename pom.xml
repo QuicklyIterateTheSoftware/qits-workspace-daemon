@@ -10,18 +10,15 @@
          qits-backend monorepo root. Trimmed to only what this module needs — the quarkus-bom
          import, the version-management entry for its workspace-daemon-protocol dependency, and the
          quarkus/compiler/surefire plugin pins. The monorepo's app-wide machinery (spotless, the
-         :8080 dev-guard, isolated-test chunking, enforcer, jandex) is intentionally omitted.
-
-         NOTE: workspace-daemon-protocol is another monorepo module that did NOT come along in this
-         extraction. This pom manages its version so the child validates, but a standalone build
-         still needs that artifact resolvable (installed in ~/.m2 or an internal repository); it
-         cannot be produced from this repo alone. -->
+         :8080 dev-guard, isolated-test chunking, enforcer, jandex) is intentionally omitted. -->
     <groupId>eu.wohlben</groupId>
     <artifactId>qits</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
+        <!-- Listed first: workspace-daemon depends on it. -->
+        <module>workspace-daemon-protocol</module>
         <module>workspace-daemon</module>
     </modules>
 
@@ -49,9 +46,8 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-            <!-- The wire-contract jar shared with the monorepo's `service` module. Not part of this
-                 repo (see the header note) — managed here only so the child's version-less
-                 dependency declaration resolves. -->
+            <!-- The wire-contract module (built from this repo's workspace-daemon-protocol/), so the
+                 child's version-less dependency on it resolves within the reactor. -->
             <dependency>
                 <groupId>eu.wohlben</groupId>
                 <artifactId>workspace-daemon-protocol</artifactId>
