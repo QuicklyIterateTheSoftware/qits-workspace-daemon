@@ -202,39 +202,42 @@ class DaemonCodecTest {
 
   @Test
   void startDaemonRoundTrips() {
-    StartDaemon start = new StartDaemon("c1", "dev", "quarkus dev", Map.of("PORT", "8080"));
+    StartService start = new StartService("c1", "dev", "quarkus dev", Map.of("PORT", "8080"));
     assertEquals(start, roundTrip(start));
     assertEquals(
-        DaemonProtocol.Type.START_DAEMON, DaemonCodec.encode(start).get(DaemonProtocol.Field.TYPE));
+        DaemonProtocol.Type.START_SERVICE,
+        DaemonCodec.encode(start).get(DaemonProtocol.Field.TYPE));
   }
 
   @Test
   void startDaemonRoundTripsWithBlankScriptAndEmptyEnv() {
-    StartDaemon start = new StartDaemon("c1", "dev", "", Map.of());
+    StartService start = new StartService("c1", "dev", "", Map.of());
     assertEquals(start, roundTrip(start));
   }
 
   @Test
   void signalDaemonRoundTrips() {
-    SignalDaemon signal = new SignalDaemon("c1", "dev", "TERM");
+    SignalService signal = new SignalService("c1", "dev", "TERM");
     assertEquals(signal, roundTrip(signal));
     assertEquals(
-        DaemonProtocol.Type.SIGNAL_DAEMON,
+        DaemonProtocol.Type.SIGNAL_SERVICE,
         DaemonCodec.encode(signal).get(DaemonProtocol.Field.TYPE));
   }
 
   @Test
   void daemonEventRoundTripsWithExitCode() {
-    DaemonEvent crashed = new DaemonEvent("ws-1", "dev", DaemonEvent.State.CRASHED, 3);
+    ServiceTransition crashed =
+        new ServiceTransition("ws-1", "dev", ServiceTransition.State.CRASHED, 3);
     assertEquals(crashed, roundTrip(crashed));
     assertEquals(
-        DaemonProtocol.Type.DAEMON_EVENT,
+        DaemonProtocol.Type.SERVICE_TRANSITION,
         DaemonCodec.encode(crashed).get(DaemonProtocol.Field.TYPE));
   }
 
   @Test
   void daemonEventRoundTripsWithNullExitCode() {
-    DaemonEvent ready = new DaemonEvent("ws-1", "dev", DaemonEvent.State.READY, null);
+    ServiceTransition ready =
+        new ServiceTransition("ws-1", "dev", ServiceTransition.State.READY, null);
     assertEquals(ready, roundTrip(ready));
   }
 

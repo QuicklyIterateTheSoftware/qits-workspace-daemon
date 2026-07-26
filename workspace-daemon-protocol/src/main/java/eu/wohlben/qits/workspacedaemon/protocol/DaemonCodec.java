@@ -101,8 +101,8 @@ public final class DaemonCodec {
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.OK, m.ok());
       }
-      case DaemonEvent m -> {
-        map.put(Field.TYPE, Type.DAEMON_EVENT);
+      case ServiceTransition m -> {
+        map.put(Field.TYPE, Type.SERVICE_TRANSITION);
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.ID, m.id());
         map.put(Field.STATE, m.state());
@@ -145,15 +145,15 @@ public final class DaemonCodec {
         map.put(Field.CORRELATION_ID, m.correlationId());
         map.put(Field.NAME, m.name());
       }
-      case StartDaemon m -> {
-        map.put(Field.TYPE, Type.START_DAEMON);
+      case StartService m -> {
+        map.put(Field.TYPE, Type.START_SERVICE);
         map.put(Field.CORRELATION_ID, m.correlationId());
         map.put(Field.ID, m.id());
         map.put(Field.SCRIPT, m.script());
         map.put(Field.ENV, m.env() == null ? Map.of() : new LinkedHashMap<>(m.env()));
       }
-      case SignalDaemon m -> {
-        map.put(Field.TYPE, Type.SIGNAL_DAEMON);
+      case SignalService m -> {
+        map.put(Field.TYPE, Type.SIGNAL_SERVICE);
         map.put(Field.CORRELATION_ID, m.correlationId());
         map.put(Field.ID, m.id());
         map.put(Field.SIGNAL, m.signal());
@@ -221,8 +221,8 @@ public final class DaemonCodec {
               intVal(map, Field.EXIT_CODE));
       case Type.BOOTSTRAPPED ->
           new Bootstrapped(str(map, Field.WORKSPACE_ID), boolVal(map, Field.OK));
-      case Type.DAEMON_EVENT ->
-          new DaemonEvent(
+      case Type.SERVICE_TRANSITION ->
+          new ServiceTransition(
               str(map, Field.WORKSPACE_ID),
               str(map, Field.ID),
               str(map, Field.STATE),
@@ -250,14 +250,14 @@ public final class DaemonCodec {
       case Type.DESCRIBE_CONFIG -> new DescribeConfig(str(map, Field.CORRELATION_ID));
       case Type.RUN_BOOTSTRAP ->
           new RunBootstrap(str(map, Field.CORRELATION_ID), str(map, Field.NAME));
-      case Type.START_DAEMON ->
-          new StartDaemon(
+      case Type.START_SERVICE ->
+          new StartService(
               str(map, Field.CORRELATION_ID),
               str(map, Field.ID),
               str(map, Field.SCRIPT),
               strMap(map, Field.ENV));
-      case Type.SIGNAL_DAEMON ->
-          new SignalDaemon(
+      case Type.SIGNAL_SERVICE ->
+          new SignalService(
               str(map, Field.CORRELATION_ID), str(map, Field.ID), str(map, Field.SIGNAL));
       case Type.PULL_BRANCH ->
           new PullBranch(str(map, Field.CORRELATION_ID), str(map, Field.BRANCH));

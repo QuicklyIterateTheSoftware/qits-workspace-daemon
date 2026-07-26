@@ -18,7 +18,7 @@ public sealed interface DaemonMessage
         BootstrapStep,
         BootstrapOutcome,
         Bootstrapped,
-        DaemonEvent,
+        ServiceTransition,
         GitStatus,
         AgentActivity,
         Ack,
@@ -26,6 +26,6 @@ public sealed interface DaemonMessage
         Describe,
         DescribeConfig,
         RunBootstrap,
-        StartDaemon,
-        SignalDaemon,
+        StartService,
+        SignalService,
         PullBranch {}

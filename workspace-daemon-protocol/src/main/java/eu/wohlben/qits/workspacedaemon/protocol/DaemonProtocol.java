@@ -13,7 +13,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  * <p>Part 1 (docs/epics/qits-workspace-daemon/) defines only what proves the transport: the {@link
  * Hello}/{@link Ack} handshake, {@link Heartbeat}, {@link DaemonLog}, the {@link RunCommand}→{@link
  * CommandChunk}*→{@link CommandExit} round-trip, and the {@link Describe}→{@link WorkspaceInfo}
- * stub. Later parts extend it (ReadFile, StartDaemon, …).
+ * stub. Later parts extend it (ReadFile, StartService, …).
  */
 public final class DaemonProtocol {
 
@@ -83,7 +83,9 @@ public final class DaemonProtocol {
     public static final String BOOTSTRAP_STEP = "bootstrapStep";
     public static final String BOOTSTRAP_OUTCOME = "bootstrapOutcome";
     public static final String BOOTSTRAPPED = "bootstrapped";
-    public static final String DAEMON_EVENT = "daemonEvent";
+    // The workspace-service messages keep their pre-rename wire tags ("daemon*") so stale daemon
+    // images keep speaking to a newer qits; retag them with the next CAPABILITY_VERSION bump.
+    public static final String SERVICE_TRANSITION = "daemonEvent";
     public static final String GIT_STATUS = "gitStatus";
     public static final String AGENT_ACTIVITY = "agentActivity";
     // qits -> workspace-daemon
@@ -92,8 +94,9 @@ public final class DaemonProtocol {
     public static final String DESCRIBE = "describe";
     public static final String DESCRIBE_CONFIG = "describeConfig";
     public static final String RUN_BOOTSTRAP = "runBootstrap";
-    public static final String START_DAEMON = "startDaemon";
-    public static final String SIGNAL_DAEMON = "signalDaemon";
+    // Pre-rename wire tags kept for stale daemon images — see SERVICE_TRANSITION above.
+    public static final String START_SERVICE = "startDaemon";
+    public static final String SIGNAL_SERVICE = "signalDaemon";
     public static final String PULL_BRANCH = "pullBranch";
 
     private Type() {}

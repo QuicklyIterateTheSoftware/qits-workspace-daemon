@@ -13,7 +13,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  * current state of every running service (replacing the old tmux adoption probe).
  * docs/epics/qits-workspace-daemon/ Part 4.
  */
-public record DaemonEvent(String workspaceId, String id, String state, Integer exitCode)
+public record ServiceTransition(String workspaceId, String id, String state, Integer exitCode)
     implements DaemonMessage {
 
   /** The {@link #state()} values (a subset of the host {@code ServiceStatus}, minus DEGRADED). */

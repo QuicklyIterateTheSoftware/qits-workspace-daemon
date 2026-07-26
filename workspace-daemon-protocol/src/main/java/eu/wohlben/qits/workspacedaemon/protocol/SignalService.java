@@ -6,7 +6,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  * signal} is the bare name ({@code "TERM"}, {@code "KILL"}, {@code "HUP"}, …) the daemon prefixes
  * with {@code SIG} for {@code pkill}. The daemon marks the service stop-requested (so its restart
  * policy does not resurrect it), signals the whole session group, and reports the resulting {@link
- * DaemonEvent} transition. docs/epics/qits-workspace-daemon/ Part 4.
+ * ServiceTransition} transition. docs/epics/qits-workspace-daemon/ Part 4.
  */
-public record SignalDaemon(String correlationId, String id, String signal)
+public record SignalService(String correlationId, String id, String signal)
     implements DaemonMessage {}
