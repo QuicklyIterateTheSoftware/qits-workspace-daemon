@@ -2,10 +2,10 @@ package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
-import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
+import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import eu.wohlben.qits.workspacedaemon.protocol.Stream;
 import java.io.File;
 import java.io.IOException;
@@ -34,8 +34,8 @@ import org.jboss.logging.Logger;
  *
  * <p><b>The container owns the lifecycle; the host projects it.</b> This supervisor makes every
  * spawn/restart/backoff/policy/group-kill decision locally and reports only the <em>outcome</em> as
- * a {@link DaemonEvent} — so a service keeps crash-restarting while qits is down or the socket is
- * bouncing, and a qits restart re-adopts running services from the reconnect {@linkplain
+ * a {@link ServiceTransition} — so a service keeps crash-restarting while qits is down or the
+ * socket is bouncing, and a qits restart re-adopts running services from the reconnect {@linkplain
  * #reportAll() re-report} rather than a host probe. The host state machine, backoff scheduling, and
  * liveness poll it used to run are retired in daemon-backed mode.
  *
@@ -99,7 +99,7 @@ public final class ServiceSupervisor {
     private final Object lock = new Object();
     private volatile Process process;
     private volatile long sid;
-    private volatile String state = DaemonEvent.State.STARTING;
+    private volatile String state = ServiceTransition.State.STARTING;
     private int restartCount;
     private volatile boolean stopRequested;
     private ScheduledFuture<?> pending;
@@ -123,7 +123,7 @@ public final class ServiceSupervisor {
   }
 
   /**
-   * Manual/subsequent start ({@code StartDaemon}). Resolves the definition from the in-container
+   * Manual/subsequent start ({@code StartService}). Resolves the definition from the in-container
    * config by name, overlaying a non-blank {@code scriptOverride}/{@code envOverride} (a "try this
    * edit" start of a service not yet in the committed config). An already-running service just
    * re-reports its current state.
@@ -131,7 +131,7 @@ public final class ServiceSupervisor {
   public void start(String name, String scriptOverride, Map<String, String> envOverride) {
     Supervised existing = running.get(name);
     if (existing != null) {
-      emit.accept(new DaemonEvent(workspaceId, name, existing.state, null));
+      emit.accept(new ServiceTransition(workspaceId, name, existing.state, null));
       return;
     }
     ServiceDecl decl = resolve(name, scriptOverride, envOverride);
@@ -146,7 +146,7 @@ public final class ServiceSupervisor {
   }
 
   /**
-   * Deliver a signal to a running service ({@code SignalDaemon}) — the stop request. Marks it
+   * Deliver a signal to a running service ({@code SignalService}) — the stop request. Marks it
    * stop-requested (so the restart policy does not resurrect it), signals the whole session group,
    * and schedules a force-kill after the stop grace if it hasn't exited.
    */
@@ -181,7 +181,7 @@ public final class ServiceSupervisor {
    */
   public void reportAll() {
     for (Supervised s : running.values()) {
-      emit.accept(new DaemonEvent(workspaceId, s.decl.name(), s.state, null));
+      emit.accept(new ServiceTransition(workspaceId, s.decl.name(), s.state, null));
     }
   }
 
@@ -257,7 +257,7 @@ public final class ServiceSupervisor {
     String name = decl.name();
     if (decl.start() == null || decl.start().isBlank()) {
       emit.accept(new DaemonLog("WARN", "service '" + name + "' has no start command — ignored."));
-      settle(s, DaemonEvent.State.CRASHED, null);
+      settle(s, ServiceTransition.State.CRASHED, null);
       return;
     }
     // setsid → the service leads its own session; process.pid() is the session id, so pkill -s
@@ -273,15 +273,15 @@ public final class ServiceSupervisor {
     } catch (IOException e) {
       emit.accept(
           new DaemonLog("ERROR", "service '" + name + "' failed to start: " + e.getMessage()));
-      settle(s, DaemonEvent.State.CRASHED, null);
+      settle(s, ServiceTransition.State.CRASHED, null);
       return;
     }
     synchronized (s.lock) {
       s.process = process;
       s.sid = process.pid();
-      s.state = DaemonEvent.State.STARTING;
+      s.state = ServiceTransition.State.STARTING;
     }
-    emit.accept(new DaemonEvent(workspaceId, name, DaemonEvent.State.STARTING, null));
+    emit.accept(new ServiceTransition(workspaceId, name, ServiceTransition.State.STARTING, null));
 
     String corr = DaemonProtocol.serviceCorrelationId(name);
     Pattern ready = compileReady(decl.readyPattern(), name);
@@ -316,13 +316,14 @@ public final class ServiceSupervisor {
 
   private void markReady(Supervised s) {
     synchronized (s.lock) {
-      if (!DaemonEvent.State.STARTING.equals(s.state)) {
+      if (!ServiceTransition.State.STARTING.equals(s.state)) {
         return; // readiness only matters on the way up
       }
       cancelPending(s);
-      s.state = DaemonEvent.State.READY;
+      s.state = ServiceTransition.State.READY;
     }
-    emit.accept(new DaemonEvent(workspaceId, s.decl.name(), DaemonEvent.State.READY, null));
+    emit.accept(
+        new ServiceTransition(workspaceId, s.decl.name(), ServiceTransition.State.READY, null));
   }
 
   private void handleExit(Supervised s, int exitCode) {
@@ -330,9 +331,10 @@ public final class ServiceSupervisor {
     synchronized (s.lock) {
       cancelPending(s);
       if (s.stopRequested) {
-        s.state = DaemonEvent.State.STOPPED;
+        s.state = ServiceTransition.State.STOPPED;
         running.remove(name, s);
-        emit.accept(new DaemonEvent(workspaceId, name, DaemonEvent.State.STOPPED, exitCode));
+        emit.accept(
+            new ServiceTransition(workspaceId, name, ServiceTransition.State.STOPPED, exitCode));
         return;
       }
       String policy = normalizePolicy(s.decl.restartPolicy());
@@ -342,8 +344,9 @@ public final class ServiceSupervisor {
       if (wantRestart && s.restartCount < maxRestarts) {
         long backoff =
             Math.min(backoffInitialMs * (1L << Math.min(s.restartCount, 20)), backoffMaxMs);
-        s.state = DaemonEvent.State.RESTARTING;
-        emit.accept(new DaemonEvent(workspaceId, name, DaemonEvent.State.RESTARTING, exitCode));
+        s.state = ServiceTransition.State.RESTARTING;
+        emit.accept(
+            new ServiceTransition(workspaceId, name, ServiceTransition.State.RESTARTING, exitCode));
         s.pending =
             scheduler.schedule(
                 () -> {
@@ -362,9 +365,9 @@ public final class ServiceSupervisor {
       // No restart (policy NEVER, clean exit under ON_FAILURE, or restarts exhausted): a clean exit
       // is STOPPED, anything else is CRASHED.
       boolean crashed = wantRestart || exitCode != 0;
-      s.state = crashed ? DaemonEvent.State.CRASHED : DaemonEvent.State.STOPPED;
+      s.state = crashed ? ServiceTransition.State.CRASHED : ServiceTransition.State.STOPPED;
       running.remove(name, s);
-      emit.accept(new DaemonEvent(workspaceId, name, s.state, exitCode));
+      emit.accept(new ServiceTransition(workspaceId, name, s.state, exitCode));
     }
   }
 
@@ -375,7 +378,7 @@ public final class ServiceSupervisor {
       s.state = state;
       running.remove(s.decl.name(), s);
     }
-    emit.accept(new DaemonEvent(workspaceId, s.decl.name(), state, exitCode));
+    emit.accept(new ServiceTransition(workspaceId, s.decl.name(), state, exitCode));
   }
 
   private void cancelPending(Supervised s) {

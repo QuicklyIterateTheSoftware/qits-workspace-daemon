@@ -16,8 +16,8 @@ import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
-import eu.wohlben.qits.workspacedaemon.protocol.SignalDaemon;
-import eu.wohlben.qits.workspacedaemon.protocol.StartDaemon;
+import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
+import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.WebSocket;
@@ -165,7 +165,7 @@ public class ControlSocket {
 
   // The provision-time bootstrap kill switch (host's qits.bootstrap.autorun-enabled, injected as
   // QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN). When false the daemon skips the chain and reports a
-  // benign Bootstrapped{ok:true} so the workspace still proceeds to daemons; manual re-run stays
+  // benign Bootstrapped{ok:true} so the workspace still proceeds to services; manual re-run stays
   // available (docs/epics/qits-workspace-daemon/ Part 3).
   @ConfigProperty(name = "qits.workspace-daemon.bootstrap-autorun", defaultValue = "true")
   boolean bootstrapAutorun;
@@ -176,7 +176,7 @@ public class ControlSocket {
 
   // The service auto-start kill switch (host's qits.services.autostart-enabled, injected as
   // QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART). When false the daemon supervises no auto-start
-  // services on boot; manual StartDaemon still works (docs/epics/qits-workspace-daemon/ Part 4).
+  // services on boot; manual StartService still works (docs/epics/qits-workspace-daemon/ Part 4).
   @ConfigProperty(name = "qits.workspace-daemon.services-autostart", defaultValue = "true")
   boolean servicesAutostart;
 
@@ -348,7 +348,7 @@ public class ControlSocket {
             // Clone → config-read: the next step of the daemon's own startup sequence. Read the
             // checkout's config even if the clone failed (absent file ⇒ empty), so a DescribeConfig
             // always has an answer. Part 3 runs the bootstrap chain from this same held state; Part
-            // 4 will run the daemons.
+            // 4 will run the services.
             configState = ConfigReader.read();
             runBootstrapOnBoot(freshClone, provisioned);
             startGitStatusMonitor(provisioned);
@@ -400,12 +400,12 @@ public class ControlSocket {
 
   /**
    * The bootstrap phase of the boot sequence (clone → config → <b>bootstrap</b> → [Part 4:
-   * daemons]). A failed provision means the host is tearing the workspace down (it acts on {@link
+   * services]). A failed provision means the host is tearing the workspace down (it acts on {@link
    * ProvisionFailed}), so there's no bootstrap phase. A reconnect into an already-provisioned
    * container ({@code !freshClone}) does not re-run the chain (bootstrap runs on fresh provision
    * only) — but the host doesn't await a bootstrap on a restart either, so nothing is emitted. On a
    * fresh clone the daemon runs the chain autonomously (or, with the autorun kill switch off, emits
-   * a benign terminal so the host's await still completes and daemons still start).
+   * a benign terminal so the host's await still completes and services still start).
    */
   private void runBootstrapOnBoot(boolean freshClone, boolean provisioned) {
     if (!provisioned) {
@@ -435,7 +435,7 @@ public class ControlSocket {
     }
     // Services are the tail of the startup sequence — started only after a successful bootstrap (a
     // dev server on an unbootstrapped checkout would only crash-loop). A failed chain withholds
-    // them, mirroring the host's ReadyForDaemons gate.
+    // them, mirroring the host's ReadyForServices gate.
     if (ok) {
       startServicesOnBoot();
     }
@@ -580,13 +580,13 @@ public class ControlSocket {
                       WORKSPACE_DIR,
                       bootstrapTimeoutMs,
                       this::send));
-      case StartDaemon request -> {
+      case StartService request -> {
         ServiceSupervisor s = services;
         if (s != null) {
           workers.execute(() -> s.start(request.id(), request.script(), request.env()));
         }
       }
-      case SignalDaemon request -> {
+      case SignalService request -> {
         ServiceSupervisor s = services;
         if (s != null) {
           workers.execute(() -> s.signal(request.id(), request.signal()));

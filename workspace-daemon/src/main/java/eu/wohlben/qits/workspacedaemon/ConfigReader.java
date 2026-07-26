@@ -21,7 +21,7 @@ public final class ConfigReader {
 
   /**
    * The parsed config, held three ways: the framework-free {@link DaemonQitsConfig} tree the daemon
-   * runs bootstrap/daemons from in-container (parts 3/4), the same tree as {@code
+   * runs bootstrap/services from in-container (parts 3/4), the same tree as {@code
    * QitsConfig}-shaped JSON for {@link eu.wohlben.qits.workspacedaemon.protocol.ConfigView}
    * replies, and a non-null {@code warning} when the read degraded. A degraded read yields {@link
    * DaemonQitsConfig#EMPTY} + empty JSON, so an empty chain and an empty view stay consistent.

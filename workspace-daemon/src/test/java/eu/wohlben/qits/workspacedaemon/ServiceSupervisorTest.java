@@ -6,8 +6,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
-import eu.wohlben.qits.workspacedaemon.protocol.DaemonEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
@@ -77,10 +77,10 @@ class ServiceSupervisorTest {
         List.of());
   }
 
-  private List<DaemonEvent> statesFor(String id) {
+  private List<ServiceTransition> statesFor(String id) {
     return events.stream()
-        .filter(m -> m instanceof DaemonEvent de && id.equals(de.id()))
-        .map(m -> (DaemonEvent) m)
+        .filter(m -> m instanceof ServiceTransition de && id.equals(de.id()))
+        .map(m -> (ServiceTransition) m)
         .collect(Collectors.toList());
   }
 
@@ -125,16 +125,16 @@ class ServiceSupervisorTest {
     decls = List.of(svc("dev", "echo listening; sleep 30", "listening", "NEVER", 0));
     supervisor().startAutoStart();
 
-    awaitState("dev", DaemonEvent.State.READY, 8000);
-    List<DaemonEvent> states = statesFor("dev");
-    assertEquals(DaemonEvent.State.STARTING, states.get(0).state());
+    awaitState("dev", ServiceTransition.State.READY, 8000);
+    List<ServiceTransition> states = statesFor("dev");
+    assertEquals(ServiceTransition.State.STARTING, states.get(0).state());
     assertTrue(
         events.stream()
             .anyMatch(m -> m instanceof CommandChunk c && "service:dev".equals(c.correlationId())),
         "expected service:dev output chunks");
 
     supervisor().signal("dev", "TERM");
-    awaitState("dev", DaemonEvent.State.STOPPED, 8000);
+    awaitState("dev", ServiceTransition.State.STOPPED, 8000);
   }
 
   @Test
@@ -142,10 +142,10 @@ class ServiceSupervisorTest {
     decls = List.of(svc("dev", "sleep 30", null, "NEVER", 0));
     supervisor().startAutoStart();
 
-    awaitState("dev", DaemonEvent.State.READY, 8000);
+    awaitState("dev", ServiceTransition.State.READY, 8000);
 
     supervisor().signal("dev", "TERM");
-    awaitState("dev", DaemonEvent.State.STOPPED, 8000);
+    awaitState("dev", ServiceTransition.State.STOPPED, 8000);
   }
 
   @Test
@@ -153,10 +153,10 @@ class ServiceSupervisorTest {
     decls = List.of(svc("boom", "exit 3", null, "ON_FAILURE", 2));
     supervisor().startAutoStart();
 
-    awaitState("boom", DaemonEvent.State.CRASHED, 15000);
+    awaitState("boom", ServiceTransition.State.CRASHED, 15000);
     long restarting =
         statesFor("boom").stream()
-            .filter(e -> DaemonEvent.State.RESTARTING.equals(e.state()))
+            .filter(e -> ServiceTransition.State.RESTARTING.equals(e.state()))
             .count();
     assertEquals(2, restarting, "expected exactly maxRestarts RESTARTING events");
   }
@@ -166,9 +166,10 @@ class ServiceSupervisorTest {
     decls = List.of(svc("once", "true", null, "NEVER", 0));
     supervisor().startAutoStart();
 
-    awaitState("once", DaemonEvent.State.STOPPED, 8000);
+    awaitState("once", ServiceTransition.State.STOPPED, 8000);
     assertTrue(
-        statesFor("once").stream().noneMatch(e -> DaemonEvent.State.CRASHED.equals(e.state())),
+        statesFor("once").stream()
+            .noneMatch(e -> ServiceTransition.State.CRASHED.equals(e.state())),
         "a clean exit must not be reported CRASHED");
   }
 
@@ -179,7 +180,7 @@ class ServiceSupervisorTest {
     decls = List.of(svc("forky", "sleep 4242 & sleep 4242", null, "NEVER", 0));
     supervisor().startAutoStart();
 
-    awaitState("forky", DaemonEvent.State.STARTING, 8000);
+    awaitState("forky", ServiceTransition.State.STARTING, 8000);
     awaitCondition(() -> pgrepCount("sleep 4242") >= 2, 8000, () -> "the forked sleeps to appear");
 
     supervisor().signal("forky", "TERM");
@@ -193,7 +194,7 @@ class ServiceSupervisorTest {
   void reportAllReReportsRunningState() {
     decls = List.of(svc("dev", "sleep 30", "listening", "NEVER", 0));
     supervisor().startAutoStart();
-    awaitState("dev", DaemonEvent.State.STARTING, 8000);
+    awaitState("dev", ServiceTransition.State.STARTING, 8000);
 
     int before = statesFor("dev").size();
     supervisor().reportAll();

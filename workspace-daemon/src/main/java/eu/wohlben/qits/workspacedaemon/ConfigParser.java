@@ -29,7 +29,7 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  * objectMapper.readValue(json, QitsConfig.class)}: an unknown value normalizes to a string that no
  * host enum matches, so deserialization fails there and the workspace surfaces a config warning —
  * the same "invalid file ⇒ warning, never block" end state as a host-side structural error here.
- * The daemon holds this parsed tree for parts 3/4 (bootstrap/daemons run from it).
+ * The daemon holds this parsed tree for parts 3/4 (bootstrap/services run from it).
  */
 public final class ConfigParser {
 
