@@ -239,6 +239,135 @@ final class OriginSync {
     return PullOutcome.REFUSED;
   }
 
+  /**
+   * The outcome of one host-requested parent integration. {@code output} is git's own text, handed
+   * back so the caller can show it exactly as the host used to show the {@code docker exec} output;
+   * {@code failure} is set (and {@code ok} false) when the operation was refused, and carries the
+   * reason the API turns into a 400.
+   */
+  record ParentOpResult(boolean ok, String output, String failure) {
+    static ParentOpResult done(String output) {
+      return new ParentOpResult(true, output, null);
+    }
+
+    static ParentOpResult refused(String failure) {
+      return new ParentOpResult(false, null, failure);
+    }
+  }
+
+  /**
+   * Fast-forward this workspace's branch onto {@code parentBranch} and push the result — the
+   * daemon-side half of what used to be the host's {@code POST /{workspaceId}/fast-forward}, back
+   * when qits reached in with {@code docker exec git}.
+   *
+   * <p>Same three steps, same order, same meaning as the host's version: fetch, reconcile our own
+   * branch with origin first (it may have advanced out-of-band — e.g. a host-side integration into
+   * it), then fast-forward onto the parent. {@code --ff-only} is what makes this safe: it refuses a
+   * diverged branch instead of inventing a merge commit, which is exactly the 400 the UI expects.
+   */
+  ParentOpResult fastForwardOntoParent(String parentBranch) {
+    return onSyncThread(
+        () -> {
+          String rejected = rejectBranchArgument(parentBranch);
+          if (rejected != null) {
+            return ParentOpResult.refused(rejected);
+          }
+          if (!git.run("git", "fetch", "origin").ok()) {
+            return ParentOpResult.refused("Could not fetch origin");
+          }
+          GitRunner.Result own = git.run("git", "merge", "--ff-only", "origin/" + branch);
+          if (!own.ok()) {
+            return ParentOpResult.refused(oneLine(own.output()));
+          }
+          GitRunner.Result onto = git.run("git", "merge", "--ff-only", "origin/" + parentBranch);
+          if (!onto.ok()) {
+            return ParentOpResult.refused(oneLine(onto.output()));
+          }
+          GitRunner.Result push = git.run("git", "push", "origin", branch);
+          if (!push.ok()) {
+            return ParentOpResult.refused(oneLine(push.output()));
+          }
+          return ParentOpResult.done(onto.output());
+        });
+  }
+
+  /**
+   * Merge {@code parentBranch} into this workspace's branch, creating a merge commit, and push —
+   * the daemon-side half of the host's former {@code POST /{workspaceId}/update-from-parent}. Works
+   * where {@link #fastForwardOntoParent} cannot, i.e. when the branch has its own commits.
+   *
+   * <p>On conflict the merge is <b>aborted</b>, so the checkout is left exactly as it was and the
+   * caller gets a 400. That abort is the whole reason this is worth doing here rather than leaving
+   * a half-merged tree behind: the workspace stays usable either way.
+   */
+  ParentOpResult mergeParentIn(String parentBranch) {
+    return onSyncThread(
+        () -> {
+          String rejected = rejectBranchArgument(parentBranch);
+          if (rejected != null) {
+            return ParentOpResult.refused(rejected);
+          }
+          if (!git.run("git", "fetch", "origin").ok()) {
+            return ParentOpResult.refused("Could not fetch origin");
+          }
+          GitRunner.Result own = git.run("git", "merge", "--ff-only", "origin/" + branch);
+          if (!own.ok()) {
+            return ParentOpResult.refused(oneLine(own.output()));
+          }
+          GitRunner.Result merge =
+              git.run("git", "merge", "--no-edit", "origin/" + parentBranch);
+          if (!merge.ok()) {
+            git.run("git", "merge", "--abort");
+            return ParentOpResult.refused(
+                "Cannot merge '" + parentBranch + "' without conflicts");
+          }
+          GitRunner.Result push = git.run("git", "push", "origin", branch);
+          if (!push.ok()) {
+            return ParentOpResult.refused(oneLine(push.output()));
+          }
+          return ParentOpResult.done(merge.output());
+        });
+  }
+
+  /**
+   * A branch name that came in over HTTP is never handed straight to git: blank is meaningless and
+   * a leading {@code -} would be read as an option. The host validated this too — it is repeated
+   * rather than trusted, because this listener is reachable from the network and the host is no
+   * longer the only caller.
+   */
+  private static String rejectBranchArgument(String candidate) {
+    if (candidate == null || candidate.isBlank()) {
+      return "No parent branch given";
+    }
+    if (candidate.startsWith("-")) {
+      return "Invalid parent branch";
+    }
+    return null;
+  }
+
+  /**
+   * Run {@code work} on the sync thread and wait for it, so a host-requested integration can never
+   * interleave with an auto-push or an incoming pull against the same index — the invariant this
+   * class exists to hold. Unlike {@link #pull}, the caller is an HTTP request that must answer with
+   * the result, so this one blocks (on the API's worker pool, never the event loop).
+   */
+  private ParentOpResult onSyncThread(java.util.concurrent.Callable<ParentOpResult> work) {
+    if (closed) {
+      return ParentOpResult.refused("Daemon is shutting down");
+    }
+    try {
+      return scheduler.submit(work).get();
+    } catch (java.util.concurrent.RejectedExecutionException shuttingDown) {
+      return ParentOpResult.refused("Daemon is shutting down");
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return ParentOpResult.refused("Interrupted");
+    } catch (java.util.concurrent.ExecutionException e) {
+      LOG.debugf(e, "parent integration failed for %s", workspaceId);
+      return ParentOpResult.refused("Integration failed");
+    }
+  }
+
   private static Rejection classify(String output) {
     String o = output == null ? "" : output.toLowerCase(Locale.ROOT);
     if (o.contains("fetch first")

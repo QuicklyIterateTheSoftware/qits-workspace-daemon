@@ -182,4 +182,90 @@ class OriginSyncTest {
     assertEquals(1, git.count("fetch"), "a non-ff reject reconciles via fetch, not a bare retry");
     assertFalse(git.calls.isEmpty());
   }
+
+  // --- Parent integration: the two routes that moved off the host ------------------------------
+  //
+  // These replaced `docker exec git fetch/merge --ff-only/merge --no-edit/push` in
+  // WorkspaceService. The cases below are the ones the host's REST suite used to cover
+  // (WorkspaceControllerTest#testFastForward*/testUpdateFromParent*), re-asserted here against the
+  // git that now runs in this process.
+
+  @Test
+  void fastForwardOntoParentReconcilesOwnBranchThenParentThenPushes() {
+    ScriptedGit git = new ScriptedGit();
+    OriginSync.ParentOpResult result = sync(git, true).fastForwardOntoParent("main");
+
+    assertTrue(result.ok(), result.failure());
+    assertEquals(
+        List.of(
+            List.of("git", "fetch", "origin"),
+            List.of("git", "merge", "--ff-only", "origin/feature"),
+            List.of("git", "merge", "--ff-only", "origin/main"),
+            List.of("git", "push", "origin", "feature")),
+        git.calls,
+        "own branch is reconciled with origin before the parent is fast-forwarded onto");
+  }
+
+  @Test
+  void fastForwardRefusesADivergedBranchWithoutPushing() {
+    // --ff-only failing against the parent is exactly the "diverged" case: a 400, not a 500, and
+    // nothing is pushed.
+    ScriptedGit git =
+        new ScriptedGit()
+            .on("merge", new GitRunner.Result(0, ""), new GitRunner.Result(1, "not possible to fast-forward"));
+
+    OriginSync.ParentOpResult result = sync(git, true).fastForwardOntoParent("main");
+
+    assertFalse(result.ok());
+    assertTrue(result.failure().contains("fast-forward"), result.failure());
+    assertEquals(0, git.count("push"));
+  }
+
+  @Test
+  void mergeParentInCreatesAMergeCommitAndPushes() {
+    ScriptedGit git = new ScriptedGit();
+    OriginSync.ParentOpResult result = sync(git, true).mergeParentIn("main");
+
+    assertTrue(result.ok(), result.failure());
+    assertEquals(
+        List.of(
+            List.of("git", "fetch", "origin"),
+            List.of("git", "merge", "--ff-only", "origin/feature"),
+            List.of("git", "merge", "--no-edit", "origin/main"),
+            List.of("git", "push", "origin", "feature")),
+        git.calls);
+  }
+
+  @Test
+  void mergeParentInAbortsOnConflictSoTheWorkspaceStaysUsable() {
+    // The reason this operation is worth running here rather than leaving a half-merged tree: the
+    // conflicting merge is aborted, so the checkout is exactly as it was and the caller gets a 400.
+    ScriptedGit git =
+        new ScriptedGit()
+            .on(
+                "merge",
+                new GitRunner.Result(0, ""),
+                new GitRunner.Result(1, "CONFLICT (content): Merge conflict in a.txt"),
+                new GitRunner.Result(0, ""));
+
+    OriginSync.ParentOpResult result = sync(git, true).mergeParentIn("main");
+
+    assertFalse(result.ok());
+    assertTrue(result.failure().contains("without conflicts"), result.failure());
+    assertTrue(
+        git.calls.contains(List.of("git", "merge", "--abort")), "the conflicting merge is aborted");
+    assertEquals(0, git.count("push"), "nothing is pushed when the merge did not land");
+  }
+
+  @Test
+  void parentBranchArgumentIsValidatedBeforeItReachesGit() {
+    // Reachable from the docker network now, so a flag-shaped or empty branch is refused here
+    // rather than handed to git as an option.
+    for (String bad : new String[] {null, "", "  ", "--upload-pack=touch /tmp/pwned"}) {
+      ScriptedGit git = new ScriptedGit();
+      OriginSync.ParentOpResult result = sync(git, true).fastForwardOntoParent(bad);
+      assertFalse(result.ok(), "refused: " + bad);
+      assertEquals(0, git.calls.size(), "git is never invoked for: " + bad);
+    }
+  }
 }

@@ -136,6 +136,16 @@ final class WorkspaceJson {
     return new JsonObject().put("message", message);
   }
 
+  /**
+   * The body the two parent-integration routes answer with: {@code {"output": …}}, git's own text
+   * from the merge. The field name matches the host DTO these replaced ({@code
+   * FastForwardWorkspaceRequest.Response.output} / {@code UpdateFromParentRequest.Response.output}),
+   * so the frontend contract does not move with the endpoint — the same rule the read API followed.
+   */
+  static JsonObject output(String output) {
+    return new JsonObject().put("output", output == null ? "" : output);
+  }
+
   private static void putIfPresent(JsonObject json, String key, Object value) {
     if (value != null) {
       json.put(key, value);

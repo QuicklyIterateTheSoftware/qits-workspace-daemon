@@ -258,6 +258,16 @@ public class ControlSocket {
   private static final long GIT_SYNC_TIMEOUT_SECONDS = 300;
 
   /**
+   * The live sync for this workspace, or null before the checkout is provisioned. Exposed for
+   * {@link WorkspaceApi}'s parent-integration routes, which need the same serialized git access the
+   * auto-pusher uses — a fast-forward that raced a push would be exactly the interleaving {@link
+   * OriginSync} exists to prevent. Null means "not ready yet", which the API answers as 503.
+   */
+  OriginSync originSync() {
+    return originSync;
+  }
+
+  /**
    * Ensures the autonomous self-provision (clone on boot) runs at most once per daemon lifetime.
    */
   private final java.util.concurrent.atomic.AtomicBoolean provisionStarted =

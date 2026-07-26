@@ -108,9 +108,26 @@ public class WorkspaceApi {
   static final String DETECTION_PATH = "/detection";
   static final String COMPONENT_MAP_PATH = "/component-map";
 
+  /**
+   * The two write endpoints, and the only ones: integrating the parent branch into this workspace.
+   * They came from the host, where they were {@code POST
+   * /repositories/{repoId}/workspaces/{workspaceId}/{fast-forward,update-from-parent}} driving
+   * {@code docker exec git} into this container. Here the checkout is a local path and git runs in
+   * this process, serialized behind {@link OriginSync}'s auto-push.
+   */
+  static final String FAST_FORWARD_PATH = "/fast-forward";
+
+  static final String UPDATE_FROM_PARENT_PATH = "/update-from-parent";
+
   private static final String BEARER = "Bearer ";
 
   @Inject Vertx vertx;
+
+  /**
+   * Owns the {@link OriginSync} these two routes need — it is created only once the checkout is
+   * provisioned, so it is read per request rather than captured.
+   */
+  @Inject ControlSocket controlSocket;
 
   // The port qits-gateway reaches this daemon's read API on. Distinct from hooks-port on purpose:
   // that one is a loopback-only agent-hook sink, this one is network-reachable, and collapsing them
@@ -227,13 +244,16 @@ public class WorkspaceApi {
       respond(request, 401, WorkspaceJson.error("Unauthorized"));
       return;
     }
-    if (request.method() != HttpMethod.GET) {
+    String path = request.path();
+    boolean write = FAST_FORWARD_PATH.equals(path) || UPDATE_FROM_PARENT_PATH.equals(path);
+    // GET everywhere except the two parent-integration routes, which mutate the checkout and are
+    // POST-only. Checking the pairing here keeps a GET from ever reaching git.
+    if (write ? request.method() != HttpMethod.POST : request.method() != HttpMethod.GET) {
       respond(request, 405, WorkspaceJson.error("Method not allowed"));
       return;
     }
     Context context = vertx.getOrCreateContext();
-    String path = request.path();
-    String param = request.getParam("path");
+    String param = request.getParam(write ? "parent" : "path");
     try {
       workers.execute(
           () -> {
@@ -265,6 +285,8 @@ public class WorkspaceApi {
         case DETECTION_PATH -> new Reply(200, WorkspaceJson.detection(detection.detect(marker())));
         case COMPONENT_MAP_PATH ->
             new Reply(200, WorkspaceJson.componentMap(componentMap.componentMap(marker())));
+        case FAST_FORWARD_PATH -> integrate(pathParam, true);
+        case UPDATE_FROM_PARENT_PATH -> integrate(pathParam, false);
         default -> new Reply(404, WorkspaceJson.error("No such endpoint"));
       };
     } catch (WorkspaceFilesException e) {
@@ -273,6 +295,28 @@ public class WorkspaceApi {
       LOG.errorf(e, "workspace-daemon read API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
+  }
+
+  /**
+   * Integrate {@code parentBranch} into this workspace's checkout: fast-forward onto it when {@code
+   * fastForwardOnly}, otherwise merge it in with a merge commit. The two differ only in that,
+   * exactly as the host's two routes did.
+   *
+   * <p>A refusal is a <b>400</b>, not a 500: "this branch has diverged" and "that merge would
+   * conflict" are the answers the UI acts on, and git's own text goes back with them so the user
+   * sees what it saw. 503 when the checkout has no {@link OriginSync} yet — the daemon is up but
+   * has not finished provisioning, and the caller should retry rather than treat it as a failure.
+   */
+  private Reply integrate(String parentBranch, boolean fastForwardOnly) {
+    OriginSync sync = controlSocket.originSync();
+    if (sync == null) {
+      return new Reply(503, WorkspaceJson.error("Workspace is not provisioned yet"));
+    }
+    OriginSync.ParentOpResult result =
+        fastForwardOnly ? sync.fastForwardOntoParent(parentBranch) : sync.mergeParentIn(parentBranch);
+    return result.ok()
+        ? new Reply(200, WorkspaceJson.output(result.output()))
+        : new Reply(400, WorkspaceJson.error(result.failure()));
   }
 
   /**
