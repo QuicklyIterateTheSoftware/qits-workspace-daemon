@@ -27,14 +27,30 @@
          workspace container's process. It dials home over a WebSocket and, part by part, takes over
          what qits does via `docker exec`. Part 1 is behaviour-neutral: it holds the socket open and
          is otherwise idle. Deps are deliberately minimal — quarkus-arc (CDI + command mode) +
-         quarkus-vertx (a managed Vertx with NO HTTP server, for the Vert.x-core WebSocket client) +
-         the shared wire contract. It does NOT depend on `domain` (Panache/Hibernate/JGit would bloat
-         the native image), so it never needs -Dqits.variant. -->
+         quarkus-vertx (a managed Vertx with NO HTTP server extension, for the Vert.x-core WebSocket
+         client and the two raw vertx-core listeners this module binds itself) + the shared wire
+         contract + the two framework-free capability jars (files, detection). It does NOT depend on
+         `domain` (Panache/Hibernate/JGit would bloat the native image), so it never needs
+         -Dqits.variant, and it carries no quarkus-rest/JAX-RS and no Jackson. -->
 
     <dependencies>
         <dependency>
             <groupId>eu.wohlben</groupId>
             <artifactId>workspace-daemon-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The read-only filesystem capability (WorkspaceFiles seam + path-safety policy) the
+                 daemon serves over WorkspaceApi. Framework-free, so it adds nothing the native-image
+                 builder has to be told about. -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>workspace-daemon-files</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Framework detection + the Angular component map, over the same seam. Pulls
+                 workspace-daemon-files transitively; declared explicitly because this module
+                 compiles against both. -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>workspace-daemon-detection</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

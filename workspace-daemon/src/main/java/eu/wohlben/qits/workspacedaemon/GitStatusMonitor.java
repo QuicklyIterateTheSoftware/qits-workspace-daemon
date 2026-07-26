@@ -286,6 +286,17 @@ final class GitStatusMonitor {
   }
 
   /**
+   * The working-tree marker this monitor last settled on, or {@code null} before the first report.
+   * Exposed so {@link WorkspaceApi} can key the detection/component-map caches on it instead of
+   * recomputing: this value is the product of the same two git reads those caches want, already
+   * debounced behind inotify, and a second computation could disagree with the one just reported
+   * home. Read-only — the marker moves only through {@link #settle}.
+   */
+  String marker() {
+    return lastMarker;
+  }
+
+  /**
    * Re-send the last reported status (a no-op before the first report). Invoked on every socket
    * (re)connect so a qits restart that lost its in-memory cache gets the current value re-pushed,
    * mirroring {@code ServiceSupervisor.reportAll}.

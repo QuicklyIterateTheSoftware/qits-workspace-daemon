@@ -1,9 +1,0 @@
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/BootstrapRunnerTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/CommandExecutorTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/ConfigParserTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/GitStatusMonitorTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/HookWebhookTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/OriginSyncTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/ProvisionerTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/ServiceSupervisorTest.java
-/home/wohlben/code/qits-qits/daemons/qits-workspace-daemon/workspace-daemon/src/test/java/eu/wohlben/qits/workspacedaemon/WorkspaceDescriberTest.java

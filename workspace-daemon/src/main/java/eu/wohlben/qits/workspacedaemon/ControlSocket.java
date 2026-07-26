@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
@@ -59,6 +60,15 @@ public class ControlSocket {
   private static final Logger LOG = Logger.getLogger(ControlSocket.class);
 
   @Inject Vertx vertx;
+
+  /**
+   * The network-reachable read API over the checkout (file listing, file content, detection,
+   * component map) — the transport for the two capability modules that moved off the host. Injected
+   * rather than constructed because, unlike {@link HookWebhook}, it carries its own config knobs;
+   * started from {@link #startGitStatusMonitor} once the checkout exists and the monitor's marker
+   * is available to key its caches on.
+   */
+  @Inject WorkspaceApi workspaceApi;
 
   /**
    * Full dial-home URL the factory injected, e.g. {@code ws://qits:8080/api/workspace-daemon/<id>}.
@@ -300,8 +310,8 @@ public class ControlSocket {
     repoName = repoNameConfig.orElse("");
     if (url.isEmpty() || url.get().isBlank()) {
       LOG.warn(
-          "No qits.workspace-daemon.url configured — workspace-daemon is idle (container stays alive, docker exec"
-              + " paths unaffected).");
+          "No qits.workspace-daemon.url configured — workspace-daemon is idle (container stays"
+              + " alive, docker exec paths unaffected).");
       return;
     }
     services =
@@ -396,6 +406,18 @@ public class ControlSocket {
             gitStatusMaxWaitMs);
     gitStatus = monitor;
     monitor.start();
+    // The read API goes up last in this sequence, and only here: every one of its endpoints runs
+    // `git ls-files` over the checkout, so binding it before the clone landed would publish a port
+    // that answers nothing but 500s. `monitor.start()` above has already settled the first marker,
+    // so its caches key on a real value from the first request. The frameworks supplier reads the
+    // live `configState`, so an agent editing the checkout's own `frameworks:` block is picked up.
+    workspaceApi.start(
+        WORKSPACE_DIR.toPath(),
+        () ->
+            configState.config().frameworks().stream()
+                .map(f -> new DeclaredFramework(f.kind(), f.root()))
+                .toList(),
+        monitor::marker);
   }
 
   /**
