@@ -108,6 +108,11 @@ public final class DaemonCodec {
         map.put(Field.STATE, m.state());
         map.put(Field.EXIT_CODE, m.exitCode());
       }
+      case WorkspaceChanged m -> {
+        map.put(Field.TYPE, Type.WORKSPACE_CHANGED);
+        map.put(Field.WORKSPACE_ID, m.workspaceId());
+        map.put(Field.TOPIC, m.topic());
+      }
       case GitStatus m -> {
         map.put(Field.TYPE, Type.GIT_STATUS);
         map.put(Field.WORKSPACE_ID, m.workspaceId());
@@ -227,6 +232,8 @@ public final class DaemonCodec {
               str(map, Field.ID),
               str(map, Field.STATE),
               intObj(map, Field.EXIT_CODE));
+      case Type.WORKSPACE_CHANGED ->
+          new WorkspaceChanged(str(map, Field.WORKSPACE_ID), str(map, Field.TOPIC));
       case Type.GIT_STATUS ->
           new GitStatus(
               str(map, Field.WORKSPACE_ID), boolVal(map, Field.CLEAN), str(map, Field.HEAD));

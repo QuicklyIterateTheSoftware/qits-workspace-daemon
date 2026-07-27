@@ -19,10 +19,15 @@ public final class DaemonProtocol {
 
   /**
    * The capability version {@code workspace-daemon} announces in its {@link Hello}. Bumped when the
-   * wire contract changes in a way the backend must branch on; the backend records it but Part 1
-   * does not gate on it.
+   * wire contract changes in a way the backend must branch on; the backend records it but does not
+   * gate on it.
+   *
+   * <p>3 added {@link WorkspaceChanged}. A backend still on 2 does not know the tag and drops the
+   * frame when decoding it — {@code DaemonControlSocket} catches an undecodable frame and logs it
+   * rather than failing the connection — so a newer daemon against an older backend degrades to the
+   * refetch cadence that was the status quo, and nothing else about the socket changes.
    */
-  public static final int CAPABILITY_VERSION = 2;
+  public static final int CAPABILITY_VERSION = 3;
 
   /**
    * The fixed {@code correlationId} the daemon tags its autonomous-self-provision output ({@link
@@ -88,6 +93,7 @@ public final class DaemonProtocol {
     public static final String SERVICE_TRANSITION = "daemonEvent";
     public static final String GIT_STATUS = "gitStatus";
     public static final String AGENT_ACTIVITY = "agentActivity";
+    public static final String WORKSPACE_CHANGED = "workspaceChanged";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
@@ -140,6 +146,7 @@ public final class DaemonProtocol {
     public static final String SOURCE = "source";
     public static final String TRANSCRIPT_PATH = "transcriptPath";
     public static final String AT = "at";
+    public static final String TOPIC = "topic";
 
     private Field() {}
   }

@@ -21,6 +21,7 @@ public sealed interface DaemonMessage
         ServiceTransition,
         GitStatus,
         AgentActivity,
+        WorkspaceChanged,
         Ack,
         RunCommand,
         Describe,

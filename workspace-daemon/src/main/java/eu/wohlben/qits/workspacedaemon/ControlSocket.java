@@ -35,6 +35,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
 import eu.wohlben.qits.workspacedaemon.protocol.StartService;
+import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.WebSocket;
@@ -495,18 +496,19 @@ public class ControlSocket {
    * <p>The branch and commit are read through the monitor rather than captured, so a command
    * launched after an agent switches branch records what was actually checked out.
    *
-   * <p>{@code commandsChanged} rides the control socket as a {@code clientLog}-adjacent nudge —
-   * there is no dedicated EVENT for it and adding one would need a {@code CAPABILITY_VERSION} bump
-   * mirrored into qits-workspaces' vendored copy of the protocol. Until that happens the host
-   * refetches on its own cadence, which is what {@link CommandChangeListener} documents as the
-   * absent-listener behaviour.
+   * <p>{@code commandsChanged} rides the control socket as a {@link WorkspaceChanged} frame, the
+   * generic nudge added at {@code CAPABILITY_VERSION} 3. Before it existed this listener was wired
+   * to null and the browser refetched the Commands list on its own cadence; the transcript sweep
+   * uses the same callback, so a finished agent session's conversation appears when it lands rather
+   * than at the next poll.
    */
   private void wireCommands(GitStatusMonitor monitor) {
     DaemonWorkspaceContext context =
         new DaemonWorkspaceContext(repositoryId, workspaceId, () -> branch, monitor::head);
     CommandStore store = new CommandStore();
     CommandLogService logs = new CommandLogService(store, null);
-    CommandLifecycleService lifecycle = new CommandLifecycleService(store, null);
+    CommandLifecycleService lifecycle =
+        new CommandLifecycleService(store, () -> nudge(WorkspaceChangeTopic.COMMANDS));
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
     CommandService commandService =
         new CommandService(
@@ -560,7 +562,8 @@ public class ControlSocket {
     }
     ProcessRunner processes = new LocalProcessExecutor();
     AgentTranscriptService transcripts =
-        new AgentTranscriptService(store, logs, agentSessionStore, claudeMount, null);
+        new AgentTranscriptService(
+            store, logs, agentSessionStore, claudeMount, () -> nudge(WorkspaceChangeTopic.COMMANDS));
     AgentTranscriptTailService tail =
         new AgentTranscriptTailService(transcripts, logs, transcriptTailPollMs);
     tail.start();
@@ -584,6 +587,29 @@ public class ControlSocket {
             processes, context, defaults, claudeMount, WORKSPACE_DIR.toPath()),
         defaults);
     LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
+  }
+
+  /**
+   * The {@code WorkspaceChangeHint.Topic} names this daemon nudges about. A String on the wire (see
+   * {@link WorkspaceChanged}); this constant holder keeps the spelling in one place rather than
+   * scattered at the call sites.
+   */
+  private static final class WorkspaceChangeTopic {
+    private static final String COMMANDS = "COMMANDS";
+
+    private WorkspaceChangeTopic() {}
+  }
+
+  /**
+   * Push a change nudge home, if the socket is up. Best-effort by design: the frame carries no state,
+   * so a nudge dropped while reconnecting costs one stale view until the next one, and the backend's
+   * own poll is still there underneath.
+   */
+  private void nudge(String topic) {
+    if (workspaceId == null || workspaceId.isBlank()) {
+      return;
+    }
+    send(new WorkspaceChanged(workspaceId, topic));
   }
 
   /** Transcript aggregates, held here so the query service and the sweep share one instance. */

@@ -252,6 +252,23 @@ class DaemonCodecTest {
   }
 
   @Test
+  void workspaceChangedRoundTrips() {
+    WorkspaceChanged changed = new WorkspaceChanged("ws-1", "COMMANDS");
+    assertEquals(changed, roundTrip(changed));
+    assertEquals(
+        DaemonProtocol.Type.WORKSPACE_CHANGED,
+        DaemonCodec.encode(changed).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void workspaceChangedToleratesAnUnknownTopic() {
+    // The backend drops a topic it has no view for; the codec must still carry it, so the drop is
+    // a decision the backend makes rather than a decode failure that kills the frame.
+    WorkspaceChanged future = new WorkspaceChanged("ws-1", "SOMETHING_NEWER");
+    assertEquals(future, roundTrip(future));
+  }
+
+  @Test
   void agentActivityRoundTrips() {
     AgentActivity sessionStart =
         new AgentActivity(
