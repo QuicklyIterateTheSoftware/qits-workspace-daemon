@@ -22,11 +22,28 @@ public record DaemonQitsConfig(
     List<FrameworkDecl> frameworks,
     List<ActionDecl> actions,
     List<ServiceDecl> services,
-    List<BootstrapDecl> bootstrap) {
+    List<BootstrapDecl> bootstrap,
+    AgentSection agent) {
 
   /** An absent/blank file — the empty config that keeps a config-free branch a no-op. */
   public static final DaemonQitsConfig EMPTY =
-      new DaemonQitsConfig(null, List.of(), List.of(), List.of(), List.of());
+      new DaemonQitsConfig(null, List.of(), List.of(), List.of(), List.of(), null);
+
+  /**
+   * Repository-scoped coding-agent preferences: which harness this repository prefers, whether its
+   * launches emit the turn-boundary activity hooks, and which model prompt refinement should use.
+   *
+   * <p>These live in the checkout rather than in the daemon because the daemon keeps nothing past
+   * its container, and rather than in a host table because they describe the repository, not the
+   * user — the same split V42–V45 already made for repo-scoped configuration. A user-level
+   * preference still belongs host-side; see {@code DaemonAgentDefaults}.
+   *
+   * <p>Every field is nullable: an absent one falls through to the daemon default.
+   *
+   * @param defaultType {@code claude} or {@code kimi}, case-insensitive
+   * @param activityTracking null to leave the daemon default in place
+   */
+  public record AgentSection(String defaultType, Boolean activityTracking, String refinementModel) {}
 
   public record RepositorySection(String mainBranch, String archetype) {}
 

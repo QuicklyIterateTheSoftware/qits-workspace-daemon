@@ -61,6 +61,14 @@
             <artifactId>qits-commands</artifactId>
         </dependency>
         <dependency>
+            <!-- The Claude Code and Kimi harnesses: launch rendering, the ACP chat transport,
+                 transcript import off the shared /claude-home volume, and the agent surface served
+                 over WorkspaceApi. Depends on qits-commands (a launch becomes a command), never the
+                 other way round. Framework-free for the same native-image reason. -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-coding-agents</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>

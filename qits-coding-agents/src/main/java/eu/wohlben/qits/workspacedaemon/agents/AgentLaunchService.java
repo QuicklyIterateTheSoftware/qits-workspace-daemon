@@ -429,7 +429,7 @@ public final class AgentLaunchService {
    * {@code 127.0.0.1}, so no resolver host is baked into the hook command. The {@code commandId}
    * rides as a query parameter so the webhook stays a dumb forwarder.
    */
-  String sessionReportUrl(String commandId) {
+  public String sessionReportUrl(String commandId) {
     return "http://127.0.0.1:" + hooksPort + "/hooks/claude-code?commandId=" + commandId;
   }
 

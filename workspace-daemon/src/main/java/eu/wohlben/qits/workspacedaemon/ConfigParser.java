@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.AgentSection;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
@@ -81,7 +82,20 @@ public final class ConfigParser {
         // fixtures still commit `daemons:`; drop once their submodule round-trip lands
         // `services:`).
         services(map.containsKey("services") ? map.get("services") : map.get("daemons")),
-        bootstrap(map.get("bootstrap")));
+        bootstrap(map.get("bootstrap")),
+        agentSection(map.get("agent")));
+  }
+
+  private static AgentSection agentSection(Object raw) {
+    if (raw == null) {
+      return null;
+    }
+    Map<String, Object> m = asMap(raw, "agent");
+    Object tracking = m.get("activity-tracking");
+    return new AgentSection(
+        str(m, "default-type"),
+        tracking == null ? null : bool(m, "activity-tracking", true),
+        str(m, "refinement-model"));
   }
 
   private static RepositorySection repositorySection(Object raw) {

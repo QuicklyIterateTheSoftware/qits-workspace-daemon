@@ -1,5 +1,16 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.agents.AgentAuthStatus;
+import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentPluginService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentSessionQueryService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentSessionStore;
+import eu.wohlben.qits.workspacedaemon.agents.AgentTranscriptService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentTranscriptTailService;
+import eu.wohlben.qits.workspacedaemon.agents.CommandsAgentCommands;
+import eu.wohlben.qits.workspacedaemon.agents.LocalProcessExecutor;
+import eu.wohlben.qits.workspacedaemon.agents.ProcessRunner;
+import eu.wohlben.qits.workspacedaemon.agents.PromptRefinementService;
 import eu.wohlben.qits.workspacedaemon.commands.CommandLifecycleService;
 import eu.wohlben.qits.workspacedaemon.commands.CommandLogService;
 import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
@@ -164,6 +175,36 @@ public class ControlSocket {
   // QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED). When false the daemon never pushes committed work on
   // its own; incoming pulls (host-triggered) are unaffected
   // (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
+  /**
+   * Where the shared agent-credential volume is mounted in this container. Read here and nowhere
+   * else: the launch service overlays it as the agent's HOME and the transcript service resolves
+   * config dirs under it, and two independent reads of one key is how those two silently disagree.
+   */
+  @ConfigProperty(name = "qits.workspace.claude-mount", defaultValue = "/claude-home")
+  String claudeMount;
+
+  /** The harness a launch uses when neither the request nor the checkout's config names one. */
+  @ConfigProperty(name = "qits.agent.default-type")
+  Optional<String> agentDefaultType;
+
+  /** Whether launches wire the turn-boundary activity hooks; the lineage hook is unconditional. */
+  @ConfigProperty(name = "qits.agent.activity-tracking-enabled", defaultValue = "true")
+  boolean agentActivityTrackingEnabled;
+
+  @ConfigProperty(name = "qits.agent.transcript-tail-poll-ms", defaultValue = "500")
+  long transcriptTailPollMs;
+
+  /** Model override for prompt refinement; unset means Claude's haiku and Kimi's own default. */
+  @ConfigProperty(name = "qits.refinement.model")
+  Optional<String> refinementModel;
+
+  /** Explicit MCP base URLs, for pointing an agent at a different qits instance. */
+  @ConfigProperty(name = "qits.actions-mcp.url")
+  Optional<String> actionsMcpUrl;
+
+  @ConfigProperty(name = "qits.repository-mcp.url")
+  Optional<String> repositoryMcpUrl;
+
   @ConfigProperty(name = "qits.workspace-daemon.auto-push-enabled", defaultValue = "true")
   boolean autoPushEnabled;
 
@@ -477,7 +518,78 @@ public class ControlSocket {
             new ConfigActionResolver(() -> configState.config()));
     workspaceApi.wireCommands(commandService, commandRegistry, context);
     LOG.infof("workspace-daemon commands API wired for workspace %s", workspaceId);
+    wireAgents(store, logs, commandService, commandRegistry, context);
   }
+
+  /**
+   * Assemble {@code qits-coding-agents} on top of the commands wiring and hand it to {@link
+   * WorkspaceApi}. Constructed by hand for the same reason commands is — the module is
+   * framework-free and cannot read configuration itself, which is why every setting it needs is a
+   * {@code @ConfigProperty} on this class and arrives as a constructor argument.
+   *
+   * <p>{@link #hooksPort} is the one to watch. {@link HookWebhook} binds it and {@link
+   * AgentLaunchService} renders it into the hook {@code curl} every launch carries; if those two
+   * ever read it separately and disagree, launches still succeed and simply never report session
+   * lineage or activity. Passing the same field to both is what makes that impossible, and {@code
+   * AgentsApiTest} asserts the agreement.
+   *
+   * <p>A daemon with no {@code qits.workspace-daemon.url} cannot derive the MCP endpoints an agent
+   * would be launched with — but it also never connected, so it is not serving this API either. The
+   * agent surface is simply left unwired and answers 503.
+   */
+  private void wireAgents(
+      CommandStore store,
+      CommandLogService logs,
+      CommandService commandService,
+      CommandRegistry commandRegistry,
+      DaemonWorkspaceContext context) {
+    DaemonAgentDefaults defaults =
+        new DaemonAgentDefaults(
+            () -> configState.config(),
+            agentDefaultType,
+            agentActivityTrackingEnabled,
+            refinementModel);
+    DaemonMcpEndpoints endpoints;
+    try {
+      endpoints =
+          new DaemonMcpEndpoints(
+              url.orElse(null), projectId, actionsMcpUrl, repositoryMcpUrl);
+    } catch (IllegalStateException e) {
+      LOG.warnf("Coding agents stay unwired: %s", e.getMessage());
+      return;
+    }
+    ProcessRunner processes = new LocalProcessExecutor();
+    AgentTranscriptService transcripts =
+        new AgentTranscriptService(store, logs, agentSessionStore, claudeMount, null);
+    AgentTranscriptTailService tail =
+        new AgentTranscriptTailService(transcripts, logs, transcriptTailPollMs);
+    tail.start();
+    this.transcriptTail = tail;
+    AgentLaunchService launch =
+        new AgentLaunchService(
+            new CommandsAgentCommands(commandService, commandRegistry, store),
+            new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath()),
+            transcripts,
+            tail,
+            defaults,
+            endpoints,
+            context,
+            claudeMount,
+            hooksPort);
+    workspaceApi.wireAgents(
+        launch,
+        new AgentSessionQueryService(store, agentSessionStore),
+        new AgentPluginService(processes, claudeMount, WORKSPACE_DIR.toPath(), defaults),
+        new PromptRefinementService(
+            processes, context, defaults, claudeMount, WORKSPACE_DIR.toPath()),
+        defaults);
+    LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
+  }
+
+  /** Transcript aggregates, held here so the query service and the sweep share one instance. */
+  private final AgentSessionStore agentSessionStore = new AgentSessionStore();
+
+  private volatile AgentTranscriptTailService transcriptTail;
 
   /**
    * The bootstrap phase of the boot sequence (clone → config → <b>bootstrap</b> → [Part 4:
@@ -756,6 +868,10 @@ public class ControlSocket {
     HookWebhook h = hooks;
     if (h != null) {
       h.close();
+    }
+    AgentTranscriptTailService t = transcriptTail;
+    if (t != null) {
+      t.close();
     }
     OriginSync o = originSync;
     if (o != null) {

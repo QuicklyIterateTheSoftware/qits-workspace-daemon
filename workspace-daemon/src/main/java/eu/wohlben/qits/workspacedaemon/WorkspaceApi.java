@@ -2,6 +2,15 @@ package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.commands.CommandNotFoundException;
 import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
+import eu.wohlben.qits.workspacedaemon.agents.AgentDefaults;
+import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchMode;
+import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchRequest;
+import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentMcpScope;
+import eu.wohlben.qits.workspacedaemon.agents.AgentPluginService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentSessionQueryService;
+import eu.wohlben.qits.workspacedaemon.agents.AgentType;
+import eu.wohlben.qits.workspacedaemon.agents.PromptRefinementService;
 import eu.wohlben.qits.workspacedaemon.commands.CommandService;
 import eu.wohlben.qits.workspacedaemon.commands.CommandStatus;
 import eu.wohlben.qits.workspacedaemon.commands.InvalidCommandRequestException;
@@ -142,6 +151,21 @@ public class WorkspaceApi {
   /** {@code GET /commands/actions} — what this checkout declares. New; see {@link CommandJson}. */
   static final String COMMAND_ACTIONS_PATH = "/commands/actions";
 
+  /**
+   * The coding-agent surface. Prefix-free like {@link #COMMANDS_PATH} and for the same reason: the
+   * daemon serves one workspace, so a {@code /{repoId}/{workspaceId}} prefix would be a constant the
+   * caller has to get right. {@code AgentJson} puts both ids back into the response bodies.
+   */
+  static final String AGENTS_PATH = "/agents";
+
+  static final String AGENTS_AVAILABLE_PATH = "/agents/available";
+
+  static final String AGENT_SESSIONS_PATH = "/agent-sessions";
+
+  static final String AGENT_PLUGINS_PATH = "/agent-plugins";
+
+  static final String PROMPT_REFINEMENTS_PATH = "/prompt-refinements";
+
   private static final String BEARER = "Bearer ";
 
   @Inject Vertx vertx;
@@ -202,6 +226,14 @@ public class WorkspaceApi {
   private volatile CommandRegistry registry;
   private volatile WorkspaceContext workspaceContext;
 
+  /** The agent capability, wired alongside commands; null until then — every route answers 503. */
+  private volatile AgentLaunchService agentLaunch;
+
+  private volatile AgentSessionQueryService agentSessions;
+  private volatile AgentPluginService agentPlugins;
+  private volatile PromptRefinementService promptRefinement;
+  private volatile AgentDefaults agentDefaults;
+
   /**
    * Wire the commands surface. Separate from {@link #start} so the two capabilities' preconditions
    * stay independent and a test can exercise either alone.
@@ -211,6 +243,23 @@ public class WorkspaceApi {
     this.commands = commands;
     this.registry = registry;
     this.workspaceContext = workspaceContext;
+  }
+
+  /**
+   * Wire the coding-agent surface. Separate from {@link #wireCommands} only so a test can exercise
+   * commands without standing up a harness; {@link ControlSocket} wires both together.
+   */
+  void wireAgents(
+      AgentLaunchService agentLaunch,
+      AgentSessionQueryService agentSessions,
+      AgentPluginService agentPlugins,
+      PromptRefinementService promptRefinement,
+      AgentDefaults agentDefaults) {
+    this.agentLaunch = agentLaunch;
+    this.agentSessions = agentSessions;
+    this.agentPlugins = agentPlugins;
+    this.promptRefinement = promptRefinement;
+    this.agentDefaults = agentDefaults;
   }
 
   /**
@@ -295,6 +344,10 @@ public class WorkspaceApi {
       onCommandRequest(request, path);
       return;
     }
+    if (isAgentPath(path)) {
+      onAgentRequest(request, path);
+      return;
+    }
     boolean write = FAST_FORWARD_PATH.equals(path) || UPDATE_FROM_PARENT_PATH.equals(path);
     // GET everywhere except the two parent-integration routes, which mutate the checkout and are
     // POST-only. Checking the pairing here keeps a GET from ever reaching git.
@@ -351,6 +404,133 @@ public class WorkspaceApi {
                 respond(request, 503, WorkspaceJson.error("Shutting down"));
               }
             });
+  }
+
+  /** Whether {@code path} belongs to the coding-agent surface. */
+  private static boolean isAgentPath(String path) {
+    return path.equals(AGENTS_PATH)
+        || path.equals(AGENTS_AVAILABLE_PATH)
+        || path.equals(AGENT_SESSIONS_PATH)
+        || path.equals(AGENT_PLUGINS_PATH)
+        || path.startsWith(AGENT_PLUGINS_PATH + "/")
+        || path.equals(PROMPT_REFINEMENTS_PATH);
+  }
+
+  /**
+   * The coding-agent routes. Same shape as {@link #onCommandRequest} — 503 until wired, GET/POST
+   * only, body read on the event loop and the work handed to a worker — because they have the same
+   * two needs: a path segment after a fixed prefix ({@code /agent-plugins/{id}/install}) and a
+   * request body.
+   */
+  private void onAgentRequest(HttpServerRequest request, String path) {
+    if (agentLaunch == null) {
+      respond(request, 503, WorkspaceJson.error("Coding agents are not available yet"));
+      return;
+    }
+    HttpMethod method = request.method();
+    if (method != HttpMethod.GET && method != HttpMethod.POST) {
+      respond(request, 405, WorkspaceJson.error("Method not allowed"));
+      return;
+    }
+    Context context = vertx.getOrCreateContext();
+    request
+        .body()
+        .onFailure(t -> respond(request, 400, WorkspaceJson.error("Could not read the request body")))
+        .onSuccess(
+            body -> {
+              try {
+                workers.execute(
+                    () -> {
+                      Reply reply = dispatchAgent(method, path, body.toString());
+                      context.runOnContext(v -> respond(request, reply.status(), reply.body()));
+                    });
+              } catch (RejectedExecutionException shuttingDown) {
+                respond(request, 503, WorkspaceJson.error("Shutting down"));
+              }
+            });
+  }
+
+  /**
+   * Route and run one coding-agent request.
+   *
+   * <p>The catch ladder is {@link #dispatchCommand}'s, unchanged, and that is deliberate: because
+   * qits-coding-agents depends on qits-commands, its services throw the <em>same</em> two exceptions
+   * rather than declaring their own, so one mapping serves both surfaces and the frontend's error
+   * handling does not fork.
+   */
+  private Reply dispatchAgent(HttpMethod method, String path, String body) {
+    try {
+      String repoId = workspaceContext.repoId();
+      String workspaceId = workspaceContext.workspaceId();
+      if (AGENTS_AVAILABLE_PATH.equals(path)) {
+        return method == HttpMethod.GET
+            ? new Reply(200, AgentJson.available(agentDefaults.defaultAgentType()))
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (AGENTS_PATH.equals(path)) {
+        return method == HttpMethod.POST
+            ? new Reply(
+                200, AgentJson.launched(agentLaunch.launch(launchRequest(body)), repoId, workspaceId))
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (AGENT_SESSIONS_PATH.equals(path)) {
+        return method == HttpMethod.GET
+            ? new Reply(200, AgentJson.sessions(agentSessions.sessionTree()))
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (AGENT_PLUGINS_PATH.equals(path)) {
+        return method == HttpMethod.GET
+            ? new Reply(200, AgentJson.plugins(agentPlugins.listInstalled()))
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (path.startsWith(AGENT_PLUGINS_PATH + "/")) {
+        String rest = path.substring(AGENT_PLUGINS_PATH.length() + 1);
+        if (!rest.endsWith("/install") || method != HttpMethod.POST) {
+          return new Reply(404, WorkspaceJson.error("No such endpoint"));
+        }
+        String pluginId = rest.substring(0, rest.length() - "/install".length());
+        return new Reply(200, AgentJson.plugins(agentPlugins.install(pluginId)));
+      }
+      if (PROMPT_REFINEMENTS_PATH.equals(path)) {
+        if (method != HttpMethod.POST) {
+          return new Reply(405, WorkspaceJson.error("Method not allowed"));
+        }
+        JsonObject json = jsonBody(body);
+        return new Reply(
+            200,
+            AgentJson.refinement(
+                promptRefinement.refine(json.getString("transcript"), json.getString("preamble"))));
+      }
+      return new Reply(404, WorkspaceJson.error("No such endpoint"));
+    } catch (CommandNotFoundException e) {
+      return new Reply(404, WorkspaceJson.error(e.getMessage()));
+    } catch (InvalidCommandRequestException e) {
+      return new Reply(400, WorkspaceJson.error(e.getMessage()));
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "workspace-daemon agents API failed handling %s", path);
+      return new Reply(500, WorkspaceJson.error("Internal error"));
+    }
+  }
+
+  /** {@code POST /agents} — the launch request, with the enums validated like a query parameter. */
+  private static AgentLaunchRequest launchRequest(String body) {
+    JsonObject json = jsonBody(body);
+    return new AgentLaunchRequest(
+        parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
+        parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
+        json.getString("initialContext"),
+        json.getString("resumeSessionId"),
+        Boolean.TRUE.equals(json.getBoolean("fork")),
+        Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
+        parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType"));
+  }
+
+  private static JsonObject jsonBody(String body) {
+    try {
+      return new JsonObject(body == null || body.isBlank() ? "{}" : body);
+    } catch (RuntimeException notJson) {
+      throw new InvalidCommandRequestException("Expected a JSON body");
+    }
   }
 
   /** One answered request: the status and the body that goes with it. */
