@@ -318,7 +318,17 @@ public class WorkspaceApi {
     this.token = token;
     HttpServer bound = vertx.createHttpServer();
     this.server = bound;
-    return bound.requestHandler(this::onRequest).listen(port, bindAddress);
+    return bound
+        .requestHandler(this::onRequest)
+        // The interactive half of commands. Authenticated at the handshake so an unauthenticated
+        // caller never gets a socket, and served here rather than over the control socket because
+        // that protocol's command messages are fire-and-collect — no stdin, no resize.
+        .webSocketHandshakeHandler(
+            handshake ->
+                CommandSockets.onHandshake(
+                    handshake, registry != null && authorized(handshake.headers())))
+        .webSocketHandler(socket -> CommandSockets.attach(socket, registry))
+        .listen(port, bindAddress);
   }
 
   /** The bound port, {@code 0} before a successful listen — the test's handle on an ephemeral. */
@@ -710,7 +720,12 @@ public class WorkspaceApi {
    * byte-at-a-time oracle on a secret that never rotates within a container's life.
    */
   private boolean authorized(HttpServerRequest request) {
-    String header = request.getHeader("Authorization");
+    return authorized(request.headers());
+  }
+
+  /** The bearer check itself, over any carrier's headers — a request's or a handshake's. */
+  private boolean authorized(io.vertx.core.MultiMap headers) {
+    String header = headers.get("Authorization");
     if (header == null || !header.startsWith(BEARER)) {
       return false;
     }
