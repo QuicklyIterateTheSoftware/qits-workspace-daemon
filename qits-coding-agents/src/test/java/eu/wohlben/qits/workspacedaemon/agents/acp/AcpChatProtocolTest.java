@@ -100,7 +100,7 @@ public class AcpChatProtocolTest {
             "/workspace",
             List.of(
                 new AcpSessionConfig.AcpMcpServer(
-                    "repository", "http://qits:8080/mcp/repository?x", List.of("taskPrompt"))),
+                    "repository", "http://qits:8080/projects/mcp?x", List.of("taskPrompt"))),
             null,
             id -> {
               reportedSession.set(id);

@@ -13,6 +13,10 @@ package eu.wohlben.qits.workspacedaemon.agents;
  *   <li>{@link #PROJECT} — the "repository" server scoped to the whole project, with no repository
  *       narrowing (for driving every repository in the project).
  * </ul>
+ *
+ * <p>The "observability" server rides along with both workspace-narrowed scopes rather than being a
+ * scope of its own: telemetry answers only for one workspace, so it is never the thing a session is
+ * scoped <em>to</em> — it is what the narrowing unlocks.
  */
 public enum AgentMcpScope {
   ACTIONS,

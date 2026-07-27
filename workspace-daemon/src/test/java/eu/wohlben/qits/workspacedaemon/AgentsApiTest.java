@@ -104,7 +104,12 @@ class AgentsApiTest {
       new McpEndpoints() {
         @Override
         public String mcpUrl(String server) {
-          return "http://qits:8080/mcp/" + server;
+          return switch (server) {
+            case "repository" -> "http://qits:8080/projects/mcp";
+            case "observability" -> "http://qits:8080/observability/mcp";
+            case "actions" -> "http://qits:8080/actions/mcp";
+            default -> throw new IllegalArgumentException("Unknown MCP server: " + server);
+          };
         }
 
         @Override

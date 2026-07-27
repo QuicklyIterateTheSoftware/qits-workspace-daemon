@@ -190,11 +190,20 @@ class AgentLaunchServiceTest {
         }
       };
 
+  /**
+   * Each server on its owning service's segment, as {@code DaemonMcpEndpoints} resolves them — not
+   * a {@code /mcp/<server>} family, which no longer exists.
+   */
   private static final McpEndpoints ENDPOINTS =
       new McpEndpoints() {
         @Override
         public String mcpUrl(String server) {
-          return "http://qits:8080/mcp/" + server;
+          return switch (server) {
+            case "repository" -> "http://qits:8080/projects/mcp";
+            case "observability" -> "http://qits:8080/observability/mcp";
+            case "actions" -> "http://qits:8080/actions/mcp";
+            default -> throw new IllegalArgumentException("Unknown MCP server: " + server);
+          };
         }
 
         @Override
@@ -255,39 +264,50 @@ class AgentLaunchServiceTest {
 
     @Test
     void repositoryScopeNarrowsByProjectRepositoryAndWorkspace() {
-      List<AgentLaunchService.ScopedMcp> servers =
-          service().serversFor(AgentMcpScope.REPOSITORY);
+      List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.REPOSITORY);
 
-      assertEquals(1, servers.size());
+      assertEquals(2, servers.size(), "the repository server plus the observability one");
       assertEquals("repository", servers.get(0).key());
       assertEquals(
-          "http://qits:8080/mcp/repository?projectId="
+          "http://qits:8080/projects/mcp?projectId="
               + PROJECT
               + "&repositoryId="
               + REPO
               + "&workspaceId="
               + WORKSPACE,
-          servers.get(0).url(),
-          "the workspace narrowing is what fences the telemetry tools");
+          servers.get(0).url());
     }
 
     @Test
-    void actionsScopePairsTheActionServerWithTheNarrowedRepositoryServer() {
+    void theObservabilityServerIsSeparateAndCarriesOnlyTheScopesItReads() {
+      List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.REPOSITORY);
+
+      assertEquals("observability", servers.get(1).key());
+      assertEquals(
+          "http://qits:8080/observability/mcp?repositoryId=" + REPO + "&workspaceId=" + WORKSPACE,
+          servers.get(1).url(),
+          "qits-observability reads repositoryId and workspaceId, and has no notion of a project");
+    }
+
+    @Test
+    void actionsScopePairsTheActionServerWithTheNarrowedRepositoryAndObservabilityServers() {
       List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.ACTIONS);
 
-      assertEquals(2, servers.size());
+      assertEquals(3, servers.size());
       assertEquals("actions", servers.get(0).key());
-      assertEquals("http://qits:8080/mcp/actions?repositoryId=" + REPO, servers.get(0).url());
+      assertEquals("http://qits:8080/actions/mcp?repositoryId=" + REPO, servers.get(0).url());
       assertEquals("repository", servers.get(1).key());
       assertTrue(servers.get(1).url().contains("workspaceId=" + WORKSPACE));
+      assertEquals("observability", servers.get(2).key());
     }
 
     @Test
-    void projectScopeDropsTheRepositoryNarrowing() {
+    void projectScopeDropsTheRepositoryNarrowingAndWithItObservability() {
       List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.PROJECT);
 
+      assertEquals(1, servers.size(), "telemetry answers per workspace, so it has nothing to say");
       assertEquals(
-          "http://qits:8080/mcp/repository?projectId=" + PROJECT,
+          "http://qits:8080/projects/mcp?projectId=" + PROJECT,
           servers.get(0).url(),
           "project scope sees every repository, so it must not carry repositoryId");
     }
@@ -303,6 +323,18 @@ class AgentLaunchServiceTest {
       assertTrue(servers.get(1).allowedTools().contains("mcp__repository__taskPrompt"));
       assertFalse(
           servers.get(1).allowedTools().stream().anyMatch(t -> t.contains("integrateBranch")));
+    }
+
+    @Test
+    void theTelemetryToolsArePreApprovedUnderTheServerThatActuallyDeclaresThem() {
+      List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.REPOSITORY);
+
+      assertTrue(
+          servers.get(1).allowedTools().contains("mcp__observability__telemetryErrors"),
+          "the allowlist names the tool as the agent sees it: mcp__<server>__<tool>");
+      assertFalse(
+          servers.get(0).allowedTools().stream().anyMatch(t -> t.contains("telemetry")),
+          "a telemetry entry on the repository server would allowlist a tool nothing declares");
     }
   }
 
@@ -346,9 +378,9 @@ class AgentLaunchServiceTest {
           service.renderAutonomousChat(AgentMcpScope.ACTIONS, pinned, AgentType.CLAUDE);
 
       assertEquals(
-          2,
+          3,
           spec.script().split("agentReadOnly=true", -1).length - 1,
-          "both servers are fenced, or the unattended turn could mutate through MCP");
+          "every server is fenced, or the unattended turn could mutate through MCP");
     }
 
     @Test
@@ -637,13 +669,15 @@ class AgentLaunchServiceTest {
       AcpSessionConfig config = service.buildAcpSessionConfig(AgentMcpScope.REPOSITORY, pinned);
 
       assertEquals("/workspace", config.cwd());
-      assertEquals(1, config.mcpServers().size());
+      assertEquals(2, config.mcpServers().size());
       AcpSessionConfig.AcpMcpServer server = config.mcpServers().get(0);
       assertEquals("repository", server.name());
       assertTrue(
           server.enabledTools().contains("taskPrompt"),
           "kimi takes bare names, not the mcp__server__ form: " + server.enabledTools());
       assertFalse(server.enabledTools().contains("mcp__repository__taskPrompt"));
+      assertEquals("observability", config.mcpServers().get(1).name());
+      assertTrue(config.mcpServers().get(1).enabledTools().contains("telemetryErrors"));
     }
 
     @Test

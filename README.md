@@ -29,10 +29,11 @@ the GraalVM native image small and free of anything the builder has to be told a
 
 ## The two channels
 
-**The control socket** — the daemon dials `ws://qits/api/workspace-daemon/{workspaceId}` on boot and
+**The control socket** — the daemon dials `ws://<host>/workspaces/daemon/{workspaceId}` on boot and
 keeps it open. Provisioning progress, bootstrap steps, service transitions, working-tree status,
 agent activity and change nudges all ride it. Message shapes live in `workspace-daemon-protocol`;
-`DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on.
+`DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
+daemon dials the url it was handed verbatim and parses no path out of it.
 
 **The HTTP API** — a bearer-authenticated server on `:13338` serving the working tree, the commands
 surface, the coding-agent surface, and the two interactive websockets. It **does not bind** without
@@ -49,6 +50,13 @@ untrusted checkout, so it is never served anonymously.
 
 No `{repoId}/{workspaceId}` prefix anywhere: this daemon serves exactly one workspace, so those
 segments would be a constant the caller has to get right. The response bodies carry both ids back.
+
+These paths are **not** under the `/<segment>/…` convention the six services adopted, and that is
+deliberate for now: the daemon is one process per container rather than a service behind a gateway
+segment, so `migration-path-conventions.md` §3 defers its addressing rather than deciding it. The
+surface is unreachable in a host-created container regardless, for an unrelated reason —
+`migration-plan.md` §9 item 16: no gateway route and no `QITS_WORKSPACE_DAEMON_API_TOKEN` injected,
+so it does not bind at all.
 
 ## What the daemon does not keep
 
@@ -86,6 +94,28 @@ it constant.**
 
 **No JAX-RS.** `WorkspaceApi` routes with a `switch` over `request.path()` on a raw vertx
 `HttpServer`.
+
+## What the daemon dials out to
+
+Four different services, on four hosts on `qits-net`. Every address follows
+`/<segment>/(api|mcp|git|daemon)/…`, served by the owning service verbatim — through the gateway
+*and* when a container is dialled directly, so the prefix is never something to strip on the inside.
+
+| What | Path | Served by | Where the host comes from |
+|---|---|---|---|
+| the control socket | `/workspaces/daemon/{workspaceId}` | qits-workspaces | `qits.workspace-daemon.url`, injected — the whole url, dialled verbatim |
+| the self-clone origin | `/artifacts/git/{repoId}` or `/artifacts/git/{projectId}/{repoName}` | qits-artifacts | `qits.workspace-daemon.git-base-url` if injected, else **derived** |
+| MCP `repository` | `/projects/mcp` | qits-projects | `qits.repository-mcp.url` if set, else **derived** |
+| MCP `observability` | `/observability/mcp` | qits-observability | `qits.observability-mcp.url` if set, else **derived** |
+| MCP `actions` | — | nobody | `qits.actions-mcp.url` only; unset ⇒ an ACTIONS launch fails saying so |
+
+**"Derived" means the authority of the control-socket url, and that is an assumption.** It is only
+right where one authority routes every segment — i.e. where the daemon was handed the gateway. Only
+one address is genuinely told to the container today, and it is qits-workspaces'. So each derivation
+announces itself: the git base as a `DaemonLog` `WARN` at provision time, the MCP hosts as a `WARN`
+at agent-wiring time. Nothing here silently invents a host and then fails as a 404 nobody sees. The
+gateway's own capability questions are open (`migration-path-conventions.md` §4 item 9), so the
+topology is not decided here — only made visible and overridable.
 
 ## Configuration
 

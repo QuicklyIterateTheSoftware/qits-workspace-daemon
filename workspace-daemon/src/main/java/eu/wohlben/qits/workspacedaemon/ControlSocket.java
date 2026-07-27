@@ -53,10 +53,11 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * The persistent dial-home socket: {@code workspace-daemon} connects to the qits backend's {@code
- * /api/workspace-daemon/{workspaceId}} WebSocket, sends a {@link Hello}, and thereafter serves
- * backend requests ({@link RunCommand}, {@link Describe}) from in-container, streaming results
- * back.
+ * The persistent dial-home socket: {@code workspace-daemon} connects to qits-workspaces' {@code
+ * /workspaces/daemon/{workspaceId}} WebSocket, sends a {@link Hello}, and thereafter serves backend
+ * requests ({@link RunCommand}, {@link Describe}) from in-container, streaming results back. The
+ * path is <b>not</b> a constant here — the daemon dials the url it was handed, verbatim; it is
+ * named only so this reads against the same convention the rest of the system uses.
  *
  * <p>Two invariants make Part 1 behaviour-neutral and safe:
  *
@@ -88,7 +89,15 @@ public class ControlSocket {
   @Inject WorkspaceApi workspaceApi;
 
   /**
-   * Full dial-home URL the factory injected, e.g. {@code ws://qits:8080/api/workspace-daemon/<id>}.
+   * Full dial-home URL the factory injected, e.g. {@code ws://qits:8080/workspaces/daemon/<id>}.
+   *
+   * <p><b>This is the only address the container is handed, and it is one service's.</b> It reaches
+   * qits-workspaces' control socket. The daemon also needs a git host (qits-artifacts) and two MCP
+   * servers (qits-projects, qits-observability) — four hosts on {@code qits-net}. Everything below
+   * that names one of those is here because deriving it from this url would only be right if a
+   * single authority routed every segment, and whether the daemon is handed the gateway is not
+   * settled (migration-path-conventions.md §4 item 9). See {@link Provisioner} and {@link
+   * DaemonMcpEndpoints} for what each one falls back to when unset, and how loudly.
    */
   @ConfigProperty(name = "qits.workspace-daemon.url")
   Optional<String> url;
@@ -108,16 +117,20 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.parent")
   Optional<String> parentConfig;
 
-  // The project-scoped name the daemon self-clones under (/git/<projectId>/<repoName>), so
-  // committed
-  // relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part 1). Blank ⇒
-  // the
-  // Provisioner id-addresses (/git/<repositoryId>).
+  // The project-scoped name the daemon self-clones under (<gitBase>/<projectId>/<repoName>), so
+  // committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part 1).
+  // Blank ⇒ the Provisioner id-addresses (<gitBase>/<repositoryId>).
   @ConfigProperty(name = "qits.workspace-daemon.project-id")
   Optional<String> projectIdConfig;
 
   @ConfigProperty(name = "qits.workspace-daemon.repo-name")
   Optional<String> repoNameConfig;
+
+  // The git host the self-clone reads from: qits-artifacts, serving /artifacts/git/... Unset ⇒ the
+  // Provisioner derives it from the dial-home authority and says so in a WARN, because that is a
+  // guess about a different service's host (see Provisioner's javadoc).
+  @ConfigProperty(name = "qits.workspace-daemon.git-base-url")
+  Optional<String> gitBaseUrlConfig;
 
   // Build identity baked into the native image (filtered from Maven at build time, see pom.xml +
   // application.properties). Announced in the Hello so the backend's workspace registry can show
@@ -199,12 +212,23 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.refinement.model")
   Optional<String> refinementModel;
 
-  /** Explicit MCP base URLs, for pointing an agent at a different qits instance. */
+  /**
+   * Explicit MCP base URLs, one per named server. Two jobs now: pointing an agent at a different
+   * qits instance (the original), and naming the server's host when it is not the control socket's
+   * — {@code repository} is qits-projects, {@code observability} is qits-observability.
+   *
+   * <p>{@code actions} has no derivable form at all: no service in the split serves it (the tools
+   * are still monolith-only, migration-plan.md §9 item 6), so an ACTIONS-scope launch fails with
+   * that message unless this key names one.
+   */
   @ConfigProperty(name = "qits.actions-mcp.url")
   Optional<String> actionsMcpUrl;
 
   @ConfigProperty(name = "qits.repository-mcp.url")
   Optional<String> repositoryMcpUrl;
+
+  @ConfigProperty(name = "qits.observability-mcp.url")
+  Optional<String> observabilityMcpUrl;
 
   @ConfigProperty(name = "qits.workspace-daemon.auto-push-enabled", defaultValue = "true")
   boolean autoPushEnabled;
@@ -410,7 +434,14 @@ public class ControlSocket {
   private void startProvisioning() {
     if (provisionStarted.compareAndSet(false, true)) {
       Provisioner.Env env =
-          new Provisioner.Env(workspaceId, repositoryId, branch, projectId, repoName, url.get());
+          new Provisioner.Env(
+              workspaceId,
+              repositoryId,
+              branch,
+              projectId,
+              repoName,
+              url.get(),
+              gitBaseUrlConfig.orElse(""));
       workers.execute(
           () -> {
             // A fresh clone (vs. a reconnect into an already-provisioned container) is the trigger
@@ -555,7 +586,7 @@ public class ControlSocket {
     try {
       endpoints =
           new DaemonMcpEndpoints(
-              url.orElse(null), projectId, actionsMcpUrl, repositoryMcpUrl);
+              url.orElse(null), projectId, actionsMcpUrl, repositoryMcpUrl, observabilityMcpUrl);
     } catch (IllegalStateException e) {
       LOG.warnf("Coding agents stay unwired: %s", e.getMessage());
       return;

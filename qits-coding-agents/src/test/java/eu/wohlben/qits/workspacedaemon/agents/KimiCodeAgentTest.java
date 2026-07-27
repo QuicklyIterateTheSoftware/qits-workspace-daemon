@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test;
 public class KimiCodeAgentTest {
 
   private static final String ACTIONS_URL =
-      "http://localhost:8080/mcp/actions?repositoryId=11111111-1111-1111-1111-111111111111";
+      "http://localhost:8080/actions/mcp?repositoryId=11111111-1111-1111-1111-111111111111";
 
   private static final String KIMI_SESSION = "session_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 
@@ -133,7 +133,7 @@ public class KimiCodeAgentTest {
         CodingAgentFactory.ofType(AgentType.KIMI)
             .mcpServer("actions", httpMcp(ACTIONS_URL))
             .allowedTools(List.of("mcp__actions__listGlobalActions"))
-            .mcpServer("repository", httpMcp("http://localhost:8080/mcp/repository?projectId=p"))
+            .mcpServer("repository", httpMcp("http://localhost:8080/projects/mcp?projectId=p"))
             .allowedTools(List.of("mcp__repository__listBranches"))
             .start();
 

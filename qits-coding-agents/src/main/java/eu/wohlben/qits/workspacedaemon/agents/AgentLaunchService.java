@@ -93,12 +93,25 @@ public final class AgentLaunchService {
           "mcp__repository__listCommitChanges",
           "mcp__repository__getCommitFileDiff",
           "mcp__repository__listActions",
-          "mcp__repository__taskPrompt",
-          "mcp__repository__telemetryErrors",
-          "mcp__repository__telemetryTrace",
-          "mcp__repository__telemetrySlowSpans",
-          "mcp__repository__telemetrySearchLogs",
-          "mcp__repository__telemetryMetrics");
+          "mcp__repository__taskPrompt");
+
+  /**
+   * The read-only tools of the {@code observability} MCP server — the five telemetry reads, which
+   * used to be listed above as {@code mcp__repository__telemetry*}.
+   *
+   * <p>They moved because the server did. qits-observability and qits-projects both declared a
+   * server called {@code repository}, so one MCP url could only ever reach one of them; the
+   * telemetry half is now {@code observability}, served at {@code /observability/mcp}. Under the old
+   * names these five entries were an allowlist for tools no reachable server declared — present, and
+   * doing nothing.
+   */
+  private static final List<String> READ_ONLY_OBSERVABILITY_TOOLS =
+      List.of(
+          "mcp__observability__telemetryErrors",
+          "mcp__observability__telemetryTrace",
+          "mcp__observability__telemetrySlowSpans",
+          "mcp__observability__telemetrySearchLogs",
+          "mcp__observability__telemetryMetrics");
 
   /** Kimi session ids are opaque {@code session_}-prefixed path-safe slugs. */
   private static final String KIMI_SESSION_PATTERN = "session_[A-Za-z0-9_-]{1,128}";
@@ -560,13 +573,19 @@ public final class AgentLaunchService {
   /** A scoped MCP server: the key it is registered under, its scoped URL, and its read-only tools. */
   public record ScopedMcp(String key, String url, List<String> allowedTools) {}
 
-  /** The scoped MCP servers for {@code scope}, with their read-only allowlists. */
+  /**
+   * The scoped MCP servers for {@code scope}, with their read-only allowlists.
+   *
+   * <p>{@code repository} and {@code observability} are two servers on two services (qits-projects
+   * and qits-observability), not one server with two halves. They are listed together wherever the
+   * session is narrowed to a workspace, because that is the pairing the old single {@code
+   * repository} server presented.
+   */
   List<ScopedMcp> serversFor(AgentMcpScope scope) {
     String repo = requireUuid(workspace.repoId(), "repository id");
     String projectId = requireUuid(endpoints.projectId(), "project id");
     // Project-scoped, then narrowed to this one repository so a per-subtree session only sees its
-    // own repo, not its siblings in the project. The workspace narrowing is the third dimension:
-    // it unlocks (and fences) the telemetry tools, which answer only for the session's workspace.
+    // own repo, not its siblings in the project.
     ScopedMcp narrowedRepositoryServer =
         new ScopedMcp(
             "repository",
@@ -578,6 +597,19 @@ public final class AgentLaunchService {
                 + "&workspaceId="
                 + workspace.workspaceId(),
             READ_ONLY_REPOSITORY_TOOLS);
+    // Telemetry is bucketed per workspace, and qits-observability's tool filter hides the tools
+    // outright unless both narrowings are present — so this server is only worth listing where they
+    // are, and carries exactly the two scopes that service reads (no projectId: it has no notion of
+    // one).
+    ScopedMcp observabilityServer =
+        new ScopedMcp(
+            "observability",
+            endpoints.mcpUrl("observability")
+                + "?repositoryId="
+                + repo
+                + "&workspaceId="
+                + workspace.workspaceId(),
+            READ_ONLY_OBSERVABILITY_TOOLS);
     return switch (scope) {
       case ACTIONS ->
           // The "configure this repository" session: the actions server for the action library,
@@ -588,11 +620,14 @@ public final class AgentLaunchService {
                   "actions",
                   endpoints.mcpUrl("actions") + "?repositoryId=" + repo,
                   READ_ONLY_ACTION_TOOLS),
-              narrowedRepositoryServer);
-      case REPOSITORY -> List.of(narrowedRepositoryServer);
+              narrowedRepositoryServer,
+              observabilityServer);
+      case REPOSITORY -> List.of(narrowedRepositoryServer, observabilityServer);
       case PROJECT ->
           // Project scope only, no repository narrowing — the session sees every repository in the
           // project. It still runs in this repository's workspace (the terminal needs a checkout).
+          // No observability server: without the repository/workspace narrowing its tools are
+          // filtered away at the far end, so offering it would advertise a dead end.
           List.of(
               new ScopedMcp(
                   "repository",

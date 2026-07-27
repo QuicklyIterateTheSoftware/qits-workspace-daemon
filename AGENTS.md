@@ -74,6 +74,55 @@ An older backend drops a frame it cannot decode (`DaemonControlSocket` catches a
 a daemon→qits message degrades safely. The reverse is not true: a message qits sends that an older
 daemon image does not know will not be handled at all.
 
+## Addresses: what is injected, what is derived, what is still assumed
+
+`README.md`'s "What the daemon dials out to" has the table. The convention it follows is
+`/<segment>/(api|mcp|git|daemon)/…`, and the segment is **served by the owning service**, not added
+by the gateway — so it belongs in the url whether you reach the service through the gateway or dial
+its container on `qits-net`. There is no unprefixed form to fall back to.
+
+The rule when you add or move an address here:
+
+**Never derive one service's address from another service's.** Two classes used to: `httpBaseOf`
+took the control-socket url apart and appended `/mcp/<server>`, and `gitBase` did the same for
+`/git`. That was right in the monolith, where one process served everything. It is wrong now — MCP is
+qits-projects and qits-observability, git is qits-artifacts, the control socket is qits-workspaces —
+and it was wrong *before* the paths changed. The paths only made it visible.
+
+Both derivations survive as **fallbacks**, because the container is still handed exactly one address
+and nobody has decided whether that address is the gateway (`migration-path-conventions.md` §4 item 9
+leaves the gateway's capability questions open, so inventing the topology here would be guessing).
+What is not allowed is deriving one **silently**:
+
+- an explicit key exists for every derived address — `qits.workspace-daemon.git-base-url`,
+  `qits.repository-mcp.url`, `qits.observability-mcp.url` — and wins outright when set;
+- taking the fallback says so, at the point it is taken: a `DaemonLog` `WARN` from `Provisioner`,
+  a logged `WARN` from `DaemonMcpEndpoints`;
+- an address with no derivable form at all **throws** rather than being made up.
+  `qits.actions-mcp.url` is that case: no service in the split serves the `actions` MCP server
+  (`migration-plan.md` §9 item 6), so an ACTIONS-scope launch fails with that sentence instead of
+  handing the agent a URL that 404s.
+
+That last point is the shape of the whole rule. A wrong address here fails as a connection error or
+a 404, and a 404 from an MCP server surfaces to the user as *a tool that isn't there* — the launch
+looks like it worked. Failing loudly at the boundary is the only place it is legible.
+
+**The open question, stated so it is not lost:** none of the three non-control-socket hosts is
+injected today. qits-workspaces' `WorkspaceContainerFactory` sets fourteen `QITS_WORKSPACE_DAEMON_*`
+vars and none of them names qits-artifacts, qits-projects or qits-observability. So in a
+host-created container all three fall back to the control socket's authority, and the daemon is
+running on the assumption that one authority routes every segment. That is either correct (the url
+points at the gateway) or it is a bug the WARNs will name. **Whoever settles the gateway question
+settles this**: either the host injects the three keys, or it injects a gateway url and the
+derivations become sound. Do not quietly pick one by adding a default.
+
+**The MCP server names are a cross-repo contract.** `repository` is qits-projects; `observability`
+is qits-observability, renamed from `repository` for the reason that both services declaring that
+name meant this daemon could only ever address one of them. The telemetry allowlist entries moved
+with it (`mcp__observability__telemetry*`); under the old names they allowlisted tools no reachable
+server declared. If you touch `AgentLaunchService.serversFor`, the tool-name prefix and the server
+key have to move together.
+
 ## Things that look wrong and are not
 
 **`setsid --ctty` for terminals.** On the host this would have failed with EPERM — `docker exec -it`
