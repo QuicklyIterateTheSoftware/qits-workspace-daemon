@@ -52,11 +52,14 @@ No `{repoId}/{workspaceId}` prefix anywhere: this daemon serves exactly one work
 segments would be a constant the caller has to get right. The response bodies carry both ids back.
 
 These paths are **not** under the `/<segment>/…` convention the six services adopted, and that is
-deliberate for now: the daemon is one process per container rather than a service behind a gateway
-segment, so `migration-path-conventions.md` §3 defers its addressing rather than deciding it. The
-surface is unreachable in a host-created container regardless, for an unrelated reason —
+deliberate. Each of those six took its own gateway segment, and the gateway routes it verbatim by
+prefix — `/<segment>/*` → `qits-<segment>`, no rewriting — so the service serves the prefixed path
+itself. The daemon is one process per workspace container rather than a single service behind a
+segment, so its addressing is a different question, and it was left undecided rather than guessed
+at. The surface is unreachable in a host-created container regardless, for an unrelated reason —
 `migration-plan.md` §9 item 16: no gateway route and no `QITS_WORKSPACE_DAEMON_API_TOKEN` injected,
-so it does not bind at all.
+so it does not bind at all. That item now also blocks the six `services`/`bootstrap-commands`
+capabilities, whose host-side routes were deleted when the conventions landed.
 
 ## What the daemon does not keep
 
@@ -113,9 +116,11 @@ Four different services, on four hosts on `qits-net`. Every address follows
 right where one authority routes every segment — i.e. where the daemon was handed the gateway. Only
 one address is genuinely told to the container today, and it is qits-workspaces'. So each derivation
 announces itself: the git base as a `DaemonLog` `WARN` at provision time, the MCP hosts as a `WARN`
-at agent-wiring time. Nothing here silently invents a host and then fails as a 404 nobody sees. The
-gateway's own capability questions are open (`migration-path-conventions.md` §4 item 9), so the
-topology is not decided here — only made visible and overridable.
+at agent-wiring time. Nothing here silently invents a host and then fails as a 404 nobody sees. What
+is still unsettled at the gateway is a capability question rather than a naming one — how websockets
+pass through it with `SameOriginUpgradeCheck` still seeing a real `Origin`/`Host`, and it wants one
+answer for all sockets rather than one per route. So the topology is not decided here — only made
+visible and overridable.
 
 ## Configuration
 

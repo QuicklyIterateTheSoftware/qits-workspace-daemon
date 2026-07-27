@@ -90,9 +90,11 @@ qits-projects and qits-observability, git is qits-artifacts, the control socket 
 and it was wrong *before* the paths changed. The paths only made it visible.
 
 Both derivations survive as **fallbacks**, because the container is still handed exactly one address
-and nobody has decided whether that address is the gateway (`migration-path-conventions.md` §4 item 9
-leaves the gateway's capability questions open, so inventing the topology here would be guessing).
-What is not allowed is deriving one **silently**:
+and nobody has decided whether that address is the gateway. What is still open there is a gateway
+*capability* question rather than a naming one — how websockets pass through it with
+`SameOriginUpgradeCheck` still seeing a real `Origin`/`Host`, wanted as one answer for all sockets
+rather than one per route — so inventing the topology here would be guessing. What is not allowed is
+deriving one **silently**:
 
 - an explicit key exists for every derived address — `qits.workspace-daemon.git-base-url`,
   `qits.repository-mcp.url`, `qits.observability-mcp.url` — and wins outright when set;
