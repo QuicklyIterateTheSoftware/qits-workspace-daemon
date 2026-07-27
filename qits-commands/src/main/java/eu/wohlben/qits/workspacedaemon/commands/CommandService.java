@@ -43,7 +43,6 @@ public final class CommandService {
   private final CommandLogService commandLogService;
   private final WorkspaceContext workspace;
   private final ActionResolver actions;
-  private final OtelEnvironment otelEnvironment;
 
   public CommandService(
       CommandStore store,
@@ -51,21 +50,19 @@ public final class CommandService {
       CommandLifecycleService lifecycle,
       CommandLogService commandLogService,
       WorkspaceContext workspace,
-      ActionResolver actions,
-      OtelEnvironment otelEnvironment) {
+      ActionResolver actions) {
     this.store = store;
     this.registry = registry;
     this.lifecycle = lifecycle;
     this.commandLogService = commandLogService;
     this.workspace = workspace;
     this.actions = actions;
-    this.otelEnvironment = otelEnvironment;
   }
 
   /**
    * What a launch needs regardless of where it came from: an action or a coding agent. {@code
-   * actionId} is null for agent launches (they are not backed by an action). {@code otel} injects
-   * the OTLP exporter environment. {@code commandId} is a caller-chosen id (agent launches render
+   * actionId} is null for agent launches (they are not backed by an action). {@code commandId} is a
+   * caller-chosen id (agent launches render
    * it into the session-report hook URL before the command exists; null generates one) and {@code
    * agentSession} the first entry of an agent launch's session list. {@code agentType} is the
    * coding-agent harness recorded on the command (null for non-agent launches).
@@ -77,7 +74,6 @@ public final class CommandService {
       boolean interactive,
       Map<String, String> environment,
       CommandKind kind,
-      boolean otel,
       String commandId,
       AgentSessionRef agentSession,
       String agentType) {
@@ -90,7 +86,6 @@ public final class CommandService {
           action.interactive(),
           action.environment(),
           CommandKind.TERMINAL,
-          false,
           null,
           null,
           null);
@@ -145,7 +140,6 @@ public final class CommandService {
                 interactive,
                 environment,
                 CommandKind.TERMINAL,
-                false,
                 commandId,
                 agentSession,
                 agentType));
@@ -182,7 +176,6 @@ public final class CommandService {
                 false,
                 environment,
                 CommandKind.CHAT,
-                false,
                 commandId,
                 agentSession,
                 agentType));
@@ -227,13 +220,6 @@ public final class CommandService {
 
     Map<String, String> env = new HashMap<>();
     env.put("TERM", "xterm-256color");
-    if (descriptor.otel() && otelEnvironment != null) {
-      // The command id exists here — each (re)launch exports with its own qits.command.id. The
-      // descriptor's overlay stays last so an explicit user OTEL_* var wins.
-      env.putAll(
-          otelEnvironment.forLaunch(
-              workspace.repoId(), workspace.workspaceId(), command.id(), descriptor.name()));
-    }
     env.putAll(descriptor.environment());
     return new Prepared(command, env);
   }

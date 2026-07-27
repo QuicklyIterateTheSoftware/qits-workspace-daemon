@@ -71,7 +71,7 @@ class CommandServiceTest {
     CommandLifecycleService lifecycle = new CommandLifecycleService(store, null);
     CommandRegistry registry = new CommandRegistry(workspace, 2_000);
     CommandService service =
-        new CommandService(store, registry, lifecycle, logs, WORKSPACE, actions, null);
+        new CommandService(store, registry, lifecycle, logs, WORKSPACE, actions);
     return new Harness(service, store, registry);
   }
 

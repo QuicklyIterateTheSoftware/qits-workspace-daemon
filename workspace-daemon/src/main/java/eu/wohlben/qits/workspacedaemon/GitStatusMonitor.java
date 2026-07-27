@@ -297,6 +297,21 @@ final class GitStatusMonitor {
   }
 
   /**
+   * The commit this monitor last reported as HEAD, or {@code null} before the first report.
+   *
+   * <p>Exposed for the same reason {@link #marker()} is: a command launch has to snapshot the
+   * commit it ran against, and the host did that with a {@code docker exec git rev-parse HEAD} per
+   * launch. This value is already the product of the debounced read behind inotify, so reading it
+   * costs nothing and cannot disagree with the {@code GitStatus} just sent home — which is the same
+   * argument migration-plan.md §3.3 makes for {@code head} having always been on the wire while the
+   * host discarded it.
+   */
+  String head() {
+    GitStatus reported = last;
+    return reported == null ? null : reported.head();
+  }
+
+  /**
    * Re-send the last reported status (a no-op before the first report). Invoked on every socket
    * (re)connect so a qits restart that lost its in-memory cache gets the current value re-pushed,
    * mirroring {@code ServiceSupervisor.reportAll}.

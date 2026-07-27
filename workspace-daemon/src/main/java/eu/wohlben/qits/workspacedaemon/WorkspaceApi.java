@@ -1,5 +1,13 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.commands.CommandNotFoundException;
+import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
+import eu.wohlben.qits.workspacedaemon.commands.CommandService;
+import eu.wohlben.qits.workspacedaemon.commands.CommandStatus;
+import eu.wohlben.qits.workspacedaemon.commands.InvalidCommandRequestException;
+import eu.wohlben.qits.workspacedaemon.commands.LogChannel;
+import eu.wohlben.qits.workspacedaemon.commands.LogSeverity;
+import eu.wohlben.qits.workspacedaemon.commands.WorkspaceContext;
 import eu.wohlben.qits.workspacedaemon.detection.ComponentMapService;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.detection.DetectionService;
@@ -119,6 +127,21 @@ public class WorkspaceApi {
 
   static final String UPDATE_FROM_PARENT_PATH = "/update-from-parent";
 
+  /**
+   * The commands surface, from {@code qits-commands}. These came from the host's {@code
+   * /api/commands**}, which drove every process through a {@code docker exec} client; here the
+   * processes are this daemon's own children.
+   *
+   * <p>They carry no {@code {repoId}/{workspaceId}} prefix, unlike their host originals and like
+   * every other route on this server: the daemon serves exactly one workspace, so the segments
+   * would be a constant the caller has to get right. {@code CommandJson} puts both ids back into
+   * the response bodies, so the host's {@code CommandDto} still reconstructs unchanged.
+   */
+  static final String COMMANDS_PATH = "/commands";
+
+  /** {@code GET /commands/actions} — what this checkout declares. New; see {@link CommandJson}. */
+  static final String COMMAND_ACTIONS_PATH = "/commands/actions";
+
   private static final String BEARER = "Bearer ";
 
   @Inject Vertx vertx;
@@ -166,6 +189,29 @@ public class WorkspaceApi {
   private volatile ComponentMapService componentMap;
   private volatile Supplier<String> marker;
   private volatile String token;
+
+  /**
+   * The commands capability, wired separately from {@link #start} because it is available earlier:
+   * the file and detection endpoints need a provisioned checkout to read, while commands only needs
+   * the process machinery. {@link ControlSocket} still wires it in the same sequence for
+   * simplicity. Null until wired, in which case every {@code /commands} route answers 503 rather
+   * than NPEing into the event loop.
+   */
+  private volatile CommandService commands;
+
+  private volatile CommandRegistry registry;
+  private volatile WorkspaceContext workspaceContext;
+
+  /**
+   * Wire the commands surface. Separate from {@link #start} so the two capabilities' preconditions
+   * stay independent and a test can exercise either alone.
+   */
+  void wireCommands(
+      CommandService commands, CommandRegistry registry, WorkspaceContext workspaceContext) {
+    this.commands = commands;
+    this.registry = registry;
+    this.workspaceContext = workspaceContext;
+  }
 
   /**
    * Wire the capabilities over {@code root} and bind, unless no token is configured. Called from
@@ -245,6 +291,10 @@ public class WorkspaceApi {
       return;
     }
     String path = request.path();
+    if (path.equals(COMMANDS_PATH) || path.startsWith(COMMANDS_PATH + "/")) {
+      onCommandRequest(request, path);
+      return;
+    }
     boolean write = FAST_FORWARD_PATH.equals(path) || UPDATE_FROM_PARENT_PATH.equals(path);
     // GET everywhere except the two parent-integration routes, which mutate the checkout and are
     // POST-only. Checking the pairing here keeps a GET from ever reaching git.
@@ -265,6 +315,42 @@ public class WorkspaceApi {
       // become an unhandled event-loop exception; the caller retries against the next container.
       respond(request, 503, WorkspaceJson.error("Shutting down"));
     }
+  }
+
+  /**
+   * The {@code /commands} routes. Split out from {@link #onRequest} because they need two things
+   * the read API never did: path segments after a fixed prefix ({@code /commands/{id}/log}), and a
+   * request body ({@code POST /commands} carries the action id). The body is read on the event loop
+   * — it is a few dozen bytes — and only then is the work handed to a worker.
+   */
+  private void onCommandRequest(HttpServerRequest request, String path) {
+    if (commands == null) {
+      // Wired late, or not at all in a degraded boot. A retryable status, like the unprovisioned
+      // checkout's 503, rather than a 404 that reads as "this daemon will never serve commands".
+      respond(request, 503, WorkspaceJson.error("Commands are not available yet"));
+      return;
+    }
+    HttpMethod method = request.method();
+    if (method != HttpMethod.GET && method != HttpMethod.POST) {
+      respond(request, 405, WorkspaceJson.error("Method not allowed"));
+      return;
+    }
+    Context context = vertx.getOrCreateContext();
+    request
+        .body()
+        .onFailure(t -> respond(request, 400, WorkspaceJson.error("Could not read the request body")))
+        .onSuccess(
+            body -> {
+              try {
+                workers.execute(
+                    () -> {
+                      Reply reply = dispatchCommand(method, path, request, body.toString());
+                      context.runOnContext(v -> respond(request, reply.status(), reply.body()));
+                    });
+              } catch (RejectedExecutionException shuttingDown) {
+                respond(request, 503, WorkspaceJson.error("Shutting down"));
+              }
+            });
   }
 
   /** One answered request: the status and the body that goes with it. */
@@ -294,6 +380,114 @@ public class WorkspaceApi {
     } catch (RuntimeException e) {
       LOG.errorf(e, "workspace-daemon read API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
+    }
+  }
+
+  /**
+   * Route and run one {@code /commands} request.
+   *
+   * <p>The status mapping mirrors what the host's JAX-RS exception mappers produced, so the
+   * frontend's error handling does not move with the endpoints: an unknown command is 404, a
+   * malformed request or unknown action is 400. That is the same obligation migration-plan.md §8
+   * step 6 flags — no target inherits {@code DomainExceptionMapper}, so a boundary that does not
+   * re-provide the mapping returns 500 where the caller expects 400.
+   */
+  private Reply dispatchCommand(
+      HttpMethod method, String path, HttpServerRequest request, String body) {
+    try {
+      String repoId = workspaceContext.repoId();
+      String workspaceId = workspaceContext.workspaceId();
+      // Everything after "/commands", so "" for the collection and "/{id}[/verb]" otherwise.
+      String rest = path.substring(COMMANDS_PATH.length());
+      if (rest.isEmpty() || rest.equals("/")) {
+        return method == HttpMethod.POST
+            ? launchCommand(body, repoId, workspaceId)
+            : new Reply(
+                200,
+                CommandJson.commands(
+                    commands.list(parseStatus(request.getParam("status"))), repoId, workspaceId));
+      }
+      if (COMMAND_ACTIONS_PATH.equals(path) && method == HttpMethod.GET) {
+        return new Reply(200, CommandJson.actions(commands.availableActions()));
+      }
+      String[] segments = rest.substring(1).split("/", 2);
+      String commandId = segments[0];
+      String verb = segments.length > 1 ? segments[1] : "";
+      return switch (verb) {
+        case "" ->
+            method == HttpMethod.GET
+                ? new Reply(200, CommandJson.command(commands.get(commandId), repoId, workspaceId))
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case "log" ->
+            method == HttpMethod.GET
+                ? new Reply(
+                    200,
+                    CommandJson.log(
+                        commands.log(
+                            commandId,
+                            parseSeverity(request.getParam("severity")),
+                            parseChannel(request.getParam("channel")))))
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case "terminate" ->
+            method == HttpMethod.POST
+                ? new Reply(
+                    200,
+                    CommandJson.command(commands.terminate(commandId), repoId, workspaceId))
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        default -> new Reply(404, WorkspaceJson.error("No such endpoint"));
+      };
+    } catch (CommandNotFoundException e) {
+      return new Reply(404, WorkspaceJson.error(e.getMessage()));
+    } catch (InvalidCommandRequestException e) {
+      return new Reply(400, WorkspaceJson.error(e.getMessage()));
+    } catch (RuntimeException e) {
+      // Same posture as dispatch(): the text of an arbitrary exception can carry container paths
+      // the caller has no business seeing, so it is logged here and not returned.
+      LOG.errorf(e, "workspace-daemon commands API failed handling %s", path);
+      return new Reply(500, WorkspaceJson.error("Internal error"));
+    }
+  }
+
+  /** {@code POST /commands} — launch a declared action by id. */
+  private Reply launchCommand(String body, String repoId, String workspaceId) {
+    String actionId;
+    try {
+      actionId = new JsonObject(body == null || body.isBlank() ? "{}" : body).getString("actionId");
+    } catch (RuntimeException notJson) {
+      return new Reply(400, WorkspaceJson.error("Expected a JSON body"));
+    }
+    if (actionId == null || actionId.isBlank()) {
+      return new Reply(400, WorkspaceJson.error("actionId is required"));
+    }
+    return new Reply(
+        200, CommandJson.launched(commands.launch(actionId), repoId, workspaceId));
+  }
+
+  /**
+   * Query-parameter enums. An unparseable value is a 400 rather than being silently ignored: the
+   * host's JAX-RS binding rejected it, and quietly widening a filter would show a caller more than
+   * it asked for.
+   */
+  private static CommandStatus parseStatus(String raw) {
+    return parseEnum(raw, CommandStatus::valueOf, "status");
+  }
+
+  private static LogSeverity parseSeverity(String raw) {
+    return parseEnum(raw, LogSeverity::valueOf, "severity");
+  }
+
+  private static LogChannel parseChannel(String raw) {
+    return parseEnum(raw, LogChannel::valueOf, "channel");
+  }
+
+  private static <T> T parseEnum(String raw, java.util.function.Function<String, T> of, String name) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    try {
+      return of.apply(raw.toUpperCase(java.util.Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+      throw new InvalidCommandRequestException("Invalid " + name + ": " + raw);
     }
   }
 

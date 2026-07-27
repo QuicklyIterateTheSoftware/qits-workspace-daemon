@@ -1,5 +1,10 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.commands.CommandLifecycleService;
+import eu.wohlben.qits.workspacedaemon.commands.CommandLogService;
+import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
+import eu.wohlben.qits.workspacedaemon.commands.CommandService;
+import eu.wohlben.qits.workspacedaemon.commands.CommandStore;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
@@ -147,6 +152,11 @@ public class ControlSocket {
   // Loopback port the in-container coding-agent lifecycle hooks POST to (the daemon's only inbound
   // listener; see HookWebhook). Must match the port AgentLaunchService renders into the hook curl —
   // both default to 13337 (docs/epics/qits-coding-agents/ agent-activity tracking).
+  // Grace period a terminate gives the process group between SIGTERM and SIGKILL. Carried over
+  // from the host's qits.workspace.term-grace-ms, which sat on the registry for the same purpose.
+  @ConfigProperty(name = "qits.workspace-daemon.term-grace-ms", defaultValue = "5000")
+  long termGraceMs;
+
   @ConfigProperty(name = "qits.workspace-daemon.hooks-port", defaultValue = "13337")
   int hooksPort;
 
@@ -428,6 +438,45 @@ public class ControlSocket {
                 .map(f -> new DeclaredFramework(f.kind(), f.root()))
                 .toList(),
         monitor::marker);
+    wireCommands(monitor);
+  }
+
+  /**
+   * Assemble {@code qits-commands} and hand it to {@link WorkspaceApi}.
+   *
+   * <p>The module is framework-free by design — no CDI, like {@code workspace-daemon-files} and
+   * {@code workspace-daemon-detection} — so its objects are constructed here rather than injected.
+   * That is also why the wiring is explicit about the two seams: {@link DaemonWorkspaceContext}
+   * answers the identity questions the host used to resolve with a database read and a {@code
+   * docker exec}, and {@link ConfigActionResolver} answers action lookup from the checkout's own
+   * config instead of the host's featureflow tables.
+   *
+   * <p>The branch and commit are read through the monitor rather than captured, so a command
+   * launched after an agent switches branch records what was actually checked out.
+   *
+   * <p>{@code commandsChanged} rides the control socket as a {@code clientLog}-adjacent nudge —
+   * there is no dedicated EVENT for it and adding one would need a {@code CAPABILITY_VERSION} bump
+   * mirrored into qits-workspaces' vendored copy of the protocol. Until that happens the host
+   * refetches on its own cadence, which is what {@link CommandChangeListener} documents as the
+   * absent-listener behaviour.
+   */
+  private void wireCommands(GitStatusMonitor monitor) {
+    DaemonWorkspaceContext context =
+        new DaemonWorkspaceContext(repositoryId, workspaceId, () -> branch, monitor::head);
+    CommandStore store = new CommandStore();
+    CommandLogService logs = new CommandLogService(store, null);
+    CommandLifecycleService lifecycle = new CommandLifecycleService(store, null);
+    CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
+    CommandService commandService =
+        new CommandService(
+            store,
+            commandRegistry,
+            lifecycle,
+            logs,
+            context,
+            new ConfigActionResolver(() -> configState.config()));
+    workspaceApi.wireCommands(commandService, commandRegistry, context);
+    LOG.infof("workspace-daemon commands API wired for workspace %s", workspaceId);
   }
 
   /**

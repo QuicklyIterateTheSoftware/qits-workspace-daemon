@@ -53,6 +53,14 @@
             <artifactId>workspace-daemon-detection</artifactId>
         </dependency>
         <dependency>
+            <!-- Launching and supervising processes in the workspace, served over WorkspaceApi.
+                 Framework-free like files/detection, so it adds nothing the native-image builder
+                 has to be told about — except its own FFM downcalls, which register themselves
+                 from constant descriptors (see ForeignPty). -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-commands</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>
