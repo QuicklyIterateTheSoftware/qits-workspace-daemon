@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>qits-coding-agents</artifactId>
+
+    <!-- The coding-agent harnesses (Claude Code, Kimi) and everything that reads their state:
+         launch-spec rendering, the ACP transport, session lineage, transcript reads, plugin
+         install and auth status. Moved off the qits host into the container along with
+         `qits-commands`.
+
+         The relocation is what resolves this module's old host coupling rather than a port doing
+         it. On the host, `AgentAuthStatus`, `AgentPluginService` and `PromptRefinementService`
+         each shelled `docker exec` into the container to read `/claude-home`, and
+         `AgentTranscriptService` read the same volume through the host's mount of it. In here
+         `/claude-home` is simply a local path (the shared `qits.workspace.claude-volume`, mounted
+         at `qits.workspace.claude-mount`), so all four become plain file and process access —
+         the same win file browsing got when it moved.
+
+         Depends on `qits-commands` because launching an agent *is* launching a command: that is
+         the pre-existing `AgentLaunchService` -> `CommandService` direction, which used to cross a
+         package boundary in the monolith's `domain` module and now crosses a module boundary in
+         this repo. Framework-free for the same reason as its siblings. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-commands</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The checkout read primitives, for the agent config and plugin manifests that live
+                 in the working tree. Pulled transitively by nothing else here, so declared. -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>workspace-daemon-files</artifactId>
+        </dependency>
+        <dependency>
+            <!-- io.vertx.core.json only: the ACP wire, the harness transcript JSONL and the
+                 plugin manifests are all JSON. Same reasoning as qits-commands. -->
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

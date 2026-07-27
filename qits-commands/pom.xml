@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>qits-commands</artifactId>
+
+    <!-- Launching and supervising processes in the workspace, moved off the qits host into the
+         container. On the host every command was a pty4j `docker exec -it` client whose outer PTY
+         drove the container's inner TTY, and every row it produced was a `command` /
+         `command_log_line` insert in the host database. Here the process is a direct child of this
+         daemon and its state lives only as long as the container does — see AGENTS.md, "What the
+         daemon does not keep".
+
+         Framework-free in the same sense as `workspace-daemon-files` and
+         `workspace-daemon-detection`: no Quarkus, no CDI, no Panache, no JAX-RS and no Jackson, so
+         it links into the GraalVM native image with nothing to register and stays plain
+         unit-testable. The `workspace-daemon` module constructs these classes and serves them over
+         `WorkspaceApi`, the same division of labour the other capability jars use.
+
+         The one framework dependency is vertx-core, and only for `io.vertx.core.json`: the
+         stream-json chat transport has to parse the harness's line-delimited JSON, and this is
+         already the JSON library the daemon module carries (`WorkspaceJson` builds its bodies with
+         it). Adding Jackson for it would put a second JSON stack in the native image. -->
+
+    <dependencies>
+        <dependency>
+            <!-- io.vertx.core.json only — no Vertx instance, no event loop, no HTTP. Version
+                 managed by the quarkus-bom import in the parent. -->
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- ForeignPty calls libc through java.lang.foreign, which is a restricted
+                         method: without this the JVM warns on every run and, per the warning's own
+                         text, will refuse it outright in a future release. The native image needs
+                         no equivalent — native access is resolved at build time — but the daemon
+                         run in JVM mode does, so `quarkus.native.additional-build-args` is not the
+                         place for it either; see workspace-daemon's application.properties. -->
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -17,10 +17,13 @@
     <packaging>pom</packaging>
 
     <modules>
-        <!-- Dependency order: workspace-daemon depends on all three; detection depends on files. -->
+        <!-- Dependency order: workspace-daemon depends on all of them; detection depends on files;
+             qits-coding-agents depends on qits-commands and files. -->
         <module>workspace-daemon-protocol</module>
         <module>workspace-daemon-files</module>
         <module>workspace-daemon-detection</module>
+        <module>qits-commands</module>
+        <module>qits-coding-agents</module>
         <module>workspace-daemon</module>
     </modules>
 
@@ -63,6 +66,20 @@
             <dependency>
                 <groupId>eu.wohlben</groupId>
                 <artifactId>workspace-daemon-detection</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <!-- The command and coding-agent capability jars. Named without the
+                 `workspace-daemon-` prefix their siblings carry because they are the two surfaces
+                 most likely to be re-extracted into repos of their own later; keeping the daemon's
+                 name out of their coordinates means that move would not rename them. -->
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>qits-commands</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>qits-coding-agents</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
