@@ -90,12 +90,19 @@ import org.jboss.logging.Logger;
  * — including <em>other workspaces</em>, each running a coding agent over someone else's untrusted
  * code with unrestricted outbound network. (3) The daemon's other channels do not answer this: the
  * control socket is <em>outbound</em> (the daemon dials qits and qits never dials back), so nothing
- * about its reachability model transfers to an inbound listener, and qits-gateway's own posture
- * (its README's "Security posture") is explicit that it authenticates nothing itself and forwards
- * to components that authenticate their own requests. An unauthenticated port here would therefore
- * make every workspace's working tree — source, uncommitted work, whatever secrets a repo carries —
- * readable by every other workspace's agent. The path guards in {@code WorkspaceFileBrowser} bound
- * the damage to <em>this</em> checkout; they do nothing about <em>who</em> may read it.
+ * about its reachability model transfers to an inbound listener. An unauthenticated port here would
+ * therefore make every workspace's working tree — source, uncommitted work, whatever secrets a repo
+ * carries — readable by every other workspace's agent. The path guards in {@code
+ * WorkspaceFileBrowser} bound the damage to <em>this</em> checkout; they do nothing about
+ * <em>who</em> may read it.
+ *
+ * <p><b>The token's justification is the network, not the gateway.</b> This used to cite
+ * qits-gateway as authenticating nothing itself; it now authenticates every human request
+ * (migration-auth-plan.md). That changes nothing here, and the reason is worth keeping: the gateway
+ * is a perimeter against the internet, not a boundary on {@code qits-net}. The callers this token
+ * defends against are already <em>inside</em> — peer workspaces that never traverse the front door
+ * at all. This is peer authentication, not user authentication, and no amount of edge auth
+ * substitutes for it.
  *
  * <p>So the API requires a shared secret, {@code qits.workspace-daemon.api-token} (injected as
  * {@code QITS_WORKSPACE_DAEMON_API_TOKEN}, the same env family as the rest of the daemon's identity
