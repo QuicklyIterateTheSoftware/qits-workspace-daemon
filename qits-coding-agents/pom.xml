@@ -60,6 +60,13 @@
             </plugin>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Same reason as qits-commands: an agent launch goes through
+                         CommandRegistry.spawn, which opens a PTY through ForeignPty's
+                         java.lang.foreign downcalls. Restricted methods warn without this today and
+                         are refused outright in a future release. -->
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>
