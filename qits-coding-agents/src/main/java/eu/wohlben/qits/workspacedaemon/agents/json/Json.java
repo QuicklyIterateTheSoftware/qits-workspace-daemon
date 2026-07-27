@@ -193,6 +193,16 @@ public final class Json implements Iterable<Json> {
     return defaultValue;
   }
 
+  /** {@link #asInt(int)} with {@code 0}, matching Jackson's no-arg {@code asInt()}. */
+  public int asInt() {
+    return asInt(0);
+  }
+
+  /** {@link #asBoolean(boolean)} with {@code false}, matching Jackson's no-arg {@code asBoolean()}. */
+  public boolean asBoolean() {
+    return asBoolean(false);
+  }
+
   public int asInt(int defaultValue) {
     if (value instanceof Number number) {
       return number.intValue();
