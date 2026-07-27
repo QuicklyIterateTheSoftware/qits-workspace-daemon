@@ -134,6 +134,13 @@
             </plugin>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- CommandsApiTest and CommandSocketsTest launch real commands, which reach
+                         ForeignPty's java.lang.foreign downcalls through CommandRegistry. Same
+                         restricted-method flag its own module sets; see application.properties for
+                         why a JVM-mode run needs it on the command line instead. -->
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>
