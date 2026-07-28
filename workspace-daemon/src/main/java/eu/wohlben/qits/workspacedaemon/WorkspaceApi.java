@@ -217,6 +217,30 @@ public class WorkspaceApi {
   @ConfigProperty(name = "qits.workspace-daemon.api-bind-address", defaultValue = "127.0.0.1")
   String apiBindAddress;
 
+  /**
+   * The public base this API is addressed at, injected by qits-workspaces as {@code
+   * /workspaces/container/{workspaceId}}. Empty when nothing fronts the daemon, which is what every
+   * direct caller (a test, a loopback probe) gets.
+   *
+   * <p><b>Told, never derived.</b> The proxy in front of this daemon forwards the caller's path
+   * untouched — deliberately, because a hop that rewrites a path leaves the two ends disagreeing
+   * about the daemon's own address, and that disagreement surfaces far from the rewrite. So the
+   * daemon is configured with the part of the path that is its address rather than guessing at one:
+   * no leading segment is stripped by shape, no prefix is matched by pattern. It is the same
+   * property the control-socket url has — handed over whole, dialled verbatim, never parsed — and
+   * the same arrangement {@code ServiceProxyRoute} already has with a dev server's {@code
+   * QITS_PUBLIC_BASE}.
+   *
+   * <p>The routes below stay written as the paths they are, {@code /files} and not {@code
+   * <base>/files}: the base is where this server is mounted, not part of what it serves, so exactly
+   * one place — {@link #route} — knows about it.
+   */
+  @ConfigProperty(name = "qits.workspace-daemon.api-base-path", defaultValue = "")
+  String apiBasePath;
+
+  /** {@link #apiBasePath}, normalized: no trailing slash, empty when nothing fronts the daemon. */
+  private String basePath = "";
+
   // The shared secret every request must present as `Authorization: Bearer <token>`. Optional<> for
   // the same SmallRye reason as ControlSocket's identity knobs (an empty default resolves as "no
   // value"). Blank/absent ⇒ the server never binds; see the class javadoc for why fail-closed.
@@ -384,6 +408,7 @@ public class WorkspaceApi {
     this.componentMap = new ComponentMapService(files);
     this.marker = marker;
     this.token = token;
+    this.basePath = normalizeBase(apiBasePath);
     HttpServer bound = vertx.createHttpServer();
     this.server = bound;
     return bound
@@ -394,9 +419,53 @@ public class WorkspaceApi {
         .webSocketHandshakeHandler(
             handshake ->
                 CommandSockets.onHandshake(
-                    handshake, registry != null && authorized(handshake.headers())))
-        .webSocketHandler(socket -> CommandSockets.attach(socket, registry))
+                    handshake,
+                    registry != null && authorized(handshake.headers()),
+                    route(handshake.path())))
+        .webSocketHandler(socket -> CommandSockets.attach(socket, registry, route(socket.path())))
         .listen(port, bindAddress);
+  }
+
+  /**
+   * Normalize a configured base: a leading slash, no trailing one, and empty for every spelling of
+   * "nothing fronts me" ({@code null}, blank, {@code "/"}). Empty is the default and keeps a
+   * directly-addressed daemon behaving exactly as it did before a base existed.
+   */
+  private static String normalizeBase(String configured) {
+    if (configured == null || configured.isBlank() || configured.equals("/")) {
+      return "";
+    }
+    String value = configured.strip();
+    if (!value.startsWith("/")) {
+      value = "/" + value;
+    }
+    while (value.endsWith("/")) {
+      value = value.substring(0, value.length() - 1);
+    }
+    return value;
+  }
+
+  /**
+   * The route a request addresses: what is left of its path once the base this server is mounted at
+   * is accounted for, or {@code null} when the request was not addressed to this daemon at all.
+   *
+   * <p>The trailing-slash check is what keeps {@code /workspaces/container/12/files} from matching
+   * a base of {@code /workspaces/container/1}. A plain {@code startsWith} would route one
+   * workspace's request into another's daemon — which, on a host that runs a container per
+   * workspace, is a cross-workspace read, not a 404.
+   */
+  private String route(String path) {
+    if (basePath.isEmpty()) {
+      return path;
+    }
+    if (path == null || !path.startsWith(basePath)) {
+      return null;
+    }
+    String rest = path.substring(basePath.length());
+    if (rest.isEmpty()) {
+      return "/";
+    }
+    return rest.startsWith("/") ? rest : null;
   }
 
   /**
@@ -427,7 +496,13 @@ public class WorkspaceApi {
       respond(request, 401, WorkspaceJson.error("Unauthorized"));
       return;
     }
-    String path = request.path();
+    String path = route(request.path());
+    if (path == null) {
+      // Addressed at some other base — the same 404 an unknown endpoint gets, because a caller who
+      // guessed the wrong container should learn no more than one who guessed the wrong path.
+      respond(request, 404, WorkspaceJson.error("No such endpoint"));
+      return;
+    }
     if (path.equals(COMMANDS_PATH) || path.startsWith(COMMANDS_PATH + "/")) {
       onCommandRequest(request, path);
       return;

@@ -69,13 +69,17 @@ final class CommandSockets {
    * Authenticate and route the upgrade. Rejecting here rather than in {@link #onWebSocket} means an
    * unauthenticated caller never gets a socket at all, and — as with the REST 401 — learns only that
    * a credential is required, never whether the command exists.
+   *
+   * <p>{@code path} is the route {@link WorkspaceApi} resolved, not {@code handshake.path()}: when
+   * the daemon is served under a base path the two differ, and {@code null} means the request was
+   * not addressed to this daemon's base at all.
    */
-  static void onHandshake(ServerWebSocketHandshake handshake, boolean authorized) {
+  static void onHandshake(ServerWebSocketHandshake handshake, boolean authorized, String path) {
     if (!authorized) {
       handshake.reject(401);
       return;
     }
-    if (!isCommandSocket(handshake.path()) || commandIdOf(handshake.path()) == null) {
+    if (path == null || !isCommandSocket(path) || commandIdOf(path) == null) {
       handshake.reject(404);
       return;
     }
@@ -86,9 +90,16 @@ final class CommandSockets {
    * Attach {@code socket} to its command. A registry that has no such live command answers false, and
    * the socket is told so in its own dialect and closed — the caller's cue to fall back to the
    * command's log rather than wait forever on a stream that will never speak.
+   *
+   * <p>{@code path} is the resolved route, as in {@link #onHandshake}. The handshake already
+   * rejected anything that does not name a command, so the guards here are belt-and-braces: this
+   * method is reachable only through that handshake.
    */
-  static void attach(ServerWebSocket socket, CommandRegistry registry) {
-    String path = socket.path();
+  static void attach(ServerWebSocket socket, CommandRegistry registry, String path) {
+    if (path == null || !isCommandSocket(path)) {
+      socket.close();
+      return;
+    }
     boolean terminal = path.startsWith(TERMINAL_PREFIX);
     String commandId = commandIdOf(path);
     if (commandId == null) {

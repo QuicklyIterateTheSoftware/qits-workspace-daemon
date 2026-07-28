@@ -43,7 +43,9 @@ untrusted checkout, so it is never served anonymously.
 **The reverse tunnel** — how qits reaches that loopback server at all. On an `OpenStream`, the daemon
 dials a second outbound WebSocket back to qits-workspaces and pipes it to a fresh TCP connection to
 `127.0.0.1:13338`. The tunnel carries bytes, so an HTTP request and a WebSocket upgrade traverse it
-identically and adding a daemon endpoint costs nothing on the wire.
+identically and adding a daemon endpoint costs nothing on the wire. It also carries the request line
+verbatim, which is the other half of why nothing rewrites a path: there is no hop in this chain that
+*could* rewrite one without parsing and re-emitting HTTP.
 
 | | |
 |---|---|
@@ -61,8 +63,24 @@ the control socket, as `ServiceTransition`s and as the `BootstrapStep`/`Bootstra
 `Bootstrapped` sequence. Answering with a second, synchronous account of an outcome the caller is
 already subscribed to would be two sources of one truth.
 
-No `{repoId}/{workspaceId}` prefix anywhere: this daemon serves exactly one workspace, so those
-segments would be a constant the caller has to get right. The response bodies carry both ids back.
+No `{repoId}/{workspaceId}` prefix in any of those paths: this daemon serves exactly one workspace,
+so those segments would be a constant the caller has to get right. The response bodies carry both
+ids back.
+
+The paths above are what the daemon *serves*; they are not the whole URL a caller uses. qits-workspaces
+proxies to this API and **forwards the caller's path untouched** — no hop rewrites anything — so the
+daemon is told where it is mounted instead, as `qits.workspace-daemon.api-base-path`
+(`QITS_WORKSPACE_DAEMON_API_BASE_PATH`, injected as `/workspaces/container/{workspaceId}/`). With a
+base configured, `GET /files` is served at `GET /workspaces/container/12/files` and *only* there.
+
+Told, never derived. The daemon matches no shape and strips no leading segment — the same property
+the control-socket url has, handed over whole and dialled verbatim. A hop that rewrote the path
+would leave the two ends disagreeing about this daemon's own address, and that disagreement surfaces
+far from the rewrite that caused it. `WorkspaceApi.route` is the one place the base is known; every
+route below it is written as the path it is.
+
+The default is empty — no base, paths served as listed — which is what every direct caller gets, and
+is why a bare daemon behaves exactly as it did before a base existed.
 
 These paths are **not** under the `/<segment>/…` convention the six services adopted, and that is
 deliberate. Each of those six took its own gateway segment and serves the prefixed path itself. The
