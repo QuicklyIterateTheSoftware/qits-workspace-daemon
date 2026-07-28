@@ -168,6 +168,11 @@ public final class DaemonCodec {
         map.put(Field.CORRELATION_ID, m.correlationId());
         map.put(Field.BRANCH, m.branch());
       }
+      case OpenStream m -> {
+        map.put(Field.TYPE, Type.OPEN_STREAM);
+        map.put(Field.NONCE, m.nonce());
+        map.put(Field.PATH, m.path());
+      }
     }
     return map;
   }
@@ -268,6 +273,7 @@ public final class DaemonCodec {
               str(map, Field.CORRELATION_ID), str(map, Field.ID), str(map, Field.SIGNAL));
       case Type.PULL_BRANCH ->
           new PullBranch(str(map, Field.CORRELATION_ID), str(map, Field.BRANCH));
+      case Type.OPEN_STREAM -> new OpenStream(str(map, Field.NONCE), str(map, Field.PATH));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };

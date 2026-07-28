@@ -26,8 +26,25 @@ public final class DaemonProtocol {
    * frame when decoding it — {@code DaemonControlSocket} catches an undecodable frame and logs it
    * rather than failing the connection — so a newer daemon against an older backend degrades to the
    * refetch cadence that was the status quo, and nothing else about the socket changes.
+   *
+   * <p><b>4 added {@link OpenStream}, and this one the backend must gate on.</b> A daemon at 4 binds
+   * its HTTP API to {@code 127.0.0.1} and can only be reached through the reverse tunnel; a daemon
+   * at 3 binds {@code 0.0.0.0} and cannot answer an {@code OpenStream} at all. The two are strictly
+   * complementary and keyed by this one number, so there is no ambiguous middle: a host reads the
+   * version out of {@link Hello} and picks the tunnel or the direct address accordingly. This is
+   * also the asymmetry that makes the direction of a change matter — a daemon→qits addition
+   * degrades safely, but {@code OpenStream} travels qits→daemon and an older image simply never
+   * handles it.
    */
-  public static final int CAPABILITY_VERSION = 3;
+  public static final int CAPABILITY_VERSION = 4;
+
+  /**
+   * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
+   * listening on {@code qits-net}. Named rather than spelled as a literal at the branch, because
+   * the branch is a compatibility rule and not a magic number: below this, reach the daemon
+   * directly on {@code 13338}; at or above it, that port is not listening.
+   */
+  public static final int TUNNEL_CAPABILITY_VERSION = 4;
 
   /**
    * The fixed {@code correlationId} the daemon tags its autonomous-self-provision output ({@link
@@ -104,6 +121,7 @@ public final class DaemonProtocol {
     public static final String START_SERVICE = "startDaemon";
     public static final String SIGNAL_SERVICE = "signalDaemon";
     public static final String PULL_BRANCH = "pullBranch";
+    public static final String OPEN_STREAM = "openStream";
 
     private Type() {}
   }
@@ -147,6 +165,8 @@ public final class DaemonProtocol {
     public static final String TRANSCRIPT_PATH = "transcriptPath";
     public static final String AT = "at";
     public static final String TOPIC = "topic";
+    public static final String NONCE = "nonce";
+    public static final String PATH = "path";
 
     private Field() {}
   }

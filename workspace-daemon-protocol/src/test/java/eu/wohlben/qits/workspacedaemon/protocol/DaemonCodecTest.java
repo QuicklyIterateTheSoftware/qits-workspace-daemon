@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.Map;
@@ -300,6 +301,24 @@ class DaemonCodecTest {
     assertEquals(pull, roundTrip(pull));
     assertEquals(
         DaemonProtocol.Type.PULL_BRANCH, DaemonCodec.encode(pull).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void openStreamRoundTrips() {
+    OpenStream open = new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy");
+    assertEquals(open, roundTrip(open));
+    assertEquals(
+        DaemonProtocol.Type.OPEN_STREAM, DaemonCodec.encode(open).get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
+  void theTunnelCapabilityIsTheVersionThatIntroducedIt() {
+    // The compatibility branch is keyed on this pair agreeing: a daemon at TUNNEL_CAPABILITY_VERSION
+    // binds loopback and serves OpenStream, one below binds qits-net and does not. If the current
+    // version ever drops under it, every workspace silently takes the direct address to a port that
+    // is not listening.
+    assertEquals(4, DaemonProtocol.TUNNEL_CAPABILITY_VERSION);
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= DaemonProtocol.TUNNEL_CAPABILITY_VERSION);
   }
 
   @Test

@@ -29,4 +29,5 @@ public sealed interface DaemonMessage
         RunBootstrap,
         StartService,
         SignalService,
-        PullBranch {}
+        PullBranch,
+        OpenStream {}
