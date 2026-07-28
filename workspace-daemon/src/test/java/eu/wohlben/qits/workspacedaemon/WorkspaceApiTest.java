@@ -336,6 +336,21 @@ class WorkspaceApiTest {
   }
 
   @Test
+  void theShippedBindAddressIsLoopback() throws Exception {
+    // The one property in this file that is a security boundary rather than a knob. It bound
+    // 0.0.0.0 until the reverse tunnel landed, which made this server reachable by DNS name from
+    // every other container on qits-net — each running a coding agent over someone else's untrusted
+    // checkout, and each able to read the shared token out of its own environment. Widening it again
+    // does not fail any behavioural test: nothing in this suite reaches the daemon from off-host, so
+    // the value itself is the only thing that can be asserted.
+    java.util.Properties shipped = new java.util.Properties();
+    try (var in = getClass().getResourceAsStream("/application.properties")) {
+      shipped.load(in);
+    }
+    assertEquals("127.0.0.1", shipped.getProperty("qits.workspace-daemon.api-bind-address"));
+  }
+
+  @Test
   void anUnauthorizedCallerLearnsNothingAboutThePath() throws Exception {
     // A missing file and an existing one must be indistinguishable before the token is presented,
     // or the port becomes a file-existence oracle for anything on qits-net.

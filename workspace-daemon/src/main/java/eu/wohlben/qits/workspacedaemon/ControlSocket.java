@@ -30,6 +30,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
+import eu.wohlben.qits.workspacedaemon.protocol.OpenStream;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
@@ -323,6 +324,12 @@ public class ControlSocket {
   private volatile HookWebhook hooks;
 
   /**
+   * The reverse tunnel {@link WorkspaceApi} is reached through, now that it binds loopback and has
+   * no address on {@code qits-net} at all.
+   */
+  private volatile DaemonStreamTunnel tunnel;
+
+  /**
    * Keeps the checkout and its origin ref in sync both ways: auto-pushes committed work as the
    * {@link GitStatusMonitor} observes it, and applies host-triggered incoming {@link PullBranch}
    * pulls (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
@@ -435,6 +442,11 @@ public class ControlSocket {
     // up.
     hooks = new HookWebhook(vertx, hooksPort, this::send);
     hooks.start();
+    // The reverse tunnel qits reaches WorkspaceApi through. Independent of provisioning for the
+    // same reason the hook webhook is: it only needs the url and the port, and a stream requested
+    // before the API is up simply fails to connect to loopback and answers nothing.
+    tunnel = new DaemonStreamTunnel(vertx, url.get(), workspaceApi.apiPort());
+    tunnel.start();
     client = vertx.createWebSocketClient();
     if (heartbeatIntervalMs > 0) {
       vertx.setPeriodic(heartbeatIntervalMs, id -> heartbeat());
@@ -854,6 +866,14 @@ public class ControlSocket {
           workers.execute(() -> s.signal(request.id(), request.signal()));
         }
       }
+      case OpenStream request -> {
+        // On the event loop: both connects are non-blocking futures and the pumps are
+        // handler-driven, so there is nothing here worth a worker thread.
+        DaemonStreamTunnel t = tunnel;
+        if (t != null) {
+          t.open(request.nonce(), request.path());
+        }
+      }
       case PullBranch request -> {
         // The host advanced this workspace's branch on origin (a merge/integration into it); pull
         // it
@@ -937,6 +957,10 @@ public class ControlSocket {
     HookWebhook h = hooks;
     if (h != null) {
       h.close();
+    }
+    DaemonStreamTunnel tun = tunnel;
+    if (tun != null) {
+      tun.close();
     }
     AgentTranscriptTailService t = transcriptTail;
     if (t != null) {

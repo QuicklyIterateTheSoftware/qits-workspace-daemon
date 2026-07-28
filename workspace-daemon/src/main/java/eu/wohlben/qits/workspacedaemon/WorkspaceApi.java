@@ -79,34 +79,35 @@ import org.jboss.logging.Logger;
  * {"message": …}}. No handler is allowed to throw into the event loop, so the dispatch is wrapped
  * whole.
  *
- * <h2>Why this one is not loopback-bound</h2>
+ * <h2>Why this is loopback-bound</h2>
  *
- * <p>{@link HookWebhook} binds {@code 127.0.0.1} because its only client — the coding agent's
- * lifecycle hook — shares the container's network namespace. This server's client is qits-gateway,
- * on the shared {@code qits-net} docker network, so it must bind an address reachable from outside
- * the container (default {@code 0.0.0.0}) on a port of its own. That is the whole difference
- * between the two listeners, and it is the reason the security posture below exists at all.
+ * <p>It did not used to be. This server bound {@code 0.0.0.0} because its client was on the shared
+ * {@code qits-net} docker network, and that made it reachable by DNS name from every other
+ * container on that network — including <em>other workspaces</em>, each running a coding agent over
+ * someone else's untrusted code with unrestricted outbound network. One shared secret stood between
+ * one workspace's agent and every other workspace's working tree, and every one of those agents
+ * could read that secret out of its own environment.
+ *
+ * <p>So the listener stopped existing rather than the secret getting harder. {@link
+ * DaemonStreamTunnel} dials <em>out</em> when qits asks for a stream over the control socket, and
+ * pipes that connection to this server on loopback. Nothing on {@code qits-net} can reach this port
+ * at all now — a peer container's connection is refused by the network stack rather than by a token
+ * check, which is a boundary the topology has rather than one a comment claims.
  *
  * <h2>Security</h2>
  *
- * <p>Three facts set the threat model. (1) This port serves the contents of an <em>untrusted</em>
- * cloned repository. (2) It is reachable by DNS name from every other container on {@code qits-net}
- * — including <em>other workspaces</em>, each running a coding agent over someone else's untrusted
- * code with unrestricted outbound network. (3) The daemon's other channels do not answer this: the
- * control socket is <em>outbound</em> (the daemon dials qits and qits never dials back), so nothing
- * about its reachability model transfers to an inbound listener. An unauthenticated port here would
- * therefore make every workspace's working tree — source, uncommitted work, whatever secrets a repo
- * carries — readable by every other workspace's agent. The path guards in {@code
- * WorkspaceFileBrowser} bound the damage to <em>this</em> checkout; they do nothing about
- * <em>who</em> may read it.
+ * <p>The threat model that shaped this surface: it serves the contents of an <em>untrusted</em>
+ * cloned repository, so an unauthenticated port would make every workspace's working tree — source,
+ * uncommitted work, whatever secrets a repo carries — readable by whoever could reach it. The path
+ * guards in {@code WorkspaceFileBrowser} bound the damage to <em>this</em> checkout; they do nothing
+ * about <em>who</em> may read it.
  *
- * <p><b>The token's justification is the network, not the gateway.</b> This used to cite
- * qits-gateway as authenticating nothing itself; it now authenticates every human request
- * (migration-auth-plan.md). That changes nothing here, and the reason is worth keeping: the gateway
- * is a perimeter against the internet, not a boundary on {@code qits-net}. The callers this token
- * defends against are already <em>inside</em> — peer workspaces that never traverse the front door
- * at all. This is peer authentication, not user authentication, and no amount of edge auth
- * substitutes for it.
+ * <p><b>The bearer stays, and it is not the boundary.</b> Loopback is what makes this unreachable
+ * from off-container; the token is defence in depth behind it, and it costs nothing to keep. What it
+ * must not be described as is protection — for the whole of stage 1 it was the only thing standing
+ * between peer workspaces, was a shared constant readable by every agent, and that was accepted
+ * rather than overlooked. This is peer authentication (qits is calling), never user authentication:
+ * the daemon has no idea who the user is and never will.
  *
  * <p>So the API requires a shared secret, {@code qits.workspace-daemon.api-token} (injected as
  * {@code QITS_WORKSPACE_DAEMON_API_TOKEN}, the same env family as the rest of the daemon's identity
@@ -203,16 +204,17 @@ public class WorkspaceApi {
    */
   @Inject ControlSocket controlSocket;
 
-  // The port qits-gateway reaches this daemon's read API on. Distinct from hooks-port on purpose:
-  // that one is a loopback-only agent-hook sink, this one is network-reachable, and collapsing them
-  // onto one listener would put the hook endpoint on the docker network too.
+  // The port qits reaches this daemon's API on, through the reverse tunnel. Still distinct from
+  // hooks-port: they are different surfaces with different callers, and collapsing them onto one
+  // listener would put the unauthenticated hook endpoint behind the tunnel too.
   @ConfigProperty(name = "qits.workspace-daemon.api-port", defaultValue = "13338")
   int apiPort;
 
-  // Must be an address reachable from off-container (the container's qits-net interface), unlike
-  // the hook webhook's 127.0.0.1. Configurable so a deployment that puts the daemon on a narrower
-  // interface than "every one of them" can.
-  @ConfigProperty(name = "qits.workspace-daemon.api-bind-address", defaultValue = "0.0.0.0")
+  // Loopback, like the hook webhook, and for what is now the same reason: the only client that
+  // reaches this server shares the container's network namespace. That client is DaemonStreamTunnel,
+  // which dials out to qits and pipes the connection here. Configurable, but there is no longer a
+  // deployment shape that wants it wider — see the class javadoc.
+  @ConfigProperty(name = "qits.workspace-daemon.api-bind-address", defaultValue = "127.0.0.1")
   String apiBindAddress;
 
   // The shared secret every request must present as `Authorization: Bearer <token>`. Optional<> for
@@ -395,6 +397,16 @@ public class WorkspaceApi {
                     handshake, registry != null && authorized(handshake.headers())))
         .webSocketHandler(socket -> CommandSockets.attach(socket, registry))
         .listen(port, bindAddress);
+  }
+
+  /**
+   * The configured port, readable before {@link #start} runs — {@link DaemonStreamTunnel} needs it
+   * to reach this server on loopback, and is constructed earlier in the boot sequence than the
+   * bind. Distinct from {@link #actualPort()}, which is what was actually bound (and is {@code 0}
+   * until then, so a test can ask for an ephemeral).
+   */
+  int apiPort() {
+    return apiPort;
   }
 
   /** The bound port, {@code 0} before a successful listen — the test's handle on an ephemeral. */

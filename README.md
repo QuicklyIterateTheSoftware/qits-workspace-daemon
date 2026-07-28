@@ -35,10 +35,15 @@ agent activity and change nudges all ride it. Message shapes live in `workspace-
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.
 
-**The HTTP API** — a bearer-authenticated server on `:13338` serving the working tree, the commands
-surface, the coding-agent surface, and the two interactive websockets. It **does not bind** without
-`qits.workspace-daemon.api-token`: it is reachable from the whole docker network and serves an
+**The HTTP API** — a bearer-authenticated server on `127.0.0.1:13338` serving the working tree, the
+commands surface, the coding-agent surface, the service and bootstrap surfaces, and the two
+interactive websockets. It **does not bind** without `qits.workspace-daemon.api-token`: it serves an
 untrusted checkout, so it is never served anonymously.
+
+**The reverse tunnel** — how qits reaches that loopback server at all. On an `OpenStream`, the daemon
+dials a second outbound WebSocket back to qits-workspaces and pipes it to a fresh TCP connection to
+`127.0.0.1:13338`. The tunnel carries bytes, so an HTTP request and a WebSocket upgrade traverse it
+identically and adding a daemon endpoint costs nothing on the wire.
 
 | | |
 |---|---|
@@ -60,21 +65,20 @@ No `{repoId}/{workspaceId}` prefix anywhere: this daemon serves exactly one work
 segments would be a constant the caller has to get right. The response bodies carry both ids back.
 
 These paths are **not** under the `/<segment>/…` convention the six services adopted, and that is
-deliberate. Each of those six took its own gateway segment, and the gateway routes it verbatim by
-prefix — `/<segment>/*` → `qits-<segment>`, no rewriting — so the service serves the prefixed path
-itself. The daemon is one process per workspace container rather than a single service behind a
-segment, so its addressing is a different question, and it was left undecided rather than guessed
-at. The surface is unreachable in a host-created container regardless, for an unrelated reason —
-`migration-plan.md` §9 item 16: no gateway route and no `QITS_WORKSPACE_DAEMON_API_TOKEN` injected,
-so it does not bind at all.
+deliberate. Each of those six took its own gateway segment and serves the prefixed path itself. The
+daemon is one process per workspace container rather than a single service behind a segment, so its
+addressing was a different question — now settled:
 
-`final-workspaces-and-agent-communication-migration-plan.md` settles both halves of that, and the
-addressing question with them: **the daemon is never a gateway route.** It has no stable address to
-configure — one process per container, living for one container lifetime — so qits-workspaces, which
-owns the workspace row and the container, proxies to it at `/workspaces/container/{workspaceId}/**`
-and injects the token. Nothing else may reach a daemon. The `services` and `bootstrap-commands`
-routes above are that document's step 5: their host-side routes were deleted when the conventions
-landed, so the capability stayed here and the addressability came back here too.
+**The daemon is never a gateway route, and it has no address on `qits-net` at all.** It has nothing
+stable to configure: one process per container, living for one container lifetime. qits-workspaces
+owns the workspace row and the container lifecycle, so it proxies at
+`/workspaces/container/{workspaceId}/**`, injects the bearer, and asks for a stream over the control
+socket the daemon already holds open. Nothing else may reach a daemon.
+
+That closes `migration-plan.md` §9 item 16 (no route, no token injected — so the server did not bind)
+and item 21's first half. The `services` and `bootstrap-commands` routes above came back here for the
+same reason: their host-side routes were deleted when the conventions landed, so the capability had
+stayed and only the addressability was missing.
 
 ## What the daemon does not keep
 
