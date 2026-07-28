@@ -54,7 +54,7 @@ class WorkspaceApiBasePathTest {
     api.vertx = vertx;
     // The injected value carries a trailing slash (ContainerProxyPath.base does), so binding with
     // one here is the real input rather than a tidied version of it.
-    api.apiBasePath = BASE + "/";
+    api.apiBasePath = java.util.Optional.of(BASE + "/");
     await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
     port = api.actualPort();
     client = vertx.createHttpClient();

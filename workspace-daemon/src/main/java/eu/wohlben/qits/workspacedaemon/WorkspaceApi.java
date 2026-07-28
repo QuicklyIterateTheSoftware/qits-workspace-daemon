@@ -234,9 +234,17 @@ public class WorkspaceApi {
    * <p>The routes below stay written as the paths they are, {@code /files} and not {@code
    * <base>/files}: the base is where this server is mounted, not part of what it serves, so exactly
    * one place — {@link #route} — knows about it.
+   *
+   * <p>{@code Optional<String>} rather than a {@code defaultValue = ""}, for the reason README.md
+   * gives for every identity value: SmallRye reads an empty default as <em>no value</em> and then
+   * fails to resolve a plain {@code String} when nothing is injected. A daemon with no base is the
+   * normal case, so that spelling made the binary die on startup with "Failed to load config value
+   * of type class java.lang.String" — and nothing in the suite could see it, because these tests
+   * construct {@code WorkspaceApi} directly and never resolve config at all. Running the image with
+   * no environment is what catches this class of mistake.
    */
-  @ConfigProperty(name = "qits.workspace-daemon.api-base-path", defaultValue = "")
-  String apiBasePath;
+  @ConfigProperty(name = "qits.workspace-daemon.api-base-path")
+  Optional<String> apiBasePath;
 
   /** {@link #apiBasePath}, normalized: no trailing slash, empty when nothing fronts the daemon. */
   private String basePath = "";
@@ -408,7 +416,8 @@ public class WorkspaceApi {
     this.componentMap = new ComponentMapService(files);
     this.marker = marker;
     this.token = token;
-    this.basePath = normalizeBase(apiBasePath);
+    // Null when constructed directly rather than by CDI, which is how every test here builds it.
+    this.basePath = normalizeBase(apiBasePath == null ? null : apiBasePath.orElse(null));
     HttpServer bound = vertx.createHttpServer();
     this.server = bound;
     return bound

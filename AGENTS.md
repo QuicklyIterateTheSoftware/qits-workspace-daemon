@@ -22,6 +22,14 @@ by hand**, in the two files under
 paragraph has the whole story, and got it wrong for a while. Add a downcall whose shape is not
 already listed and the build stays green; only the running binary will tell you.
 
+**An empty `defaultValue` is not a default.** SmallRye reads `@ConfigProperty(name = "…",
+defaultValue = "")` as *no value* and then fails to resolve a plain `String`, so the binary dies at
+startup with `Failed to load config value of type class java.lang.String for: <key>`. Optional
+settings are `Optional<String>` — the identity values already are, and `api-base-path` had to
+become one. **The suite cannot see this**: tests construct `WorkspaceApi` and friends directly and
+never resolve config at all. `docker run` on the image with no environment is what catches it, which
+is one reason `docker/Dockerfile` is worth having here.
+
 ## Module conventions
 
 `eu.wohlben.qits.workspacedaemon.*`, one sub-package per module, no split packages.
