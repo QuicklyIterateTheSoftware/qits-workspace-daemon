@@ -48,13 +48,13 @@ COPY mvnw .
 COPY .mvn/ .mvn/
 RUN ./mvnw --version
 
-COPY pom.xml .
-COPY workspace-daemon-protocol/ workspace-daemon-protocol/
-COPY workspace-daemon-files/ workspace-daemon-files/
-COPY workspace-daemon-detection/ workspace-daemon-detection/
-COPY qits-commands/ qits-commands/
-COPY qits-coding-agents/ qits-coding-agents/
-COPY workspace-daemon/ workspace-daemon/
+# The whole reactor, not a module list. `-am` builds workspace-daemon's dependencies from source —
+# they are 1.0.0-SNAPSHOTs this repo never publishes (no distributionManagement, no <repositories>),
+# so a builder container with an empty ~/.m2 has nowhere else to get them. Copying module by module
+# would mean editing this file every time one is added, and forgetting to would fail the build with
+# an unresolved dependency rather than anything that names the real cause. `.dockerignore` is what
+# keeps this cheap — without it this line drags in every target/ dir.
+COPY . .
 
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.

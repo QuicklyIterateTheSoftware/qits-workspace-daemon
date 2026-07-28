@@ -1,0 +1,25 @@
+# Build context trim for `docker build -f docker/Dockerfile .` (root context, whole reactor).
+#
+# docker/Dockerfile deliberately does `COPY . .` rather than listing modules: the reactor builds
+# workspace-daemon's dependencies from source (they are never published), and a module list would
+# have to be edited every time a module is added. This file is what makes that cheap — it drops
+# everything the build does not need, so adding a module stays free and no stale output leaks in.
+
+.git
+.gitignore
+
+# Maven / Quarkus build output — regenerated inside the build stage, and ~79 MB of it here. Copying
+# it in would also risk a stale target/ shadowing what the stage compiles.
+**/target
+**/target-ide
+
+# Local env / IDE cruft
+.env
+.idea
+.vscode
+.sdkmanrc
+
+# Docs and the docker/ dir itself: nothing in the build reads them, and keeping them out means
+# editing this Dockerfile, Dockerfile.workspace or a README does not bust the `COPY . .` layer.
+*.md
+docker
