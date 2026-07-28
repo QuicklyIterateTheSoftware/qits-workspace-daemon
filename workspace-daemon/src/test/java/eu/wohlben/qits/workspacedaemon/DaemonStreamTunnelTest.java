@@ -178,18 +178,18 @@ class DaemonStreamTunnelTest {
   }
 
   @Test
-  void aLocalApiThatIsNotListeningClosesTheStreamRatherThanHanging() throws Exception {
-    // The daemon is up but WorkspaceApi has not bound (no token, or not provisioned yet). The
-    // dial-back still happens — the host asked — and then the stream closes, which is what turns
-    // into a connection error at the host end instead of a request that never answers.
+  void aLocalApiThatIsNotListeningNeverDialsBack() throws Exception {
+    // The daemon is up but WorkspaceApi has not bound — no token, or not provisioned yet. Because
+    // the loopback connection is made first, the failure happens before anything is dialled: the
+    // host is not handed a socket that can only disappoint it, and its own parked connection
+    // expires on its TTL into an ordinary connection error.
     startTunnel(freePort());
 
     tunnel.open("test-nonce", STREAM_PATH);
-    dialBackArrived.get(15, TimeUnit.SECONDS);
+    Thread.sleep(500);
 
-    CompletableFuture<Void> closed = new CompletableFuture<>();
-    lastDialBack.get().closeHandler(v -> closed.complete(null));
-    closed.get(15, TimeUnit.SECONDS);
+    assertTrue(dialled.isEmpty(), "nothing to serve means nothing to dial: " + dialled);
+    assertFalse(dialBackArrived.isDone());
   }
 
   // --- helpers ------------------------------------------------------------------------------------

@@ -99,22 +99,24 @@ final class DaemonStreamTunnel {
       return;
     }
     int port = dial.getPort() == -1 ? 80 : dial.getPort();
-    ws.connect(
-            new WebSocketConnectOptions()
-                .setHost(dial.getHost())
-                .setPort(port)
-                .setURI(dial.getRawPath()))
-        .onFailure(
-            t -> LOG.debugf("stream %s could not dial home: %s", nonce, String.valueOf(t)))
+    // The loopback connection first, and the dial-back second. Reversed, the host can start writing
+    // the moment the upgrade completes — before this side has anywhere to put the bytes — and losing
+    // the request line presents as a request that is simply never answered.
+    net.connect(apiPort, "127.0.0.1")
+        .onFailure(t -> LOG.debugf("stream %s could not reach the local API: %s", nonce, t))
         .onSuccess(
-            socket ->
-                net.connect(apiPort, "127.0.0.1")
+            local ->
+                ws.connect(
+                        new WebSocketConnectOptions()
+                            .setHost(dial.getHost())
+                            .setPort(port)
+                            .setURI(dial.getRawPath()))
                     .onFailure(
                         t -> {
-                          LOG.debugf("stream %s could not reach the local API: %s", nonce, t);
-                          socket.close();
+                          LOG.debugf("stream %s could not dial home: %s", nonce, String.valueOf(t));
+                          local.close();
                         })
-                    .onSuccess(local -> pipe(socket, local)));
+                    .onSuccess(remote -> pipe(remote, local)));
   }
 
   /**
@@ -156,6 +158,12 @@ final class DaemonStreamTunnel {
    * this onto the control socket unaffordable in the first place, reintroduced per stream.
    */
   private static void pipe(WebSocket remote, NetSocket local) {
+    // Both ends are held until the handlers below exist. The host writes as soon as its upgrade
+    // completes, which is concurrent with this callback, so anything read before there is a
+    // handler to take it would be lost — and one lost request line is a request that never
+    // answers, with nothing anywhere to say why.
+    remote.pause();
+    local.pause();
     remote.handler(
         buffer -> {
           local.write(buffer);
@@ -178,6 +186,8 @@ final class DaemonStreamTunnel {
     local.exceptionHandler(t -> remote.close());
     remote.closeHandler(v -> local.close());
     local.closeHandler(v -> remote.close());
+    remote.resume();
+    local.resume();
   }
 
   void close() {
