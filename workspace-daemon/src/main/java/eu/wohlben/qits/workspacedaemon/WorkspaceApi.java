@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.commands.CommandNotFoundException;
 import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
 import eu.wohlben.qits.workspacedaemon.agents.AgentDefaults;
@@ -23,6 +24,7 @@ import eu.wohlben.qits.workspacedaemon.detection.DetectionService;
 import eu.wohlben.qits.workspacedaemon.files.LocalWorkspaceFiles;
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFileBrowser;
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFilesException;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -33,6 +35,7 @@ import io.vertx.core.json.JsonObject;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -41,6 +44,7 @@ import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -173,6 +177,22 @@ public class WorkspaceApi {
 
   static final String PROMPT_REFINEMENTS_PATH = "/prompt-refinements";
 
+  /**
+   * The service-supervision surface and the bootstrap chain's. Both were host routes — {@code
+   * /workspaces/{id}/services…} and {@code /workspaces/{id}/bootstrap-commands…} — that were
+   * <em>deleted rather than moved</em> when the work went into the container: {@link
+   * ServiceSupervisor} and {@link BootstrapRunner} do it here, and nothing ever grew routes for
+   * them. So the capability survived the move and the addressability did not. These two put the
+   * addressability back where the capability already is.
+   *
+   * <p>Prefix-free like {@link #COMMANDS_PATH} and for the same reason: the daemon serves exactly
+   * one workspace, so a {@code /{repoId}/{workspaceId}} prefix would be a constant the caller has
+   * to get right.
+   */
+  static final String SERVICES_PATH = "/services";
+
+  static final String BOOTSTRAP_COMMANDS_PATH = "/bootstrap-commands";
+
   private static final String BEARER = "Bearer ";
 
   @Inject Vertx vertx;
@@ -241,6 +261,25 @@ public class WorkspaceApi {
   private volatile PromptRefinementService promptRefinement;
   private volatile AgentDefaults agentDefaults;
 
+  /** The service supervisor, wired by {@link ControlSocket}; null ⇒ every route answers 503. */
+  private volatile ServiceSupervisor services;
+
+  /** The bootstrap wiring, null until {@link #wireBootstrap} runs; same 503 rule. */
+  private volatile BootstrapWiring bootstrap;
+
+  /**
+   * Everything {@link BootstrapRunner#run} needs, captured at wiring time. It is a static utility
+   * with no state of its own, so there is nothing to hold a reference to — and the module is
+   * framework-free and cannot read configuration, so the chain, the working directory and the step
+   * timeout all have to arrive from {@link ControlSocket}, the single config reader.
+   */
+  private record BootstrapWiring(
+      String workspaceId,
+      Supplier<List<BootstrapDecl>> chain,
+      File workingDir,
+      long stepTimeoutMs,
+      Consumer<DaemonMessage> emit) {}
+
   /**
    * Wire the commands surface. Separate from {@link #start} so the two capabilities' preconditions
    * stay independent and a test can exercise either alone.
@@ -267,6 +306,26 @@ public class WorkspaceApi {
     this.agentPlugins = agentPlugins;
     this.promptRefinement = promptRefinement;
     this.agentDefaults = agentDefaults;
+  }
+
+  /**
+   * Wire the service-supervision surface. Separate from the others for the reason they are separate
+   * from each other — the preconditions differ. This one is available earliest of all: {@link
+   * ControlSocket} constructs the supervisor before provisioning even starts, so {@code
+   * GET /services} answers a declared-but-stopped list while the checkout is still cloning.
+   */
+  void wireServices(ServiceSupervisor services) {
+    this.services = services;
+  }
+
+  /** Wire the bootstrap surface; see {@link BootstrapWiring} for why it takes five arguments. */
+  void wireBootstrap(
+      String workspaceId,
+      Supplier<List<BootstrapDecl>> chain,
+      File workingDir,
+      long stepTimeoutMs,
+      Consumer<DaemonMessage> emit) {
+    this.bootstrap = new BootstrapWiring(workspaceId, chain, workingDir, stepTimeoutMs, emit);
   }
 
   /**
@@ -363,6 +422,10 @@ public class WorkspaceApi {
     }
     if (isAgentPath(path)) {
       onAgentRequest(request, path);
+      return;
+    }
+    if (isLifecyclePath(path)) {
+      onLifecycleRequest(request, path);
       return;
     }
     boolean write = FAST_FORWARD_PATH.equals(path) || UPDATE_FROM_PARENT_PATH.equals(path);
@@ -527,6 +590,172 @@ public class WorkspaceApi {
       LOG.errorf(e, "workspace-daemon agents API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
+  }
+
+  /** Whether {@code path} belongs to the services / bootstrap surface. */
+  private static boolean isLifecyclePath(String path) {
+    return path.equals(SERVICES_PATH)
+        || path.startsWith(SERVICES_PATH + "/")
+        || path.equals(BOOTSTRAP_COMMANDS_PATH)
+        || path.startsWith(BOOTSTRAP_COMMANDS_PATH + "/");
+  }
+
+  /**
+   * The services / bootstrap routes. Same shape as {@link #onAgentRequest} — GET/POST only, body
+   * read on the event loop, work handed to a worker — because they have the same two needs: a path
+   * segment after a fixed prefix, and a request body.
+   */
+  private void onLifecycleRequest(HttpServerRequest request, String path) {
+    HttpMethod method = request.method();
+    if (method != HttpMethod.GET && method != HttpMethod.POST) {
+      respond(request, 405, WorkspaceJson.error("Method not allowed"));
+      return;
+    }
+    Context context = vertx.getOrCreateContext();
+    request
+        .body()
+        .onFailure(t -> respond(request, 400, WorkspaceJson.error("Could not read the request body")))
+        .onSuccess(
+            body -> {
+              try {
+                workers.execute(
+                    () -> {
+                      Reply reply = dispatchLifecycle(method, path, request, body.toString());
+                      context.runOnContext(v -> respond(request, reply.status(), reply.body()));
+                    });
+              } catch (RejectedExecutionException shuttingDown) {
+                respond(request, 503, WorkspaceJson.error("Shutting down"));
+              }
+            });
+  }
+
+  /**
+   * Route and run one services / bootstrap request.
+   *
+   * <p><b>Every write here answers 202, not 200.</b> Starting a service and running a bootstrap
+   * chain are long-running and already report themselves over the control socket — a service as
+   * {@code ServiceTransition}s, a chain as {@code BootstrapStep}/{@code BootstrapOutcome}/{@code
+   * Bootstrapped} — and a bootstrap step is bounded only by {@code bootstrap-timeout-ms}, which
+   * defaults to an hour. Holding a response open for that is not a contract anyone wants, and
+   * inventing a second, synchronous report of an outcome the caller is already subscribed to would
+   * be two sources of one truth.
+   */
+  private Reply dispatchLifecycle(
+      HttpMethod method, String path, HttpServerRequest request, String body) {
+    try {
+      return path.equals(SERVICES_PATH) || path.startsWith(SERVICES_PATH + "/")
+          ? dispatchService(method, path, request, body)
+          : dispatchBootstrap(method, path);
+    } catch (InvalidCommandRequestException e) {
+      return new Reply(400, WorkspaceJson.error(e.getMessage()));
+    } catch (RuntimeException e) {
+      // Same posture as dispatch(): an arbitrary exception's text can carry container paths the
+      // caller has no business seeing, so it is logged here and not returned.
+      LOG.errorf(e, "workspace-daemon lifecycle API failed handling %s", path);
+      return new Reply(500, WorkspaceJson.error("Internal error"));
+    }
+  }
+
+  /** {@code /services} — list, start one, signal one. */
+  private Reply dispatchService(
+      HttpMethod method, String path, HttpServerRequest request, String body) {
+    ServiceSupervisor supervisor = services;
+    if (supervisor == null) {
+      return new Reply(503, WorkspaceJson.error("Services are not available yet"));
+    }
+    String rest = path.substring(SERVICES_PATH.length());
+    if (rest.isEmpty() || rest.equals("/")) {
+      return method == HttpMethod.GET
+          ? new Reply(200, WorkspaceJson.services(supervisor.states()))
+          : new Reply(405, WorkspaceJson.error("Method not allowed"));
+    }
+    if (method != HttpMethod.POST) {
+      return new Reply(405, WorkspaceJson.error("Method not allowed"));
+    }
+    String[] segments = rest.substring(1).split("/", 2);
+    String name = segments[0];
+    String verb = segments.length > 1 ? segments[1] : "";
+    return switch (verb) {
+      case "start" -> {
+        JsonObject json = jsonBody(body);
+        supervisor.start(name, json.getString("script"), stringMap(json.getJsonObject("env")));
+        yield new Reply(202, WorkspaceJson.accepted());
+      }
+      case "signal" -> {
+        // The query parameter wins over the body so a signal can be sent with no body at all; both
+        // absent is the stop signal, which is what SignalService's own default resolves to.
+        String signal = request.getParam("signal");
+        supervisor.signal(name, signal != null ? signal : jsonBody(body).getString("signal"));
+        yield new Reply(202, WorkspaceJson.accepted());
+      }
+      default -> new Reply(404, WorkspaceJson.error("No such endpoint"));
+    };
+  }
+
+  /** {@code /bootstrap-commands} — list the chain, run it whole, or run one named step. */
+  private Reply dispatchBootstrap(HttpMethod method, String path) {
+    BootstrapWiring wiring = bootstrap;
+    if (wiring == null) {
+      return new Reply(503, WorkspaceJson.error("Bootstrap is not available yet"));
+    }
+    String rest = path.substring(BOOTSTRAP_COMMANDS_PATH.length());
+    if (rest.isEmpty() || rest.equals("/")) {
+      return method == HttpMethod.GET
+          ? new Reply(200, WorkspaceJson.bootstrapCommands(wiring.chain().get()))
+          : new Reply(405, WorkspaceJson.error("Method not allowed"));
+    }
+    if (method != HttpMethod.POST) {
+      return new Reply(405, WorkspaceJson.error("Method not allowed"));
+    }
+    String[] segments = rest.substring(1).split("/", 2);
+    // The whole chain is /bootstrap-commands/run and one step is /bootstrap-commands/{name}/run, so
+    // "run" is a reserved step name here. Checking the collection form first is what makes it so.
+    if (segments.length == 1 && "run".equals(segments[0])) {
+      runBootstrap(wiring, null);
+      return new Reply(202, WorkspaceJson.accepted());
+    }
+    if (segments.length == 2 && "run".equals(segments[1])) {
+      runBootstrap(wiring, segments[0]);
+      return new Reply(202, WorkspaceJson.accepted());
+    }
+    return new Reply(404, WorkspaceJson.error("No such endpoint"));
+  }
+
+  /**
+   * Hand the chain to the worker pool and return. The run streams itself home over the control
+   * socket exactly as {@code RunBootstrap} does, so there is nothing left to answer with — and it is
+   * bounded by a step timeout that defaults to an hour, so returning immediately is the point.
+   */
+  private void runBootstrap(BootstrapWiring wiring, String onlyName) {
+    workers.execute(
+        () ->
+            BootstrapRunner.run(
+                wiring.workspaceId(),
+                wiring.chain().get(),
+                onlyName,
+                wiring.workingDir(),
+                wiring.stepTimeoutMs(),
+                wiring.emit()));
+  }
+
+  /**
+   * A JSON object read as an environment overlay. Values are coerced with {@code String.valueOf}
+   * rather than {@code getString}, because a {@code .qits-config.yml}-shaped body writing {@code
+   * PORT: 8080} means the number, and a null overlay entry is dropped rather than becoming the text
+   * "null" in a child process's environment.
+   */
+  private static java.util.Map<String, String> stringMap(JsonObject json) {
+    if (json == null) {
+      return null;
+    }
+    java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+    for (String key : json.fieldNames()) {
+      Object value = json.getValue(key);
+      if (value != null) {
+        map.put(key, String.valueOf(value));
+      }
+    }
+    return map;
   }
 
   /** {@code POST /agents} — the launch request, with the enums validated like a query parameter. */

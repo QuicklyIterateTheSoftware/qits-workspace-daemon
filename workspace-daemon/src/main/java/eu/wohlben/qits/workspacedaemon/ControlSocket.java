@@ -410,6 +410,18 @@ public class ControlSocket {
             serviceBackoffInitialMs,
             serviceBackoffMaxMs,
             serviceStopGraceMs);
+    // Both surfaces are wired here rather than beside the file/detection wiring in
+    // startGitStatusMonitor, because neither needs a provisioned checkout to answer: the service
+    // list is the declared set plus live state, and the bootstrap chain is read from the config the
+    // ConfigReader already holds. WorkspaceApi does not bind until start() runs anyway, so an early
+    // wire only means the routes are ready the moment it does.
+    workspaceApi.wireServices(services);
+    workspaceApi.wireBootstrap(
+        workspaceId,
+        () -> configState.config().bootstrap(),
+        WORKSPACE_DIR,
+        bootstrapTimeoutMs,
+        this::send);
     // Autonomous self-provision: clone /workspace + materialize submodules from env, on boot, off
     // the
     // event loop — independent of whether the socket is up yet (its results buffer until it is).

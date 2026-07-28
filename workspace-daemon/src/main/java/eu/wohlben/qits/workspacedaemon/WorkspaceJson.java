@@ -126,6 +126,46 @@ final class WorkspaceJson {
     return new JsonObject().put("framework", map.framework()).put("components", components);
   }
 
+  /** {@code GET /services} — every declared service and the state the supervisor holds for it. */
+  static JsonObject services(List<ServiceSupervisor.ServiceState> states) {
+    JsonArray services = new JsonArray();
+    for (ServiceSupervisor.ServiceState state : states) {
+      JsonObject json = new JsonObject().put("name", state.name()).put("state", state.state());
+      putIfPresent(json, "id", state.id());
+      putIfPresent(json, "description", state.description());
+      services.add(json);
+    }
+    return new JsonObject().put("services", services);
+  }
+
+  /**
+   * {@code GET /bootstrap-commands} — the chain this checkout declares, in the order it runs.
+   *
+   * <p>The {@code execute} and {@code check} scripts are deliberately not returned. They come from
+   * an untrusted checkout, and the caller's use for this list is to name a step to run, not to read
+   * what that step will do.
+   */
+  static JsonObject bootstrapCommands(List<DaemonQitsConfig.BootstrapDecl> chain) {
+    JsonArray steps = new JsonArray();
+    for (DaemonQitsConfig.BootstrapDecl step : chain) {
+      JsonObject json = new JsonObject().put("name", step.name());
+      putIfPresent(json, "id", step.id());
+      putIfPresent(json, "description", step.description());
+      steps.add(json);
+    }
+    return new JsonObject().put("steps", steps);
+  }
+
+  /**
+   * The body every write on the services / bootstrap surface answers with. There is nothing else to
+   * return — both report their progress and their outcome over the control socket — so the useful
+   * answer is "the request was taken", and giving it a shape rather than an empty body keeps the
+   * client's JSON parse unconditional across every route on this server.
+   */
+  static JsonObject accepted() {
+    return new JsonObject().put("accepted", true);
+  }
+
   /**
    * The one error shape every non-2xx answer uses: {@code {"message": …}}. A single field on
    * purpose — the daemon serves an untrusted checkout to a caller that is not the end user, so the

@@ -46,7 +46,15 @@ untrusted checkout, so it is never served anonymously.
 | `POST /fast-forward`, `/update-from-parent` | parent integration |
 | `GET·POST /commands`, `GET /commands/actions`, `GET /commands/{id}`, `GET /commands/{id}/log`, `POST /commands/{id}/terminate` | commands |
 | `POST /agents`, `GET /agents/available`, `GET /agent-sessions`, `GET·POST /agent-plugins`, `POST /prompt-refinements` | coding agents |
+| `GET /services`, `POST /services/{name}/start`, `POST /services/{name}/signal` | service supervision |
+| `GET /bootstrap-commands`, `POST /bootstrap-commands/run`, `POST /bootstrap-commands/{name}/run` | the bootstrap chain |
 | `WS /terminal/commands/{id}`, `WS /chat/commands/{id}` | the interactive half |
+
+Every write on the last two answers **202**, not 200. Both are long-running — a bootstrap step is
+bounded only by `bootstrap-timeout-ms`, an hour by default — and both already report themselves on
+the control socket, as `ServiceTransition`s and as the `BootstrapStep`/`BootstrapOutcome`/
+`Bootstrapped` sequence. Answering with a second, synchronous account of an outcome the caller is
+already subscribed to would be two sources of one truth.
 
 No `{repoId}/{workspaceId}` prefix anywhere: this daemon serves exactly one workspace, so those
 segments would be a constant the caller has to get right. The response bodies carry both ids back.
@@ -58,8 +66,15 @@ itself. The daemon is one process per workspace container rather than a single s
 segment, so its addressing is a different question, and it was left undecided rather than guessed
 at. The surface is unreachable in a host-created container regardless, for an unrelated reason —
 `migration-plan.md` §9 item 16: no gateway route and no `QITS_WORKSPACE_DAEMON_API_TOKEN` injected,
-so it does not bind at all. That item now also blocks the six `services`/`bootstrap-commands`
-capabilities, whose host-side routes were deleted when the conventions landed.
+so it does not bind at all.
+
+`final-workspaces-and-agent-communication-migration-plan.md` settles both halves of that, and the
+addressing question with them: **the daemon is never a gateway route.** It has no stable address to
+configure — one process per container, living for one container lifetime — so qits-workspaces, which
+owns the workspace row and the container, proxies to it at `/workspaces/container/{workspaceId}/**`
+and injects the token. Nothing else may reach a daemon. The `services` and `bootstrap-commands`
+routes above are that document's step 5: their host-side routes were deleted when the conventions
+landed, so the capability stayed here and the addressability came back here too.
 
 ## What the daemon does not keep
 

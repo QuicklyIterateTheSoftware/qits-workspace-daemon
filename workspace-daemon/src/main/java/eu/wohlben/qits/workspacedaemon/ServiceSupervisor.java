@@ -11,9 +11,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -172,6 +175,49 @@ public final class ServiceSupervisor {
         stopGraceMs,
         TimeUnit.MILLISECONDS);
   }
+
+  /**
+   * Every service this workspace declares, with the state this supervisor holds for it — the read
+   * side {@link WorkspaceApi}'s {@code GET /services} answers with.
+   *
+   * <p>It has to exist because {@link #running} is private and this class reports only through
+   * {@link #emit}: a stream of {@link ServiceTransition}s is the right shape for a host projecting
+   * live state and the wrong one for a caller asking "what is here right now". A declared service
+   * that has never run answers {@code STOPPED} rather than being absent, because the caller's next
+   * move is to start it and a missing entry would read as "no such service".
+   */
+  public List<ServiceState> states() {
+    List<ServiceState> out = new ArrayList<>();
+    Set<String> seen = new HashSet<>();
+    for (ServiceDecl decl : configServices.get()) {
+      if (!seen.add(decl.name())) {
+        continue;
+      }
+      Supervised s = running.get(decl.name());
+      out.add(
+          new ServiceState(
+              decl.id(),
+              decl.name(),
+              decl.description(),
+              s == null ? ServiceTransition.State.STOPPED : s.state));
+    }
+    // A service started with a script override is supervised without being declared (see resolve),
+    // so it would otherwise be invisible to the very caller that started it.
+    for (Supervised s : running.values()) {
+      if (seen.add(s.decl.name())) {
+        out.add(new ServiceState(s.decl.id(), s.decl.name(), s.decl.description(), s.state));
+      }
+    }
+    return List.copyOf(out);
+  }
+
+  /**
+   * One service as the supervisor sees it: what the checkout declares about it, plus the state
+   * currently held. {@code state} is the {@link ServiceTransition.State} vocabulary, so a caller
+   * reading this and a caller following the transition stream never see two different spellings of
+   * the same thing.
+   */
+  public record ServiceState(String id, String name, String description, String state) {}
 
   /**
    * Re-report the current state of every running service — the reconnect-adoption signal (called
