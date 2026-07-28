@@ -1,0 +1,55 @@
+{
+  "comment": [
+    "Downcall stubs for ForeignPty's libc calls. GraalVM generates one automatically only where it",
+    "can constant-fold the FunctionDescriptor at the Linker.downcallHandle call site, and a static",
+    "final field is NOT constant to the builder unless its holder was initialized during the",
+    "build. ForeignPty must not be -- see native-image.properties in this directory -- so every",
+    "descriptor is registered here by hand. Without this the build succeeds and the binary dies on",
+    "first PTY use with MissingForeignRegistrationError.",
+    "",
+    "One entry per distinct descriptor, not per symbol, because registration is keyed on the",
+    "descriptor. In ForeignPty's order:",
+    "  open       int (void*, int)",
+    "  grantpt    int (int)          -- shared with unlockpt and close",
+    "  unlockpt   int (int)",
+    "  ptsname_r  int (int, void*, long)",
+    "  ioctl      int (int, long, void*), firstVariadicArg 2",
+    "  read       long (int, void*, long)  -- shared with write",
+    "  write      long (int, void*, long)",
+    "  close      int (int)",
+    "",
+    "Add a downcall whose shape is not already listed and you must add it here too; the build will",
+    "not tell you, only the running binary will.",
+    "",
+    "Per-entry 'reason' strings are in the published schema and are REJECTED by the 25.0.2 parser",
+    "('Unknown attribute(s) [reason] in foreign call'), which is why this explanation is one",
+    "top-level comment instead of sitting on each entry."
+  ],
+  "foreign": {
+    "downcalls": [
+      {
+        "returnType": "int",
+        "parameterTypes": ["void*", "int"]
+      },
+      {
+        "returnType": "int",
+        "parameterTypes": ["int"]
+      },
+      {
+        "returnType": "int",
+        "parameterTypes": ["int", "void*", "long"]
+      },
+      {
+        "returnType": "int",
+        "parameterTypes": ["int", "long", "void*"],
+        "options": {
+          "firstVariadicArg": 2
+        }
+      },
+      {
+        "returnType": "long",
+        "parameterTypes": ["int", "void*", "long"]
+      }
+    ]
+  }
+}

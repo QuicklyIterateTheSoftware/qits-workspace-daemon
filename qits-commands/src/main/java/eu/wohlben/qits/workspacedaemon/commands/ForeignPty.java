@@ -22,10 +22,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * and reaching {@code FileDescriptor.fd} reflectively is exactly the kind of thing a native image
  * makes you register.
  *
- * <p><b>Native image.</b> Every {@link FunctionDescriptor} here is a {@code static final} constant,
- * which is what GraalVM requires to register a downcall stub automatically at build time — no
- * {@code Feature}, no {@code RuntimeForeignAccess} call, nothing in a config file. That is the
- * whole reason the descriptors are hoisted into constants rather than built at the call site.
+ * <p><b>Native image.</b> The stubs do not register themselves, and {@code static final} is not
+ * what makes them. GraalVM generates a downcall stub automatically only where it can constant-fold
+ * the {@link FunctionDescriptor} at the {@code Linker.downcallHandle} call site, and a
+ * {@code static final} field is not constant to the builder unless its holder was initialized
+ * during the build. This class must not be: a {@link MethodHandle} built in the builder cannot be
+ * lowered, and analysis aborts the whole image on {@code linkToNative}. Both halves are declared in
+ * {@code META-INF/native-image/eu.wohlben/qits-commands/} — {@code native-image.properties} forces
+ * this class to run-time initialization so the build completes, and
+ * {@code reachability-metadata.json} registers every descriptor so the binary works. <b>Add a
+ * downcall whose shape is not already listed there and you must add it</b>; the descriptors are
+ * still hoisted into constants for legibility, but that alone buys nothing.
  *
  * <p><b>Linux only</b>, deliberately. {@link #TIOCSWINSZ} and the {@code struct winsize} layout are
  * this kernel's, and the workspace container is a Debian image — the one place this code ever runs.

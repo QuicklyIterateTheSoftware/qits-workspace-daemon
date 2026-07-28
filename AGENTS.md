@@ -15,6 +15,13 @@ what the builder has to be told. Before adding one, check whether something alre
 does the job — `io.vertx.core.json` instead of Jackson, `java.lang.foreign` instead of JNA,
 `ProcessBuilder` instead of a process library.
 
+`java.lang.foreign` is cheaper than JNA but it is not free: **an FFM downcall has to be registered
+by hand**, in the two files under
+`qits-commands/src/main/resources/META-INF/native-image/eu.wohlben/qits-commands/`. Making the
+`FunctionDescriptor` a `static final` constant does *not* register it — the README's "No pty4j"
+paragraph has the whole story, and got it wrong for a while. Add a downcall whose shape is not
+already listed and the build stays green; only the running binary will tell you.
+
 ## Module conventions
 
 `eu.wohlben.qits.workspacedaemon.*`, one sub-package per module, no split packages.

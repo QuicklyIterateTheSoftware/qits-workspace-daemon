@@ -109,10 +109,36 @@ read-only view with Jackson's missing-node semantics — see that class's javado
 translation would not have been safe.
 
 **No pty4j.** It is JNA plus per-platform `.so` files extracted at runtime, which is the worst case
-for a native image. `ForeignPty` calls libc through `java.lang.foreign` instead. Every
-`FunctionDescriptor` is a `static final` constant on purpose — that is what lets GraalVM register
-the downcall stubs at build time with no `Feature` and no config file. **If you add a downcall, keep
-it constant.**
+for a native image. `ForeignPty` calls libc through `java.lang.foreign` instead.
+
+Its downcalls are registered by hand, in two files under
+`qits-commands/src/main/resources/META-INF/native-image/eu.wohlben/qits-commands/`:
+
+| | |
+|---|---|
+| `reachability-metadata.json` | a `foreign.downcalls` entry per distinct descriptor |
+| `native-image.properties` | `--initialize-at-run-time` for `ForeignPty` |
+
+**Both are needed, and they fix different things.** Without the metadata the image builds and the
+binary dies on first PTY use with `MissingForeignRegistrationError`. Without the run-time
+initialization the build itself aborts in points-to analysis on `linkToNative`, because Quarkus
+initializes application classes in the builder and a `MethodHandle` built there cannot be lowered.
+Registering the descriptors does *not* rescue that case — with the stubs registered and the class
+still initialized at build time, the build fails identically.
+
+This paragraph used to say that a `static final` `FunctionDescriptor` was enough for GraalVM to
+register the stubs automatically, with no `Feature` and no config file. It is not, and never was:
+GraalVM registers automatically only where it can constant-fold the descriptor at the
+`Linker.downcallHandle` call site, and a `static final` field is not constant to the builder unless
+its holder was initialized during the build. The descriptors are still constants, for legibility,
+but that alone buys nothing. **If you add a downcall whose shape is not already listed, add it to
+the metadata** — the build stays green either way and only the running binary will tell you.
+
+Two traps worth keeping written down. The failure is reported in the *middle* of the `native-image`
+output, so a `| tail` shows only Maven's own stack trace, which says nothing. And the per-entry
+`reason` field is in the published metadata schema but is rejected by the 25.0.2 parser
+(`Unknown attribute(s) [reason] in foreign call`), which is why the explanation there is one
+top-level `comment`.
 
 **No JAX-RS.** `WorkspaceApi` routes with a `switch` over `request.path()` on a raw vertx
 `HttpServer`.
