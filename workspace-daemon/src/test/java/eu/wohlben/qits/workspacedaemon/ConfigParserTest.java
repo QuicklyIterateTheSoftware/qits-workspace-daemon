@@ -43,7 +43,6 @@ class ConfigParserTest {
         - name: dev
           start: mvn quarkus:dev
           ready-pattern: Listening on
-          otel: true
           auto-start: true
           restart-policy: on-failure
           max-restarts: 3
@@ -84,7 +83,6 @@ class ConfigParserTest {
     JsonObject daemon = root.getJsonArray("services").getJsonObject(0);
     assertEquals("dev", daemon.getString("name"));
     assertEquals("Listening on", daemon.getString("readyPattern"));
-    assertTrue(daemon.getBoolean("otel"));
     assertTrue(daemon.getBoolean("autoStart"));
     assertEquals(
         "ON_FAILURE", daemon.getString("restartPolicy"), "enum normalized upper + '-'→'_'");

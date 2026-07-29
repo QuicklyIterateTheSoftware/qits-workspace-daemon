@@ -71,7 +71,6 @@ public record DaemonQitsConfig(
       String description,
       String start,
       String readyPattern,
-      Boolean otel,
       Boolean autoStart,
       String restartPolicy,
       Integer maxRestarts,

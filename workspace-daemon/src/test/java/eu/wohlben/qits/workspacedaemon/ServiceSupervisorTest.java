@@ -67,7 +67,6 @@ class ServiceSupervisorTest {
         null,
         start,
         readyPattern,
-        null,
         true,
         policy,
         maxRestarts,

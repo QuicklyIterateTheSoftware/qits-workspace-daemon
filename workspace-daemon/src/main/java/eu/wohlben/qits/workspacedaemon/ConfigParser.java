@@ -159,7 +159,6 @@ public final class ConfigParser {
               str(m, "description"),
               str(m, "start"),
               str(m, "ready-pattern"),
-              boolOrNull(m.get("otel")),
               boolOrNull(m.get("auto-start")),
               enumOf(m.get("restart-policy")),
               intOrNull(m.get("max-restarts"), "max-restarts"),

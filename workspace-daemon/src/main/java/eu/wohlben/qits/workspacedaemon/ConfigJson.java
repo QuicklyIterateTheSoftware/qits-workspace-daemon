@@ -88,7 +88,6 @@ public final class ConfigJson {
     putIfPresent(o, "description", d.description());
     putIfPresent(o, "start", d.start());
     putIfPresent(o, "readyPattern", d.readyPattern());
-    putIfPresent(o, "otel", d.otel());
     putIfPresent(o, "autoStart", d.autoStart());
     putIfPresent(o, "restartPolicy", d.restartPolicy());
     putIfPresent(o, "maxRestarts", d.maxRestarts());
