@@ -70,6 +70,13 @@ consumes unchanged. A renamed key is a broken view that **nothing in this reacto
 So the API tests assert them as **literal strings**. A test that read the names off the records would
 rename itself along with the bug. Keep it that way.
 
+`docs/openapi.yml` is the written form of that contract, hand-maintained beside the tests rather
+than generated (there is nothing annotation-shaped here to generate from). The rule is one line:
+**every field named in the document is asserted as a literal string by a test in the same commit.**
+Add a field, add the assertion; rename one, and both move. `OpenApiContractTest` enforces the two
+mechanical halves — every route in `WorkspaceApi`'s ladder is documented, the document invents none,
+both socket paths match the prefixes the handshake matches on, and no `$ref` dangles.
+
 ## Adding a control-socket message
 
 1. A record in `workspace-daemon-protocol`, added to the `DaemonMessage` permits list.
@@ -105,11 +112,18 @@ qits-projects and qits-observability, git is qits-artifacts, the control socket 
 and it was wrong *before* the paths changed. The paths only made it visible.
 
 Both derivations survive as **fallbacks**, because the container is still handed exactly one address
-and nobody has decided whether that address is the gateway. What is still open there is a gateway
-*capability* question rather than a naming one — how websockets pass through it with
-`SameOriginUpgradeCheck` still seeing a real `Origin`/`Host`, wanted as one answer for all sockets
-rather than one per route — so inventing the topology here would be guessing. What is not allowed is
-deriving one **silently**:
+and nobody has decided whether that address is the gateway. What is left open is a *topology*
+question — which host each segment belongs to — and inventing an answer here would be guessing.
+
+The websocket half of it is **closed**, and this file used to say otherwise: there is no
+`SameOriginUpgradeCheck` in the Quarkus the gateway builds against and there never was. The shipped
+answer is `EdgeHeaders.applyToUpgrade`, one path for every socket rather than one per route,
+forwarding an allow-list (`UPGRADE_HEADERS`) rather than stripping a prefix — `vertx-http-proxy`
+short-circuits an upgrade before installing its interceptor chain, so a handshake never reaches
+`handleProxyRequest`. qits-gateway's `AGENTS.md` has the whole account. If you are chasing a socket
+that fails through the gateway, it is not an origin check.
+
+What is not allowed is deriving an address **silently**:
 
 - an explicit key exists for every derived address — `qits.workspace-daemon.git-base-url`,
   `qits.repository-mcp.url`, `qits.observability-mcp.url` — and wins outright when set;

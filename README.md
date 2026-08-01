@@ -67,6 +67,13 @@ No `{repoId}/{workspaceId}` prefix in any of those paths: this daemon serves exa
 so those segments would be a constant the caller has to get right. The response bodies carry both
 ids back.
 
+**The full contract is `docs/openapi.yml`**, hand-written — there is nothing annotation-shaped here
+to generate one from. It covers every route above, every field of every body, and both socket
+protocols (under `x-websockets`, since OpenAPI does not model them). It is what a consumer's types
+are written from, and what a change to this surface has to update: `OpenApiContractTest` fails if a
+route in the dispatch ladder goes undocumented or the document invents one, and every field it names
+is asserted as a literal string by the API tests.
+
 The paths above are what the daemon *serves*; they are not the whole URL a caller uses. qits-workspaces
 proxies to this API and **forwards the caller's path untouched** — no hop rewrites anything — so the
 daemon is told where it is mounted instead, as `qits.workspace-daemon.api-base-path`
@@ -179,11 +186,12 @@ Four different services, on four hosts on `qits-net`. Every address follows
 right where one authority routes every segment — i.e. where the daemon was handed the gateway. Only
 one address is genuinely told to the container today, and it is qits-workspaces'. So each derivation
 announces itself: the git base as a `DaemonLog` `WARN` at provision time, the MCP hosts as a `WARN`
-at agent-wiring time. Nothing here silently invents a host and then fails as a 404 nobody sees. What
-is still unsettled at the gateway is a capability question rather than a naming one — how websockets
-pass through it with `SameOriginUpgradeCheck` still seeing a real `Origin`/`Host`, and it wants one
-answer for all sockets rather than one per route. So the topology is not decided here — only made
-visible and overridable.
+at agent-wiring time. Nothing here silently invents a host and then fails as a 404 nobody sees.
+
+What is still unsettled is which host serves each segment. The websocket question that used to sit
+beside it is settled: the gateway forwards an upgrade through `EdgeHeaders.applyToUpgrade`, one path
+for every socket rather than one per route (see qits-gateway's `AGENTS.md`). So the topology is not
+decided here — only made visible and overridable.
 
 ## Configuration
 

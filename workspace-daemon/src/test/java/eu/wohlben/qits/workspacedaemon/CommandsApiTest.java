@@ -56,6 +56,9 @@ class CommandsApiTest {
   private WorkspaceApi api;
   private int port;
 
+  /** Held so a test can drive the hook-side ingest the HTTP surface has no route for. */
+  private CommandService commands;
+
   private static final WorkspaceContext WORKSPACE =
       new WorkspaceContext() {
         @Override
@@ -101,9 +104,11 @@ class CommandsApiTest {
     port = api.actualPort();
 
     CommandStore store = new CommandStore();
+    // No classifier, exactly as ControlSocket wires it in production: this daemon stamps no
+    // severity on any line. See theLogNeverCarriesASeverityBecauseNoClassifierIsWired.
     CommandLogService logs = new CommandLogService(store, null);
     CommandRegistry registry = new CommandRegistry(root, 2_000);
-    CommandService commands =
+    commands =
         new CommandService(
             store,
             registry,
@@ -115,7 +120,11 @@ class CommandsApiTest {
                     new ActionResolver.ResolvedAction(
                         "greet", "Greet", "echo hello-from-the-action", false, Map.of()),
                     new ActionResolver.ResolvedAction(
-                        "boom", "Boom", "exit 4", false, Map.of()))));
+                        "boom", "Boom", "exit 4", false, Map.of()),
+                    // Interactive, and long enough to still be RUNNING when a session is reported
+                    // against it — a session report is refused on a finished command.
+                    new ActionResolver.ResolvedAction(
+                        "watch", "Watch", "sleep 60", true, Map.of()))));
     api.wireCommands(commands, registry, WORKSPACE);
     client = vertx.createHttpClient();
   }
@@ -215,9 +224,67 @@ class CommandsApiTest {
     Answer answer = get("/commands/actions");
     assertEquals(200, answer.status());
     JsonArray actions = answer.body().getJsonArray("actions");
-    assertEquals(2, actions.size());
+    assertEquals(3, actions.size());
     assertEquals("greet", actions.getJsonObject(0).getString("id"));
     assertEquals("Greet", actions.getJsonObject(0).getString("name"));
+    // The flag the caller needs before deciding whether to open a terminal socket for the run.
+    assertEquals(false, actions.getJsonObject(0).getBoolean("interactive"));
+    assertEquals(true, actions.getJsonObject(2).getBoolean("interactive"));
+  }
+
+  @Test
+  void theLogNarrowsByChannelAndNeverCarriesASeverity() throws Exception {
+    String id = launchAndAwait("greet");
+
+    JsonObject first = get("/commands/" + id + "/log?channel=OUTPUT").body()
+        .getJsonArray("lines").getJsonObject(0);
+    assertEquals("OUTPUT", first.getString("channel"));
+    // Documented on the line and never set: ControlSocket wires CommandLogService with a null
+    // classifier, so nothing in this daemon stamps a severity. Pattern- and severity-based error
+    // detection was deleted upstream and is not coming back here.
+    assertNull(first.getString("severity"));
+    assertEquals(
+        0,
+        get("/commands/" + id + "/log?severity=ERROR").body().getJsonArray("lines").size(),
+        "the filter is honoured, and with no classifier it narrows to nothing");
+    // A transcript-only read of a plain command is empty rather than an error.
+    assertEquals(
+        0, get("/commands/" + id + "/log?channel=TRANSCRIPT").body().getJsonArray("lines").size());
+  }
+
+  @Test
+  void anInvalidSeverityOrChannelIsARequestErrorRatherThanASilentlyWiderFilter() throws Exception {
+    String id = launchAndAwait("greet");
+
+    assertTrue(
+        get("/commands/" + id + "/log?severity=LOUD").body().getString("message")
+            .contains("severity"));
+    assertTrue(
+        get("/commands/" + id + "/log?channel=SIDEWAYS").body().getString("message")
+            .contains("channel"));
+  }
+
+  @Test
+  void aReportedAgentSessionUsesTheHostsAgentSessionRefFieldNames() throws Exception {
+    String id =
+        post("/commands", new JsonObject().put("actionId", "watch"))
+            .body()
+            .getJsonObject("command")
+            .getString("id");
+    // The SessionStart hook's ingest. It has no route on this API — HookWebhook is a separate,
+    // unauthenticated loopback server — so it is driven through the service the webhook calls.
+    commands.reportAgentSession(id, "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "projects/-w/s.jsonl");
+
+    JsonObject session =
+        get("/commands/" + id).body().getJsonArray("agentSessions").getJsonObject(0);
+    assertEquals("3f2504e0-4f89-11d3-9a0c-0305e82c3301", session.getString("sessionId"));
+    assertEquals("REPORTED", session.getString("source"));
+    assertEquals("projects/-w/s.jsonl", session.getString("transcriptPath"));
+    assertNotNull(session.getString("recordedAt"));
+    // Only a FORKED entry carries one, and an absent optional is omitted rather than nulled.
+    assertNull(session.getString("forkedFromSessionId"));
+
+    assertEquals(200, post("/commands/" + id + "/terminate", null).status());
   }
 
   @Test

@@ -103,7 +103,11 @@ public final class ServiceSupervisor {
     private volatile Process process;
     private volatile long sid;
     private volatile String state = ServiceTransition.State.STARTING;
-    private int restartCount;
+
+    // Written only under `lock` (see handleExit), but volatile so `states()` can read it from an
+    // API worker thread without taking a lock the restart path holds across a schedule() call.
+    private volatile int restartCount;
+
     private volatile boolean stopRequested;
     private ScheduledFuture<?> pending;
 
@@ -199,13 +203,22 @@ public final class ServiceSupervisor {
               decl.id(),
               decl.name(),
               decl.description(),
-              s == null ? ServiceTransition.State.STOPPED : s.state));
+              s == null ? ServiceTransition.State.STOPPED : s.state,
+              s == null ? 0 : s.restartCount,
+              decl.webView()));
     }
     // A service started with a script override is supervised without being declared (see resolve),
     // so it would otherwise be invisible to the very caller that started it.
     for (Supervised s : running.values()) {
       if (seen.add(s.decl.name())) {
-        out.add(new ServiceState(s.decl.id(), s.decl.name(), s.decl.description(), s.state));
+        out.add(
+            new ServiceState(
+                s.decl.id(),
+                s.decl.name(),
+                s.decl.description(),
+                s.state,
+                s.restartCount,
+                s.decl.webView()));
       }
     }
     return List.copyOf(out);
@@ -216,8 +229,34 @@ public final class ServiceSupervisor {
    * currently held. {@code state} is the {@link ServiceTransition.State} vocabulary, so a caller
    * reading this and a caller following the transition stream never see two different spellings of
    * the same thing.
+   *
+   * <p>{@code restartCount} and {@code webView} are here because they were readable only over the
+   * control socket — the count as a private field of {@link Supervised}, the declaration as part of
+   * {@code ConfigView}'s whole-config dump — and a browser reaching the daemon through the proxy
+   * has neither. The count is how many times <em>this</em> supervisor relaunched the service in
+   * this container; it resets with the container, like everything else the daemon holds. A service
+   * that has never run reports {@code 0} rather than being absent, for the same reason it reports
+   * {@code STOPPED}.
+   *
+   * <p>{@code webView} is the declaration only ({@code port}/{@code entryPath}/{@code basePath}),
+   * null when the checkout declares none. The daemon deliberately does not build the served proxy
+   * path from it: that url is {@code /workspaces/service/{workspaceId}/{serviceId}/…}, which is
+   * qits-workspaces' shape and carries ids this daemon is not the authority on — the same reason
+   * {@code WorkspaceJson.listing} omits a lazy directory's {@code href}.
+   *
+   * <p><b>No health results.</b> {@code ServiceDecl.healthChecks()} is a declaration this daemon
+   * parses and never runs — there is no prober here, and there is none on the host either (its
+   * {@code ServiceSupervisor} reports every declared check as {@code UNKNOWN} and says in a comment
+   * that health is the daemon's to report). Emitting the declarations under a {@code health} key
+   * would read as verdicts. Until a prober exists, the honest surface is the absence.
    */
-  public record ServiceState(String id, String name, String description, String state) {}
+  public record ServiceState(
+      String id,
+      String name,
+      String description,
+      String state,
+      int restartCount,
+      DaemonQitsConfig.WebViewDecl webView) {}
 
   /**
    * Re-report the current state of every running service — the reconnect-adoption signal (called

@@ -1,0 +1,1618 @@
+openapi: 3.1.0
+
+info:
+  title: qits-workspace-daemon HTTP API
+  version: "1"
+  description: |
+    Everything qits serves from **inside** a workspace container: the working tree, the commands
+    surface, the coding-agent surface, the service and bootstrap surfaces, and two websockets.
+
+    ## This file is written by hand, and that is deliberate
+
+    There is nothing to generate it from. The server is a raw `io.vertx.core.http.HttpServer` with
+    a `switch` dispatcher (`WorkspaceApi`) and hand-built `JsonObject` bodies (`WorkspaceJson`,
+    `CommandJson`, `AgentJson`) — no JAX-RS, no Jackson, no `smallrye-openapi`, because every
+    dependency here is a decision about the GraalVM native image.
+
+    So this document has one acceptance rule, and it is what makes it worth trusting:
+
+    > **Every field named here is asserted as a literal string by a test in this repository.**
+
+    Those tests are `WorkspaceApiTest`, `CommandsApiTest`, `AgentsApiTest`, `ServicesApiTest` and
+    `BootstrapApiTest`, which drive a real Vert.x server on an ephemeral port against real
+    processes and a real git tree. They assert wire keys as literal strings on purpose — a test
+    that read the names off the records would rename itself along with the bug. Change a key here
+    and you must change a test; change a test and you must change this file.
+
+    ## Addressing: told, never derived
+
+    The paths below are what the daemon *serves*. They are not the whole URL a caller uses.
+
+    qits-workspaces proxies to this API at `/workspaces/container/{workspaceId}/**` and **forwards
+    the caller's path untouched** — no hop in the chain rewrites anything. The daemon is therefore
+    *told* where it is mounted, as `qits.workspace-daemon.api-base-path`
+    (`QITS_WORKSPACE_DAEMON_API_BASE_PATH`, injected as `/workspaces/container/{workspaceId}`).
+    With a base configured, `GET /files` is served at `GET /workspaces/container/12/files` and only
+    there. With none — every direct caller, every test — it is served at `GET /files`.
+
+    No `{repoId}/{workspaceId}` prefix appears in any path: this daemon serves exactly one
+    workspace, so those segments would be a constant the caller has to get right. The response
+    bodies carry both ids back.
+
+    ## Reachability
+
+    The server binds `127.0.0.1` and **does not bind at all** without
+    `qits.workspace-daemon.api-token`. It has no address on the docker network: qits asks for a
+    stream over the control socket it already holds open, and the daemon dials *out* and pipes that
+    connection to this loopback port. A peer container is refused by the network stack rather than
+    by a token check.
+
+    That makes the daemon's control socket load-bearing for this API. **While that socket is down,
+    every route here is unreachable** — qits-workspaces answers 502, not a daemon status. Plan the
+    client for it.
+
+    ## Authentication
+
+    `Authorization: Bearer <qits.workspace-daemon.api-token>` on every request *and* on both
+    websocket handshakes. This is peer authentication — qits is calling — never user
+    authentication; the daemon has no idea who the user is. A browser reaches it only through
+    qits-workspaces' proxy, which **replaces** the inbound `Authorization` with the daemon token,
+    so the browser never holds this credential and cannot smuggle one in.
+
+    A missing or wrong token is `401` with the same body whatever the path, so a caller with no
+    credential learns only that one is required — never whether the path it asked for exists.
+
+    ## Conventions that hold everywhere
+
+    - Every response is `application/json` with `X-Content-Type-Options: nosniff`. The bodies embed
+      repository-controlled text.
+    - Every non-2xx body is `{"message": "…"}` and nothing else.
+    - **Absent optionals are omitted, never emitted as an explicit `null`.** Lists are always
+      present, `[]` when empty.
+    - Timestamps are ISO-8601 strings (`Instant.toString()`).
+    - Enums go out as their constant name.
+    - **Every write on the services and bootstrap surfaces answers `202`, not `200`.** Both are
+      long-running (a bootstrap step is bounded only by an hour-default timeout) and both already
+      report themselves on the control socket. A second, synchronous account of an outcome the
+      caller is already subscribed to would be two sources of one truth.
+    - `503` means "not wired yet" and is retryable — the daemon is up but the capability's
+      preconditions are not met. It is never a `404`, which would read as "this daemon will never
+      serve that".
+
+    ## The websockets
+
+    OpenAPI does not model websockets, so the two live under `x-websockets` at the bottom of this
+    file, with the same level of detail. Read that section before building a client for either.
+
+servers:
+  - url: /
+    description: The daemon addressed directly, with no base path configured.
+  - url: /workspaces/container/{workspaceId}
+    description: |
+      Through qits-workspaces' proxy, which is how a browser reaches it. The daemon is configured
+      with this base; it matches no shape and strips no leading segment.
+    variables:
+      workspaceId:
+        default: "1"
+        description: The workspace row id qits-workspaces keys the container on.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: checkout
+    description: Reading the working tree this daemon owns.
+  - name: parent integration
+    description: The only two routes that mutate the checkout.
+  - name: commands
+    description: Launching and inspecting this container's processes.
+  - name: coding agents
+    description: Launching harnesses, and the session lineage they leave behind.
+  - name: services
+    description: The dev servers the checkout declares, and this daemon supervises.
+  - name: bootstrap
+    description: The declared setup chain.
+
+paths:
+  /files:
+    get:
+      tags: [checkout]
+      operationId: listFiles
+      summary: One level of the working tree.
+      description: |
+        Lists one level of the tree plus the whole-tree generation token. `path` is
+        workspace-root-relative and optional — absent means the root level.
+
+        **Lazy directories are the gitignored ones.** There is no separate "ignored" flag: a
+        directory that git does not track is returned as a stub with its immediate child count
+        rather than being walked, and the caller asks for it by path when the user expands it.
+
+        `.git` is refused like anything outside the root.
+      parameters:
+        - $ref: "#/components/parameters/RelativePath"
+      responses:
+        "200":
+          description: The level, and the token it was computed under.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileListing" }
+        "400": { $ref: "#/components/responses/BadPath" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+
+  /files/content:
+    get:
+      tags: [checkout]
+      operationId: readFile
+      summary: One file's text.
+      description: |
+        Reads **any regular file inside the root, tracked or not** — no git consultation at all, so
+        a path that only exists in the working tree (a log, a generated file) resolves.
+
+        Two cases arrive identically as `binary: true` with no `content`: a file that is genuinely
+        binary, and one over the 2 MB cap. The cap **soft-degrades** rather than answering 413, so
+        a client cannot distinguish them from the body alone.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: Workspace-root-relative. Required here, unlike on `/files`.
+      responses:
+        "200":
+          description: The file, or the binary flag standing in for it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileContent" }
+        "400": { $ref: "#/components/responses/BadPath" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+
+  /detection:
+    get:
+      tags: [checkout]
+      operationId: detect
+      summary: Frameworks, projects and the source-to-test graph.
+      description: |
+        Carries a `generation` token computed by a **byte-identical duplicate** of the algorithm
+        `/files` uses — a sha256 over the deduped, sorted `git ls-files` output.
+
+        That is not decoration. `/files` and `/detection` are two independently-fetched views over
+        one mutable tree, and applying a detection result to a tree it was not computed from makes
+        the UI flicker in a way that is very hard to diagnose later. **Apply a detection only while
+        its token matches the tree currently rendered; on a mismatch hold the last consistent
+        result rather than blanking it.** The tokens agree on first load, so there is no initial
+        flash.
+      responses:
+        "200":
+          description: The detection result and its token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Detection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+
+  /component-map:
+    get:
+      tags: [checkout]
+      operationId: componentMap
+      summary: The UI components a framed pick can be attributed to.
+      description: |
+        Angular only today; `framework` says which scanner produced the map, and a tree it does not
+        recognise answers `components: []` rather than an error.
+
+        Fetch it once per pick-mode activation, not per pick — a map that misses a just-created
+        component simply skips attribution.
+      responses:
+        "200":
+          description: The map.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComponentMap" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+
+  /fast-forward:
+    post:
+      tags: [parent integration]
+      operationId: fastForwardOntoParent
+      summary: Fast-forward this workspace's branch onto its parent.
+      description: |
+        Fetches, reconciles this branch with its own origin ref first (it may have advanced
+        out-of-band), then fast-forwards onto the parent and pushes. `--ff-only` throughout, which
+        is what makes it safe: a diverged branch is **refused** rather than merged.
+
+        A refusal is a `400` carrying git's own text, not a `500` — "this branch has diverged" and
+        "that merge would conflict" are answers the UI acts on.
+
+        POST-only. The method pairing is checked before dispatch specifically so a GET can never
+        reach git.
+      parameters:
+        - $ref: "#/components/parameters/ParentBranch"
+      responses:
+        "200": { $ref: "#/components/responses/GitOutput" }
+        "400": { $ref: "#/components/responses/IntegrationRefused" }
+        "503": { $ref: "#/components/responses/NotProvisioned" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+
+  /update-from-parent:
+    post:
+      tags: [parent integration]
+      operationId: mergeParentIn
+      summary: Merge the parent branch in, creating a merge commit.
+      description: |
+        Works where `/fast-forward` cannot — when the branch has its own commits. **On conflict the
+        merge is aborted**, so the checkout is left exactly as it was and the caller gets a 400.
+        That abort is the whole reason this runs here rather than leaving a half-merged tree
+        behind: the workspace stays usable either way.
+
+        Serialized behind the same sync thread as the auto-pusher, so a host-requested integration
+        can never interleave with a push against the same index.
+      parameters:
+        - $ref: "#/components/parameters/ParentBranch"
+      responses:
+        "200": { $ref: "#/components/responses/GitOutput" }
+        "400": { $ref: "#/components/responses/IntegrationRefused" }
+        "503": { $ref: "#/components/responses/NotProvisioned" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+
+  /commands:
+    get:
+      tags: [commands]
+      operationId: listCommands
+      summary: The commands this container has run, newest first.
+      description: |
+        **This container's**, and nothing else. The store is in-memory and a container recreate
+        starts it empty — there is no host-side fallback (`WorkspaceCommandHistory` on the host has
+        no implementation anywhere), so a stopped container means no run history at all. Render
+        that as an explicit state, not as an empty list.
+
+        Bounded at 200 finished commands, oldest evicted; running commands are never evicted.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/CommandStatus" }
+          description: |
+            Narrows the list. An unparseable value is a `400` rather than a silently wider filter —
+            quietly widening would show a caller more than it asked for.
+      responses:
+        "200":
+          description: The list, each row in the `entries[].command` envelope.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/CommandsUnavailable" }
+    post:
+      tags: [commands]
+      operationId: launchCommand
+      summary: Launch a declared action.
+      description: |
+        Spawn-and-return, always. There is no fire-and-await form on this API: the
+        `RunCommand`/`CommandChunk`/`CommandExit` triple exists only on the control socket, so a
+        config action reports through the run history and its log like any other command.
+
+        `actionId` must name an action the checkout's `.qits-config.yml` declares — see
+        `GET /commands/actions`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchCommandRequest" }
+      responses:
+        "200":
+          description: The launched command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandEnvelope" }
+        "400":
+          description: |
+            No `actionId`, an `actionId` the checkout does not declare, or an unparseable body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/CommandsUnavailable" }
+
+  /commands/actions:
+    get:
+      tags: [commands]
+      operationId: listActions
+      summary: What this checkout declares, and therefore what POST /commands accepts.
+      description: |
+        Read from the checkout's `.qits-config.yml` by `ConfigActionResolver`.
+
+        **There is no origin field, because there is only one origin.** The platform's globally
+        defined "code actions" did not survive the split — the action tools never left the
+        monolith. Do not build a badge for a distinction that no longer exists.
+
+        The `execute`/`check` scripts are deliberately absent: they come from an untrusted checkout
+        and the caller's use for this list is to *name* an action, not to read what it will do.
+      responses:
+        "200":
+          description: The declared actions, in config order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/CommandsUnavailable" }
+
+  /commands/{commandId}:
+    get:
+      tags: [commands]
+      operationId: getCommand
+      summary: One command.
+      parameters:
+        - $ref: "#/components/parameters/CommandId"
+      responses:
+        "200":
+          description: The command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Command" }
+        "404": { $ref: "#/components/responses/NoSuchCommand" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/CommandsUnavailable" }
+
+  /commands/{commandId}/log:
+    get:
+      tags: [commands]
+      operationId: getCommandLog
+      summary: A command's captured log lines, in order.
+      description: |
+        Capped at 50,000 lines per command: heap here is a container sized for the workspace's own
+        build, not a host with a disk. A command that outputs more loses its oldest lines.
+
+        **`severity` is never set on this daemon.** `ControlSocket` wires the log service with a
+        null classifier, so nothing stamps one — pattern- and severity-based error detection was
+        deleted upstream and is not coming back. The field and its filter remain part of the shape
+        the host DTO reconstructs; the filter narrows to nothing.
+      parameters:
+        - $ref: "#/components/parameters/CommandId"
+        - name: severity
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/LogSeverity" }
+          description: An unparseable value is a `400`, as on `/commands?status=`.
+        - name: channel
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/LogChannel" }
+          description: |
+            `TRANSCRIPT` is the imported agent transcript — the lasting record of a chat, as
+            distinct from the live socket. An unparseable value is a `400`.
+      responses:
+        "200":
+          description: The lines.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandLog" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NoSuchCommand" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/CommandsUnavailable" }
+
+  /commands/{commandId}/terminate:
+    post:
+      tags: [commands]
+      operationId: terminateCommand
+      summary: Signal a running command's process group.
+      description: |
+        Signals the whole process group, not the child: a compound script's children are only
+        reachable that way. Answers the command in its post-terminate state.
+
+        Distinct from *closing a socket*, which only detaches and leaves the process running.
+      parameters:
+        - $ref: "#/components/parameters/CommandId"
+      responses:
+        "200":
+          description: The command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Command" }
+        "404": { $ref: "#/components/responses/NoSuchCommand" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/CommandsUnavailable" }
+
+  /agents:
+    post:
+      tags: [coding agents]
+      operationId: launchAgent
+      summary: Launch a coding agent.
+      description: |
+        A coding agent **is** a command, so this answers the same `{command: …}` envelope
+        `POST /commands` does and one client-side decoder serves both.
+
+        `mode` picks how the run is driven and rendered, and it determines which socket to attach:
+
+        | mode | `command.kind` | `command.interactive` | socket |
+        |---|---|---|---|
+        | `CHAT` | `CHAT` | `false` | `WS /chat/commands/{id}` |
+        | `INTERACTIVE` | `TERMINAL` | `true` | `WS /terminal/commands/{id}` |
+
+        **Resume and fork require the session to belong to this container.** A session recorded by
+        a previous container is refused rather than attempted: the store that would vouch for it
+        did not survive, and resuming a vanished id exits instantly with "no conversation found",
+        in a loop the user never asked for. Fail closed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchAgentRequest" }
+      responses:
+        "200":
+          description: The launched agent command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandEnvelope" }
+        "400":
+          description: |
+            A missing or unparseable `scope`/`mode`/`agentType`, `fork` without `resumeSessionId`,
+            a `resumeSessionId` this container does not own, or a fork of a Kimi session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agents/available:
+    get:
+      tags: [coding agents]
+      operationId: availableAgents
+      summary: The harnesses this daemon can launch, and the resolved default.
+      description: |
+        The default is resolved from the checkout's `.qits-config.yml` (`agent.defaultType`)
+        falling through to the daemon's. Fetch once per page; it does not change under a container.
+
+        A **resumed** session keeps its original harness — only a fresh launch may pick one.
+      responses:
+        "200":
+          description: The harnesses.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvailableAgents" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-sessions:
+    get:
+      tags: [coding agents]
+      operationId: agentSessions
+      summary: The session lineage, as a tree.
+      description: |
+        **A nested tree, not a list.** `children[]` recurses to arbitrary depth along
+        `forkedFromSessionId` edges; `subagents[]` is a flat list one level deeper, the side-chains
+        a session's `Task` calls spawned.
+
+        The index is in-memory and dies with the container. The transcripts themselves do not —
+        the harness writes them to a volume shared across workspaces — so what a recreate loses is
+        the *index* of them, which is exactly why resume is refused across containers.
+      responses:
+        "200":
+          description: The tree, roots first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSessionTree" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-plugins:
+    get:
+      tags: [coding agents]
+      operationId: listPlugins
+      summary: The plugins present on the shared credential volume.
+      description: |
+        Read from the volume's `settings.json` rather than by shelling the CLI. A volume with
+        nothing ever installed answers `installed: []`, not an error.
+      responses:
+        "200":
+          description: The installed set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-plugins/{pluginId}/install:
+    post:
+      tags: [coding agents]
+      operationId: installPlugin
+      summary: Install a plugin from the marketplace.
+      description: |
+        Shells `claude plugin install <pluginId>@claude-plugins-official` — the only supported way
+        to do it. Idempotent: the CLI no-ops an already-installed plugin.
+
+        Answers the **refreshed installed set**, the same envelope the listing uses, so a client
+        needs no follow-up read to see the result of what it just did.
+
+        Claude Code only; asking for one under another harness is a `400`.
+      parameters:
+        - name: pluginId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9-]{0,63}$"
+          description: |
+            **The bare id** — the marketplace suffix the listing reports
+            (`<id>@claude-plugins-official`) is appended by the daemon, so the qualified form is
+            refused. Pattern-matched before it reaches a shell, because the value crosses from an
+            untrusted caller into an argv.
+      responses:
+        "200":
+          description: The installed set, refreshed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginList" }
+        "400":
+          description: An id that fails the pattern, a non-Claude harness, or a failed install.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: |
+            Any verb other than `install` under `/agent-plugins/{id}/`. There is no uninstall.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /prompt-refinements:
+    post:
+      tags: [coding agents]
+      operationId: refinePrompt
+      summary: Rewrite a rough transcript into a prompt.
+      description: |
+        One model call over the harness already installed in this container. The surviving half of
+        the old speech flow — the recorder, the level meter and the audio round trip are gone; this
+        is one button on a textarea.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefinementRequest" }
+      responses:
+        "200":
+          description: The rewritten prompt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refinement" }
+        "400":
+          description: A blank or missing `transcript`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /services:
+    get:
+      tags: [services]
+      operationId: listServices
+      summary: Every declared service and the state this supervisor holds for it.
+      description: |
+        **The container owns the service lifecycle; the host projects it.** This supervisor makes
+        every spawn/restart/backoff/policy/kill decision locally, so a service keeps crash-restarting
+        while qits is down. Host-side supervision — the launcher, the liveness poll, the restart
+        policy, the straggler reaper, the boot re-adoption, the scheduler and health probing — was
+        deleted, because double supervision meant a socket blip could put host and daemon into a
+        port fight. Do not re-add any of it anywhere.
+
+        A declared service that has never run answers `STOPPED` rather than being absent: the
+        caller's next move is to start it, and a missing entry would read as "no such service". A
+        service started with a `script` override is supervised without being declared, and is
+        listed too — it would otherwise be invisible to the very caller that started it.
+
+        ### Two things are deliberately not here
+
+        **No `health`.** The checkout's `health-checks:` are parsed by this daemon and published on
+        the control socket's `ConfigView`, but **nothing runs them** — there is no prober here, and
+        none on the host either (its supervisor reports every declared check as `UNKNOWN` and says
+        in a comment that health is the daemon's to report). Any value emitted under a `health` key
+        today would be a verdict the daemon has not formed, so the field is absent rather than
+        dishonest. A daemon-side prober is a feature with its own decision to make, not a
+        serialization change.
+
+        **No `DEGRADED` state.** It was derived host-side from per-line log observers that were
+        deleted; re-minting it here would resurrect them by another name.
+      responses:
+        "200":
+          description: The services.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/ServicesUnavailable" }
+
+  /services/{name}/start:
+    post:
+      tags: [services]
+      operationId: startService
+      summary: Start a service.
+      description: |
+        Idempotent per name — an already-running service is left alone and just re-reports its
+        current state on the control socket.
+
+        With a `script` override this is the "try this edit" start of a service the committed
+        config does not carry: a minimal, never-restart definition is synthesized from the
+        override.
+
+        `202`, not `200`: the outcome arrives as `ServiceTransition`s on the control socket.
+      parameters:
+        - $ref: "#/components/parameters/ServiceName"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartServiceRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/ServicesUnavailable" }
+
+  /services/{name}/signal:
+    post:
+      tags: [services]
+      operationId: signalService
+      summary: Deliver a signal to a service — the stop request.
+      description: |
+        Marks the service stop-requested so the restart policy does not resurrect it, signals the
+        whole **session** group (`pkill -<SIG> -s <sid>`, which survives the reparenting a forked
+        JVM does and a process-group kill did not), and force-kills after the stop grace.
+
+        Signalling a service that is not running is still a `202`. A `404` there would be a claim
+        about the declared set that this route is not the one to make.
+      parameters:
+        - $ref: "#/components/parameters/ServiceName"
+        - name: signal
+          in: query
+          required: false
+          schema: { type: string, examples: ["TERM", "KILL", "SIGTERM"] }
+          description: |
+            **Wins over the body**, so a signal can be sent with no body at all. Both absent is the
+            stop signal, which is what the supervisor's own default resolves to. A `SIG` prefix is
+            stripped.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignalServiceRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/ServicesUnavailable" }
+
+  /bootstrap-commands:
+    get:
+      tags: [bootstrap]
+      operationId: listBootstrapCommands
+      summary: The chain this checkout declares, in the order it runs.
+      description: |
+        **The declaration only — there is no per-step last run here.** Progress rides the control
+        socket as `BootstrapStep`/`BootstrapOutcome`/`Bootstrapped`, and the durable per-step
+        history is host-side (`workspace_bootstrap_run`, read through qits-workspaces). Join the
+        two by step name.
+
+        The `execute` and `check` scripts are absent for the same reason they are on
+        `/commands/actions`: untrusted checkout, and the caller's use is to name a step.
+      responses:
+        "200":
+          description: The chain.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BootstrapChain" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/BootstrapUnavailable" }
+
+  /bootstrap-commands/run:
+    post:
+      tags: [bootstrap]
+      operationId: runBootstrapChain
+      summary: Run the whole chain.
+      description: |
+        `202` and nothing else: the run streams itself home on the control socket, and it is
+        bounded only by `bootstrap-timeout-ms` — an hour by default. Returning immediately is the
+        point.
+
+        `run` is therefore a reserved step name; the collection form is matched first.
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/BootstrapUnavailable" }
+
+  /bootstrap-commands/{name}/run:
+    post:
+      tags: [bootstrap]
+      operationId: runBootstrapStep
+      summary: Run one named step alone.
+      description: |
+        Same `202` contract as the whole chain. A name the chain does not declare runs nothing and
+        still terminates — the outcome is on the control socket, not in this response.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+          description: The step's declared `name`.
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/BootstrapUnavailable" }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `qits.workspace-daemon.api-token`, injected per container as
+        `QITS_WORKSPACE_DAEMON_API_TOKEN`. Compared in constant time and never logged or echoed.
+        Required on both websocket handshakes as well.
+
+  parameters:
+    RelativePath:
+      name: path
+      in: query
+      required: false
+      schema: { type: string }
+      description: |
+        Workspace-root-relative. Absent means the root level. Traversal, absolute paths, symlinks
+        (named outright *or* as an intermediate segment) and `.git` are all refused with a `400`.
+
+    ParentBranch:
+      name: parent
+      in: query
+      required: true
+      schema: { type: string }
+      description: |
+        The parent branch to integrate. A blank name, or one starting with `-` (which git would
+        read as a flag), is refused.
+
+    CommandId:
+      name: commandId
+      in: path
+      required: true
+      schema: { type: string }
+      description: The daemon-generated command id.
+
+    ServiceName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+      description: |
+        The service's declared `name` — not its `id`. A name absent from the config is startable
+        only with a `script` override.
+
+  responses:
+    Unauthorized:
+      description: |
+        No bearer, or the wrong one. The body is identical whatever the path, so this port is never
+        a path-existence oracle.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    MethodNotAllowed:
+      description: The route exists but not for this method.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: An unparseable query parameter or request body.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadPath:
+      description: |
+        A path the browser refuses to resolve — traversal, absolute, a symlink, or `.git`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The path names nothing, or the endpoint does not exist.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NoSuchCommand:
+      description: No command with that id in this container's store.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    IntegrationRefused:
+      description: |
+        Git refused, and its own text comes back so the user sees what it saw — a diverged branch,
+        a conflicting merge, a rejected push.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotProvisioned:
+      description: |
+        The daemon is up but the checkout has no origin sync yet. Retryable, not a failure.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    CommandsUnavailable:
+      description: Commands are not wired yet. Retryable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    AgentsUnavailable:
+      description: Coding agents are not wired yet. Retryable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServicesUnavailable:
+      description: |
+        The supervisor is not wired yet. Rare in practice — it is constructed before provisioning
+        starts, so `GET /services` answers a declared-but-stopped list while the checkout is still
+        cloning.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BootstrapUnavailable:
+      description: Bootstrap is not wired yet. Retryable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Accepted:
+      description: |
+        The request was taken. Not the outcome — that arrives on the control socket. The body has a
+        shape rather than being empty so a client's JSON parse stays unconditional across every
+        route here.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Accepted" }
+    GitOutput:
+      description: Git's own text from the integration.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/GitOutput" }
+
+  schemas:
+
+    Error:
+      type: object
+      description: |
+        The one error shape every non-2xx answer uses. A single field on purpose: this API serves
+        an untrusted checkout to a caller that is not the end user, so the body carries what the UI
+        needs to render its states and nothing about the container's filesystem beyond the path the
+        caller already named. An unexpected exception is logged in the container and returns
+        "Internal error".
+      required: [message]
+      properties:
+        message: { type: string }
+
+    Accepted:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean, const: true }
+
+    GitOutput:
+      type: object
+      required: [output]
+      properties:
+        output:
+          type: string
+          description: |
+            Git's combined output, verbatim, shown exactly as the old `docker exec` output was.
+            Empty string rather than null when git said nothing.
+
+    # --- the checkout ------------------------------------------------------------------------
+
+    FileListing:
+      type: object
+      required: [paths, lazyDirs, generation]
+      properties:
+        paths:
+          type: array
+          items: { type: string }
+          description: Workspace-root-relative file paths at this level.
+        lazyDirs:
+          type: array
+          items: { $ref: "#/components/schemas/LazyDir" }
+        generation: { $ref: "#/components/schemas/Generation" }
+
+    LazyDir:
+      type: object
+      description: |
+        A gitignored directory, returned as a stub rather than walked. There is no separate
+        "ignored" flag — being lazy *is* the flag.
+
+        No `href`: the host's DTO carries one, but it is built from repository and workspace ids
+        this daemon is not the authority on, so its controller synthesizes it from `path` instead.
+      required: [path, childCount]
+      properties:
+        path: { type: string }
+        childCount:
+          type: integer
+          description: Immediate children only, not a recursive count.
+
+    FileContent:
+      type: object
+      required: [path, binary]
+      properties:
+        path: { type: string }
+        binary:
+          type: boolean
+          description: |
+            True for a genuinely binary file **and** for one over the 2 MB cap — the cap
+            soft-degrades rather than answering 413, so the two are indistinguishable from the body
+            alone. Say "too large or binary" unless the size is knowable another way.
+        content:
+          type: string
+          description: Omitted entirely when `binary` is true.
+
+    Generation:
+      type: string
+      description: |
+        A sha256 over the deduped, sorted `git ls-files` output for the whole tree. `/files` and
+        `/detection` compute it with byte-identical implementations, so a matching pair is proof
+        the two views describe the same tree.
+
+    Detection:
+      type: object
+      required: [projects, frameworks, links, generation]
+      properties:
+        projects:
+          type: array
+          items: { $ref: "#/components/schemas/DetectionProject" }
+        frameworks:
+          type: array
+          items: { $ref: "#/components/schemas/FrameworkMembership" }
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/FileLink" }
+          description: The source-to-test graph.
+        generation: { $ref: "#/components/schemas/Generation" }
+
+    DetectionProject:
+      type: object
+      required: [root, frameworkId, label]
+      properties:
+        root:
+          type: string
+          description: Workspace-root-relative; the empty string for the repository root itself.
+        frameworkId: { type: string, examples: ["java-quarkus", "angular", "docs"] }
+        label: { type: string, examples: ["Java / Quarkus"] }
+
+    FrameworkMembership:
+      type: object
+      description: Which files belong to one detected framework, for the tree's quick-access filters.
+      required: [frameworkId, root, label, memberPaths]
+      properties:
+        frameworkId: { type: string }
+        root: { type: string }
+        label: { type: string }
+        memberPaths:
+          type: array
+          items: { type: string }
+
+    FileLink:
+      type: object
+      description: One source file and the tests that reach it.
+      required: [path, tests]
+      properties:
+        path: { type: string }
+        projectRoot:
+          type: string
+          description: The owning project's root; omitted when no project owns the file.
+        tests:
+          type: array
+          items: { $ref: "#/components/schemas/TestLink" }
+
+    TestLink:
+      type: object
+      required: [path, kinds]
+      properties:
+        path: { type: string }
+        kinds:
+          type: array
+          items: { type: string, examples: ["junit", "vitest"] }
+
+    ComponentMap:
+      type: object
+      required: [framework, components]
+      properties:
+        framework:
+          type: string
+          description: Which scanner produced the map.
+          examples: ["angular"]
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/ComponentMapEntry" }
+          description: Empty for a tree the scanner does not recognise — not an error.
+
+    ComponentMapEntry:
+      type: object
+      required: [className, componentFile, styleFiles, selectors]
+      properties:
+        className: { type: string }
+        componentFile: { type: string }
+        templateFile:
+          type: string
+          description: Omitted for an inline template.
+        styleFiles:
+          type: array
+          items: { type: string }
+        selectors:
+          type: array
+          items: { $ref: "#/components/schemas/ComponentSelector" }
+
+    ComponentSelector:
+      type: object
+      description: |
+        **Either half may be absent**, and the parser is deliberately dumb about it: `app-foo` is
+        element-only, `[appFoo]` attribute-only, `button[appFoo]` both. Anything else (`.class`,
+        `:not(…)`) is skipped rather than guessed at. An attribute selector carrying a value is
+        reduced to its name.
+      properties:
+        element: { type: string, examples: ["app-greeting"] }
+        attribute: { type: string, examples: ["appHighlight"] }
+
+    # --- commands ----------------------------------------------------------------------------
+
+    CommandStatus:
+      type: string
+      enum: [RUNNING, EXITED, TERMINATED, INTERRUPTED]
+
+    CommandKind:
+      type: string
+      description: |
+        What the frontend routes its view on. `TERMINAL` is an interactive PTY streamed to xterm.js;
+        `CHAT` is a coding-agent session over line-delimited JSON on pipes; `SERVICE` is carried
+        because it is part of the shape the frontend already switches on — this surface does not
+        launch services, `/services` does.
+      enum: [TERMINAL, CHAT, SERVICE]
+
+    LogChannel:
+      type: string
+      enum: [STDIN, OUTPUT, STDERR, TRANSCRIPT]
+
+    LogSeverity:
+      type: string
+      description: Never emitted by this daemon; see `GET /commands/{id}/log`.
+      enum: [INFO, WARNING, ERROR]
+
+    CommandEnvelope:
+      type: object
+      description: |
+        The single-command envelope both `POST /commands` and `POST /agents` answer with, kept so
+        the host's request/response records reconstruct unchanged.
+      required: [command]
+      properties:
+        command: { $ref: "#/components/schemas/Command" }
+
+    CommandList:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/CommandEnvelope" }
+          description: |
+            Newest first. Each row keeps the `{command: …}` envelope rather than being a bare
+            command, which is the host's list shape.
+
+    Command:
+      type: object
+      description: |
+        `repoId` and `workspaceId` are **synthesized**: they are on the host's DTO but not on the
+        daemon's record, because inside the container they are ambient. `shortCommitHash` is
+        likewise reproduced here — it was a mapper expression on the host rather than a stored
+        column, and leaving it out would silently empty the Commands list's commit column.
+      required:
+        [id, repoId, workspaceId, branch, actionName, status, interactive, kind, launchedAt, agentSessions]
+      properties:
+        id: { type: string }
+        repoId: { type: string }
+        workspaceId: { type: string }
+        branch: { type: string }
+        actionName: { type: string }
+        actionId:
+          type: string
+          description: Omitted for a run with no declared action behind it.
+        status: { $ref: "#/components/schemas/CommandStatus" }
+        interactive: { type: boolean }
+        kind: { $ref: "#/components/schemas/CommandKind" }
+        launchedAt: { type: string, format: date-time }
+        finishedAt:
+          type: string
+          format: date-time
+          description: Omitted while running.
+        exitCode:
+          type: integer
+          description: Omitted while running, and for a command that never produced one.
+        commitHash:
+          type: string
+          description: The checkout's HEAD at launch; omitted when unknown.
+        shortCommitHash:
+          type: string
+          description: The first seven characters of `commitHash`; omitted with it.
+        agentSessions:
+          type: array
+          items: { $ref: "#/components/schemas/AgentSessionRef" }
+          description: |
+            The ordered session lineage this command drove; empty for a non-agent command. The
+            **last** entry is the current session.
+
+    AgentSessionRef:
+      type: object
+      required: [sessionId, source, recordedAt]
+      properties:
+        sessionId: { type: string }
+        source: { $ref: "#/components/schemas/AgentSessionSource" }
+        forkedFromSessionId:
+          type: string
+          description: Set on `FORKED` entries only; omitted otherwise.
+        transcriptPath:
+          type: string
+          description: |
+            The harness's own reported JSONL path, authoritative over the computed convention.
+            Omitted until the `SessionStart` hook's first report.
+        recordedAt: { type: string, format: date-time }
+
+    AgentSessionSource:
+      type: string
+      description: |
+        How the entry entered the list. `PINNED` at launch, `RESUMED`/`FORKED` for an explicit
+        continuation, `REPORTED` when the harness's hook established a session the daemon could not
+        pin, and `SWITCHED` when the user changed sessions inside the interactive TUI — which is
+        what keeps the list a faithful order of the sessions actually driven.
+      enum: [PINNED, RESUMED, FORKED, SWITCHED, REPORTED]
+
+    LaunchCommandRequest:
+      type: object
+      required: [actionId]
+      properties:
+        actionId:
+          type: string
+          description: Must name an action from `GET /commands/actions`.
+
+    ActionList:
+      type: object
+      required: [actions]
+      properties:
+        actions:
+          type: array
+          items: { $ref: "#/components/schemas/Action" }
+
+    Action:
+      type: object
+      required: [id, name, interactive]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        interactive:
+          type: boolean
+          description: |
+            Whether the run wants a PTY — the flag a caller needs before deciding to open a
+            terminal socket for it.
+
+    CommandLog:
+      type: object
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          items: { $ref: "#/components/schemas/CommandLogLine" }
+
+    CommandLogLine:
+      type: object
+      required: [sequence, channel, content, timestamp]
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          description: The monotonic per-command ordinal, assigned at capture. The stable sort key.
+        channel: { $ref: "#/components/schemas/LogChannel" }
+        content:
+          type: string
+          description: The raw line, which may contain ANSI escapes.
+        severity:
+          $ref: "#/components/schemas/LogSeverity"
+          description: Always omitted on this daemon — nothing classifies.
+        timestamp: { type: string, format: date-time }
+
+    # --- coding agents -----------------------------------------------------------------------
+
+    AgentType:
+      type: string
+      enum: [CLAUDE, KIMI]
+
+    AgentMcpScope:
+      type: string
+      description: |
+        Which MCP servers the launch is wired to. `ACTIONS` fails with an explanation today — no
+        service in the split serves that server, and handing the agent a URL that 404s would make
+        the launch look like it worked while a tool silently was not there.
+      enum: [ACTIONS, REPOSITORY]
+
+    AgentLaunchMode:
+      type: string
+      description: |
+        `CHAT` is the stream-json conversation over pipes; `INTERACTIVE` is the full agent TUI over
+        a PTY. See the table on `POST /agents` for which socket each implies.
+      enum: [CHAT, INTERACTIVE]
+
+    LaunchAgentRequest:
+      type: object
+      required: [scope, mode]
+      properties:
+        scope: { $ref: "#/components/schemas/AgentMcpScope" }
+        mode: { $ref: "#/components/schemas/AgentLaunchMode" }
+        agentType:
+          $ref: "#/components/schemas/AgentType"
+          description: |
+            Omit to take the resolved default. **Ignored on a resume** — a resumed session keeps
+            its original harness.
+        initialContext:
+          type: string
+          description: |
+            The composed prompt, delivered **inline**. Text, code references and picked elements
+            are all text, so this covers everything except images: an image cannot ride an argv or
+            a PTY keystroke, which is the whole reason the fetch inversion below exists.
+        resumeSessionId:
+          type: string
+          description: |
+            Continue an existing session. Must belong to **this container** — a session from a
+            previous one is refused rather than attempted.
+        fork:
+          type: boolean
+          default: false
+          description: |
+            Branch `resumeSessionId` into a fresh session rather than continuing it in place.
+            Requires `resumeSessionId`, and is not supported by Kimi Code.
+        deliverTaskPrompt:
+          type: boolean
+          default: false
+          description: |
+            Seed the session with an instruction to *fetch* the task prompt through an MCP tool
+            instead of carrying it in `initialContext`.
+
+            **Do not set this yet.** The tool it sends the agent to (`taskPrompt`) is not
+            implemented anywhere on the platform, so the agent is told to call something that does
+            not exist. Deliver the prompt inline until it lands.
+
+    AvailableAgents:
+      type: object
+      required: [agents, defaultAgent]
+      properties:
+        agents:
+          type: array
+          items: { $ref: "#/components/schemas/AgentType" }
+        defaultAgent: { $ref: "#/components/schemas/AgentType" }
+
+    AgentSessionTree:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/AgentSessionNode" }
+
+    AgentSessionNode:
+      type: object
+      required: [sessionId, subagents, children]
+      properties:
+        sessionId: { type: string }
+        firstRecordedAt:
+          type: string
+          format: date-time
+          description: Omitted when nothing has dated the session yet.
+        forkedFromSessionId:
+          type: string
+          description: The fork edge; omitted on a root.
+        messageCount:
+          type: integer
+          description: |
+            **Omitted means "not swept yet"**, which is not the same as a swept zero and should
+            render differently. The count is filled in by the transcript sweep on exit.
+        newestCommandId:
+          type: string
+          description: The most recent command that drove this session — the re-attach target.
+        subagents:
+          type: array
+          items: { $ref: "#/components/schemas/AgentSubagent" }
+          description: |
+            The side-chains this session's `Task` calls spawned. Flat, one level deeper than
+            `children`, and populated **only after the exit sweep** — a live session shows its main
+            thread and gains its side-chains when the run ends. Say so in the UI rather than
+            looking broken.
+        children:
+          type: array
+          items: { $ref: "#/components/schemas/AgentSessionNode" }
+          description: Recurses to arbitrary depth. Always present, `[]` at a leaf.
+
+    AgentSubagent:
+      type: object
+      required: [agentId, messageCount]
+      properties:
+        agentId: { type: string }
+        messageCount: { type: integer }
+        agentType:
+          type: string
+          description: |
+            The sub-agent's declared type. Agent-produced free text, clamped to 255 characters;
+            omitted when the side-chain declared none.
+        description:
+          type: string
+          description: Agent-produced free text, clamped to 1024 characters. Omitted when absent.
+        firstTimestamp: { type: string, format: date-time }
+
+    PluginList:
+      type: object
+      required: [installed]
+      properties:
+        installed:
+          type: array
+          items: { $ref: "#/components/schemas/InstalledPlugin" }
+
+    InstalledPlugin:
+      type: object
+      required: [pluginId, enabled]
+      properties:
+        pluginId:
+          type: string
+          description: The marketplace-qualified id, as the volume records it.
+          examples: ["jdtls-lsp@claude-plugins-official"]
+        enabled:
+          type: boolean
+          description: False means installed but switched off, which is distinct from absent.
+
+    RefinementRequest:
+      type: object
+      required: [transcript]
+      properties:
+        transcript:
+          type: string
+          description: The rough text to rewrite. Blank is a `400`.
+        preamble:
+          type: string
+          description: Optional extra instruction prepended to the refinement request.
+
+    Refinement:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: { type: string }
+
+    # --- services ----------------------------------------------------------------------------
+
+    ServiceState:
+      type: string
+      description: |
+        The `ServiceTransition.State` vocabulary, verbatim — a caller reading this list and a
+        caller following the transition stream never see two spellings of one thing.
+
+        `DEGRADED` is **not** a member and must not become one; see `GET /services`.
+
+        One behaviour to know: a service that reaches a terminal state leaves the supervisor's live
+        map, so it reads as `STOPPED` on a later list even if it crashed. The `CRASHED` transition
+        is on the control socket.
+      enum: [STARTING, READY, RESTARTING, CRASHED, STOPPED]
+
+    ServiceList:
+      type: object
+      required: [services]
+      properties:
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/Service" }
+
+    Service:
+      type: object
+      required: [name, state, restartCount, webViewable]
+      properties:
+        name:
+          type: string
+          description: What the verbs address this service by.
+        id:
+          type: string
+          description: |
+            The declared id, defaulting to `name`. Omitted only if the declaration carries neither.
+            This is the segment qits-workspaces builds its service proxy path from.
+        description:
+          type: string
+          description: Omitted when the checkout declares none.
+        state: { $ref: "#/components/schemas/ServiceState" }
+        restartCount:
+          type: integer
+          description: |
+            How many times **this** supervisor relaunched the service, in this container. Resets
+            with the container, like everything else the daemon holds. `0` for a service that has
+            never run, rather than omitted.
+        webViewable:
+          type: boolean
+          description: |
+            Derived — `webView` is present. Always emitted so the web view's service picker is a
+            filter rather than an inference over an omitted key. Combine with a live `state` before
+            framing anything.
+        webView:
+          $ref: "#/components/schemas/WebView"
+          description: Omitted when the checkout declares no web view.
+
+    WebView:
+      type: object
+      description: |
+        The checkout's declaration, and only that. The daemon deliberately does **not** build the
+        served proxy URL from it: that path is
+        `/workspaces/service/{workspaceId}/{serviceId}/` plus `basePath`, which is
+        qits-workspaces' shape over ids this daemon is not the authority on — the same reason a
+        lazy directory carries no `href`. Same spelling as the control socket's `ConfigView`, so
+        one declaration never has two shapes.
+      properties:
+        port:
+          type: integer
+          description: The port the dev server listens on inside the container.
+        entryPath:
+          type: string
+          description: Where to land the frame, relative to the served base.
+        basePath:
+          type: string
+          description: The base the app itself is built to be served under.
+
+    StartServiceRequest:
+      type: object
+      description: |
+        Both fields optional. With neither, the committed declaration is started as-is.
+      properties:
+        script:
+          type: string
+          description: |
+            Overrides the declared start command. For a name the config does not carry at all, this
+            synthesizes a minimal, never-restart definition — the "try this edit" start.
+        env:
+          type: object
+          additionalProperties: true
+          description: |
+            An environment overlay. Values are coerced with `String.valueOf`, because a
+            `.qits-config.yml`-shaped body writing `PORT: 8080` means the number. A null entry is
+            dropped rather than becoming the text "null" in a child process's environment.
+
+    SignalServiceRequest:
+      type: object
+      properties:
+        signal:
+          type: string
+          description: Ignored when the `signal` query parameter is present.
+          examples: ["TERM", "KILL"]
+
+    # --- bootstrap ---------------------------------------------------------------------------
+
+    BootstrapChain:
+      type: object
+      required: [steps]
+      properties:
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/BootstrapStep" }
+          description: In declaration order, which is the order they run.
+
+    BootstrapStep:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: What `/bootstrap-commands/{name}/run` addresses, and the join key for the host's run history.
+        id:
+          type: string
+          description: The declared id, defaulting to `name`.
+        description:
+          type: string
+          description: Omitted when the checkout declares none.
+
+x-websockets:
+  description: |
+    Two sockets, served on this same server beside the REST routes and reached through the same
+    proxy. **Not over the control socket, deliberately**: that protocol's command triple is
+    fire-and-collect — no stdin, no resize — so carrying an interactive terminal over it would mean
+    new message types and a capability bump for something this HTTP server already does.
+
+    Both authenticate at the **handshake**, with the same `Authorization: Bearer` header. An
+    unauthenticated caller never gets a socket (`401` at the upgrade); a path that names no command
+    is rejected `404` there too, so a caller learns nothing about which commands exist.
+
+    Both are keyed by command id. **Key your client component by command id as well** — a relaunch
+    must recreate the terminal rather than reuse a socket bound to a dead process.
+
+    **Closing detaches; it never terminates.** That is what makes a command survive a browser
+    refresh. To actually stop a process, call `POST /commands/{id}/terminate`.
+
+    Attaching to a command the registry no longer holds live gets a refusal in that socket's own
+    dialect and then a close — the caller's cue to fall back to `GET /commands/{id}/log` rather
+    than wait forever on a stream that will never speak.
+
+  channels:
+
+    terminal:
+      path: /terminal/commands/{commandId}
+      summary: An interactive PTY, for xterm.js.
+      onAttach: |
+        Replays 256 KB of scrollback, then streams live.
+      clientToServer:
+        - type: data
+          shape: '{"type":"data","data":"<text>"}'
+          description: Keystrokes, written to the PTY.
+        - type: resize
+          shape: '{"type":"resize","cols":<int>,"rows":<int>}'
+          description: |
+            A missing dimension falls back to 80x24 rather than producing a zero-sized terminal.
+        - type: "(anything else)"
+          description: |
+            Silently ignored. An unknown type is a newer client, not a fault — and an undecodable
+            frame is dropped rather than closing the socket.
+      serverToClient: |
+        Raw PTY text, not JSON. Write it straight into the emulator.
+      gone: |
+        A command that is no longer running is told so as literal bytes the terminal renders as its
+        familiar yellow line — `\r\n\u001b[33mThis command is no longer running.\u001b[0m\r\n` —
+        and the socket is closed only once that has actually gone out.
+      reconnect: |
+        A clean server close (1000) is final: print `[disconnected]` and stop. Everything else
+        reconnects with exponential backoff capped around 4 s, about five attempts, each attempt
+        resetting the terminal and letting the replay repaint it. **Re-arm a spent budget on
+        `visibilitychange` and on `online`** — a laptop sleep outlives an eight-second window, and
+        "I'm back" is an event rather than something to poll for.
+
+    chat:
+      path: /chat/commands/{commandId}
+      summary: A coding-agent conversation, as newline-delimited JSON.
+      onAttach: |
+        **Replays the whole conversation**, not just a tail: the imported transcript head is
+        stitched to a 256 KB ring tail at the first ring line whose `uuid` the transcript already
+        contains, under the session lock, so every event replays exactly once. Re-attaching
+        therefore costs nothing and is the normal way to recover.
+      clientToServer:
+        - type: user
+          shape: '{"type":"user","text":"<message>"}'
+          description: |
+            The only frame the server acts on. Anything else is ignored, as on the terminal.
+      serverToClient: |
+        One JSON object per line — the harness's own `stream-json` events, passed through (Kimi's
+        ACP events are normalized to the same envelope first), plus qits' own synthetic lines.
+
+        **Render the user's own turn from the server's echo, never optimistically.** The daemon
+        emits a synthetic `{"type":"user","text":…}` for every message sent, and rendering from it
+        is what guarantees the live view and a later replay show the same things in the same order.
+
+        Sub-agent side-chains are announced by a synthetic anchor line immediately before each one:
+
+            {"type":"qits_agent_meta","agentId":"…","agentType":"…","description":"…","toolUseId":"…"}
+
+        `agentType` and `description` are agent-produced free text (clamped to 255 and 1024
+        characters) and either may be absent. **`toolUseId` is the `Task` tool call that spawned
+        the side-chain** — fold the side-chain into a collapsible group anchored on that call. A
+        side-chain whose anchor is missing has nowhere to attach and should be appended at the end
+        rather than dropped.
+
+        Side-chains join **only after the exit sweep**: the live tail covers the main session only.
+      gone: |
+        A command that is no longer running is told so as an envelope, because a chat client parses
+        rather than prints: `{"type":"session_closed"}`, then the close.
+      reconnect: |
+        Auto-reconnect on close after about 1.5 s. Queue messages sent while down and flush them on
+        open; a send while closed triggers an immediate reconnect attempt. The full replay on
+        attach is what makes this safe.

@@ -76,6 +76,9 @@ class WorkspaceApiTest {
 
   @AfterEach
   void stopServer() throws Exception {
+    if (originSync != null) {
+      originSync.close();
+    }
     api.close();
     if (client != null) {
       client.close();
@@ -120,11 +123,41 @@ class WorkspaceApiTest {
             .compose(WorkspaceApiTest::answerOf));
   }
 
+  /** One POST with the valid bearer and no body — the shape both write routes take. */
+  private Answer post(String uri) throws Exception {
+    return await(
+        client
+            .request(HttpMethod.POST, port, "127.0.0.1", uri)
+            .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
+            .compose(WorkspaceApiTest::answerOf));
+  }
+
   private static Future<Answer> answerOf(HttpClientResponse response) {
     return response.body().map(body -> new Answer(response.statusCode(), new JsonObject(body)));
   }
 
   private record Answer(int status, JsonObject body) {}
+
+  /**
+   * Wire the two write routes onto an {@link OriginSync} over a canned git, and register it for
+   * teardown. {@link WorkspaceApi} reads the sync off {@link ControlSocket} per request (it does
+   * not exist until the checkout is provisioned), so the seam is an override of that one accessor
+   * rather than a field — no CDI, no real repository, and no network, exactly as {@code
+   * OriginSyncTest} drives the same logic.
+   */
+  private void wireOriginSync(GitRunner git) {
+    OriginSync sync = git == null ? null : new OriginSync("ws-1", "feature", git, false, 0, 1, 0, 0);
+    this.originSync = sync;
+    api.controlSocket =
+        new ControlSocket() {
+          @Override
+          OriginSync originSync() {
+            return sync;
+          }
+        };
+  }
+
+  private OriginSync originSync;
 
   private void writeAngularComponent() throws Exception {
     Files.createDirectories(root.resolve("web/src/app"));
@@ -261,6 +294,32 @@ class WorkspaceApiTest {
         component.getJsonArray("styleFiles"));
     assertEquals(
         "app-greeting", component.getJsonArray("selectors").getJsonObject(0).getString("element"));
+    // Element-only, so the other half of the selector is omitted rather than nulled.
+    assertNull(component.getJsonArray("selectors").getJsonObject(0).getString("attribute"));
+  }
+
+  @Test
+  void anAttributeSelectorCarriesTheOtherHalfOfTheSelectorPair() throws Exception {
+    // Either half may be absent: `app-foo` is element-only, `[appFoo]` attribute-only. A picker
+    // matching a framed DOM node needs both spellings, so both are on the wire.
+    Files.createDirectories(root.resolve("web/src/app"));
+    Files.writeString(
+        root.resolve("web/src/app/highlight.directive.ts"),
+        """
+        import { Component } from '@angular/core';
+
+        @Component({
+          selector: '[appHighlight]',
+          template: '<span></span>',
+        })
+        export class HighlightComponent {}
+        """);
+
+    JsonObject selector =
+        get("/component-map").body().getJsonArray("components").getJsonObject(0)
+            .getJsonArray("selectors").getJsonObject(0);
+    assertEquals("appHighlight", selector.getString("attribute"));
+    assertNull(selector.getString("element"));
   }
 
   @Test
@@ -269,6 +328,60 @@ class WorkspaceApiTest {
 
     assertEquals(200, answer.status());
     assertEquals(new JsonArray(), answer.body().getJsonArray("components"));
+  }
+
+  // --- the two write routes ------------------------------------------------------------------
+
+  @Test
+  void integratingTheParentAnswersGitsOwnText() throws Exception {
+    wireOriginSync(argv -> new GitRunner.Result(0, "Updating 1a2b3c4..5d6e7f8\nFast-forward\n"));
+
+    Answer ff = post("/fast-forward?parent=main");
+    assertEquals(200, ff.status());
+    // `output` is the host DTO's component name, kept so the frontend contract did not move with
+    // the endpoint. It is git's text verbatim, shown exactly as the docker-exec output used to be.
+    assertEquals("Updating 1a2b3c4..5d6e7f8\nFast-forward\n", ff.body().getString("output"));
+
+    Answer merge = post("/update-from-parent?parent=main");
+    assertEquals(200, merge.status());
+    assertFalse(merge.body().getString("output").isBlank());
+  }
+
+  @Test
+  void aRefusedIntegrationIs400WithGitsReason() throws Exception {
+    // "This branch has diverged" is an answer the UI acts on, not a server fault — the same reason
+    // an unresolvable path is a 400 rather than a 500.
+    wireOriginSync(
+        argv ->
+            "fetch".equals(argv[1])
+                ? new GitRunner.Result(0, "")
+                : new GitRunner.Result(1, "fatal: Not possible to fast-forward, aborting."));
+
+    Answer answer = post("/fast-forward?parent=main");
+    assertEquals(400, answer.status());
+    assertTrue(answer.body().getString("message").contains("fast-forward"));
+  }
+
+  @Test
+  void integratingBeforeTheCheckoutIsProvisionedIs503() throws Exception {
+    // The daemon is up but has nothing to run git in yet, and the caller should retry rather than
+    // treat it as a failure.
+    wireOriginSync(null);
+
+    Answer answer = post("/fast-forward?parent=main");
+    assertEquals(503, answer.status());
+    assertFalse(answer.body().getString("message").isBlank());
+  }
+
+  @Test
+  void theWriteRoutesArePostOnlyAndAGetNeverReachesGit() throws Exception {
+    wireOriginSync(
+        argv -> {
+          throw new AssertionError("a GET must never reach git");
+        });
+
+    assertEquals(405, get("/fast-forward?parent=main").status());
+    assertEquals(405, get("/update-from-parent?parent=main").status());
   }
 
   // --- error mapping -------------------------------------------------------------------------

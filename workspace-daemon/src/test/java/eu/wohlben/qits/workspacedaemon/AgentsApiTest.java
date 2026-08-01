@@ -297,6 +297,25 @@ class AgentsApiTest {
   }
 
   @Test
+  void installingAPluginAnswersTheListItJustChanged() throws Exception {
+    // The install verb returns the same envelope the listing does, so a client applies one decoder
+    // and needs no follow-up read to see the result of what it just did.
+    //
+    // The path segment is the bare plugin id — the marketplace suffix the listing reports
+    // (`<id>@claude-plugins-official`) is appended by the daemon. The id is pattern-matched before
+    // it reaches a shell, so the qualified form is refused.
+    Answer answer = post("/agent-plugins/jdtls-lsp/install", new JsonObject());
+
+    assertEquals(200, answer.status());
+    assertNotNull(answer.body().getJsonArray("installed"));
+
+    Answer qualified =
+        post("/agent-plugins/jdtls-lsp@claude-plugins-official/install", new JsonObject());
+    assertEquals(400, qualified.status());
+    assertTrue(qualified.body().getString("message").contains("plugin id"));
+  }
+
+  @Test
   void promptRefinementReturnsTheAgentsStdout() throws Exception {
     Answer answer =
         post("/prompt-refinements", new JsonObject().put("transcript", "uh do the thing"));
@@ -311,6 +330,109 @@ class AgentsApiTest {
 
     assertEquals(400, answer.status());
     assertEquals("transcript is required", answer.body().getString("message"));
+  }
+
+  @Test
+  void aLaunchAnswersTheCommandEnvelopeAndTakesItsSeedInline() throws Exception {
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("mode", "INTERACTIVE")
+                .put("agentType", "CLAUDE")
+                .put("initialContext", "look at the README")
+                .put("fork", false)
+                .put("deliverTaskPrompt", false));
+
+    assertEquals(200, answer.status());
+    // The same `{command: …}` envelope POST /commands answers with, so one client-side decoder
+    // serves both launch paths. The harness binary is absent in the suite, so the process exits
+    // immediately — what is under test here is the request contract and the response shape.
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals("feature-x", command.getString("workspaceId"));
+    // The launch mode maps onto the command kind the frontend routes its view on: INTERACTIVE is a
+    // PTY (TERMINAL, xterm.js), CHAT is line-delimited JSON on pipes (see the sibling test).
+    assertEquals("TERMINAL", command.getString("kind"));
+    assertEquals(true, command.getBoolean("interactive"), "INTERACTIVE renders onto a PTY");
+    assertNotNull(command.getString("id"));
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void aChatLaunchIsNotInteractive() throws Exception {
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject().put("scope", "REPOSITORY").put("mode", "CHAT").put("fork", false));
+
+    assertEquals(200, answer.status());
+    assertEquals(false, answer.body().getJsonObject("command").getBoolean("interactive"));
+    post("/commands/" + answer.body().getJsonObject("command").getString("id") + "/terminate",
+        new JsonObject());
+  }
+
+  @Test
+  void aForkWithoutASessionToForkFromIsAFourHundred() throws Exception {
+    // The two request fields that only make sense together, and the message names both.
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject().put("scope", "REPOSITORY").put("mode", "CHAT").put("fork", true));
+
+    assertEquals(400, answer.status());
+    assertEquals("fork requires resumeSessionId", answer.body().getString("message"));
+  }
+
+  @Test
+  void resumingASessionThisContainerDoesNotOwnIsRefused() throws Exception {
+    // Fails closed: the store that would vouch for the session did not survive the container, so
+    // resuming a vanished id would exit instantly with "no conversation found".
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("mode", "CHAT")
+                .put("resumeSessionId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
+
+    assertEquals(400, answer.status());
+    assertTrue(
+        answer.body().getString("message").contains("3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
+        answer.body().encode());
+  }
+
+  @Test
+  void anUnknownModeOrAgentTypeIsAFourHundredToo() throws Exception {
+    assertTrue(
+        post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "SIDEWAYS"))
+            .body()
+            .getString("message")
+            .contains("mode"));
+    assertTrue(
+        post(
+                "/agents",
+                new JsonObject()
+                    .put("scope", "REPOSITORY")
+                    .put("mode", "CHAT")
+                    .put("agentType", "NOBODY"))
+            .body()
+            .getString("message")
+            .contains("agentType"));
+  }
+
+  @Test
+  void refinementTakesAPreambleBesideTheTranscript() throws Exception {
+    Answer answer =
+        post(
+            "/prompt-refinements",
+            new JsonObject()
+                .put("transcript", "uh do the thing")
+                .put("preamble", "you are refining a prompt"));
+
+    assertEquals(200, answer.status());
+    assertEquals("refined prompt", answer.body().getString("prompt"));
   }
 
   @Test

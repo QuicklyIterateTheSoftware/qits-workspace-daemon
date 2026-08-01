@@ -1,11 +1,15 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.WebViewDecl;
+import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import io.vertx.core.Future;
@@ -53,7 +57,10 @@ class ServicesApiTest {
 
   private final List<DaemonMessage> emitted = new CopyOnWriteArrayList<>();
 
-  /** Two declared services: one that stays up and prints a banner, one that is never started. */
+  /**
+   * Three declared services: a web-viewable dev server that stays up and prints a banner, a plain
+   * worker with no web view, and one that fails its first launch so a restart count is observable.
+   */
   private static final List<ServiceDecl> DECLARED =
       List.of(
           new ServiceDecl(
@@ -67,8 +74,10 @@ class ServicesApiTest {
               0,
               "TERM",
               Map.of(),
-              null,
-              List.of()),
+              new WebViewDecl(4200, "/index.html", "/app"),
+              List.of(
+                  new HealthCheckDecl(
+                      "up", "HTTP", 4200, "/health", "200", null, null, null, null, null, null))),
           new ServiceDecl(
               "worker",
               "worker",
@@ -78,6 +87,23 @@ class ServicesApiTest {
               false,
               "NEVER",
               0,
+              "TERM",
+              Map.of(),
+              null,
+              List.of()),
+          // Fails once, then stays up: the only way to observe a non-zero restart count in a list
+          // read, because a service that exhausts its restarts leaves `running` and reads as a
+          // never-started one again.
+          new ServiceDecl(
+              "flaky",
+              "flaky",
+              "crashes once on the way up",
+              "if [ -f .flaky-started ]; then echo flaky-up; sleep 60;"
+                  + " else touch .flaky-started; exit 1; fi",
+              "flaky-up",
+              false,
+              "ON_FAILURE",
+              3,
               "TERM",
               Map.of(),
               null,
@@ -109,9 +135,10 @@ class ServicesApiTest {
   @AfterEach
   void stopServer() throws Exception {
     if (supervisor != null) {
-      // Signal both so no `sleep 60` outlives the test; close() only stops the timer.
+      // Signal every one so no `sleep 60` outlives the test; close() only stops the timer.
       supervisor.signal("web", "KILL");
       supervisor.signal("worker", "KILL");
+      supervisor.signal("flaky", "KILL");
       supervisor.close();
     }
     api.close();
@@ -129,7 +156,7 @@ class ServicesApiTest {
 
     assertEquals(200, answer.status());
     JsonArray services = answer.body().getJsonArray("services");
-    assertEquals(2, services.size());
+    assertEquals(3, services.size());
     JsonObject web = services.getJsonObject(0);
     assertEquals("web", web.getString("name"));
     assertEquals("web", web.getString("id"));
@@ -137,6 +164,65 @@ class ServicesApiTest {
     // Absent, not missing: the caller's next move is to start it, and no entry would read as "no
     // such service".
     assertEquals(ServiceTransition.State.STOPPED, web.getString("state"));
+    // Zero rather than omitted, for the same reason the state is STOPPED rather than absent.
+    assertEquals(0, web.getInteger("restartCount"));
+  }
+
+  @Test
+  void aWebViewableServiceCarriesItsDeclarationAndTheDerivedFlag() throws Exception {
+    JsonArray services = get("/services").body().getJsonArray("services");
+
+    JsonObject web = services.getJsonObject(0);
+    assertEquals(true, web.getBoolean("webViewable"));
+    JsonObject webView = web.getJsonObject("webView");
+    assertEquals(4200, webView.getInteger("port"));
+    assertEquals("/index.html", webView.getString("entryPath"));
+    assertEquals("/app", webView.getString("basePath"));
+
+    // The flag is always present so the web view's picker is a filter, not an inference over an
+    // omitted key; the declaration itself is omitted when there is none.
+    JsonObject worker = services.getJsonObject(1);
+    assertEquals(false, worker.getBoolean("webViewable"));
+    assertNull(worker.getJsonObject("webView"));
+  }
+
+  @Test
+  void theListCarriesNoHealthResultsAndNoDegradedState() throws Exception {
+    // `web` declares a health check and the daemon parses it, but nothing here runs it — there is
+    // no prober in this daemon and none on the host either. A `health` key would read as a verdict
+    // the daemon has not formed. DEGRADED is out for the harder reason: it was derived host-side
+    // from per-line log observers that were deleted, and re-minting it here resurrects them.
+    JsonObject web = get("/services").body().getJsonArray("services").getJsonObject(0);
+    assertNull(web.getJsonArray("health"));
+    assertNull(web.getJsonArray("healthChecks"));
+    for (Object entry : get("/services").body().getJsonArray("services")) {
+      assertNotEquals("DEGRADED", ((JsonObject) entry).getString("state"));
+    }
+  }
+
+  @Test
+  void aServiceThatCrashedOnTheWayUpReportsHowOftenItWasRelaunched() throws Exception {
+    assertEquals(202, post("/services/flaky/start", null).status());
+
+    // The first launch exits 1 and the policy relaunches it; the second stays up and prints its
+    // banner. The count is this container's, and it resets with the container like everything else
+    // the daemon holds.
+    awaitState("flaky", ServiceTransition.State.READY);
+    for (Object entry : get("/services").body().getJsonArray("services")) {
+      JsonObject service = (JsonObject) entry;
+      if ("flaky".equals(service.getString("name"))) {
+        assertEquals(1, service.getInteger("restartCount"));
+        return;
+      }
+    }
+    throw new AssertionError("flaky was not listed");
+  }
+
+  @Test
+  void aWriteIsAcknowledgedRatherThanAnswered() throws Exception {
+    // 202 with a shape, not an empty body: the outcome rides the control socket, and giving the
+    // acknowledgement a body keeps a client's JSON parse unconditional across every route here.
+    assertEquals(true, post("/services/worker/signal", null).body().getBoolean("accepted"));
   }
 
   @Test
@@ -162,11 +248,17 @@ class ServicesApiTest {
         post(
             "/services/adhoc/start",
             new JsonObject()
-                .put("script", "echo ad-hoc-up; sleep 60")
+                .put("script", "echo ad-hoc-up on $PORT; sleep 60")
                 .put("env", new JsonObject().put("PORT", 8080)));
     assertEquals(202, answer.status());
 
     awaitState("adhoc", ServiceTransition.State.READY);
+    // The overlay reached the child's environment. A JSON number is coerced with String.valueOf,
+    // because a .qits-config.yml-shaped body writing `PORT: 8080` means the number.
+    assertTrue(
+        emitted.stream()
+            .anyMatch(m -> m instanceof CommandChunk c && c.text().contains("ad-hoc-up on 8080")),
+        "expected the overlaid PORT in the service's output, got: " + emitted);
     // A service supervised without being declared still has to be visible to the caller that
     // started it.
     JsonArray services = get("/services").body().getJsonArray("services");
@@ -183,6 +275,19 @@ class ServicesApiTest {
 
     assertEquals(202, post("/services/worker/signal?signal=TERM", null).status());
 
+    assertEquals(
+        ServiceTransition.State.STOPPED, awaitState("worker", ServiceTransition.State.STOPPED));
+  }
+
+  @Test
+  void theSignalMayComeFromTheBodyWhenThereIsNoQueryParameter() throws Exception {
+    post("/services/worker/start", null);
+    awaitState("worker", ServiceTransition.State.READY);
+
+    // The query parameter wins where both are given, so a signal can be sent with no body at all;
+    // the body form is what a client with a JSON-only transport uses.
+    assertEquals(
+        202, post("/services/worker/signal", new JsonObject().put("signal", "TERM")).status());
     assertEquals(
         ServiceTransition.State.STOPPED, awaitState("worker", ServiceTransition.State.STOPPED));
   }
