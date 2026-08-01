@@ -67,6 +67,15 @@ public final class ServiceSupervisor {
   private final long backoffMaxMs;
   private final long stopGraceMs;
 
+  /**
+   * The per-workspace half of every web-viewable service's public base ({@code
+   * /workspaces/service/{workspaceRowId}}, no trailing slash), injected by qits-workspaces —
+   * told, never derived: this daemon is not the authority on qits-workspaces' route shape. Empty
+   * when nothing fronts the daemon, and a web-viewable spawn then warns and leaves {@code
+   * QITS_PUBLIC_BASE} unset rather than guessing.
+   */
+  private final String serviceProxyBase;
+
   private final ConcurrentHashMap<String, Supervised> running = new ConcurrentHashMap<>();
   private final ScheduledExecutorService scheduler =
       Executors.newScheduledThreadPool(
@@ -85,7 +94,8 @@ public final class ServiceSupervisor {
       long readyGraceMs,
       long backoffInitialMs,
       long backoffMaxMs,
-      long stopGraceMs) {
+      long stopGraceMs,
+      String serviceProxyBase) {
     this.workspaceId = workspaceId;
     this.workingDir = workingDir;
     this.emit = emit;
@@ -94,6 +104,7 @@ public final class ServiceSupervisor {
     this.backoffInitialMs = backoffInitialMs;
     this.backoffMaxMs = backoffMaxMs;
     this.stopGraceMs = stopGraceMs;
+    this.serviceProxyBase = serviceProxyBase == null ? "" : serviceProxyBase;
   }
 
   /** Per-service supervision state, all mutated under {@link #lock}. */
@@ -350,6 +361,7 @@ public final class ServiceSupervisor {
       builder.directory(workingDir);
     }
     overlayEnv(builder, decl.environment());
+    injectPublicBase(builder, decl);
     Process process;
     try {
       process = builder.start();
@@ -495,6 +507,44 @@ public final class ServiceSupervisor {
             env.put(key, value);
           }
         });
+  }
+
+  /**
+   * Bake the web-viewable service's public base into its environment as {@code QITS_PUBLIC_BASE}:
+   * the host's web-view proxy forwards the caller's path <b>verbatim</b>, so the dev server must
+   * serve under {@code /workspaces/service/{workspaceRowId}/{serviceId}/} (plus its declared
+   * {@code web-view.base-path}) — and spawn is the only place it can be told. The daemon appends
+   * the two segments it is the authority on (the declared id, the declared base-path) to the
+   * per-workspace base the host injected.
+   *
+   * <p>Done in {@link #launch} rather than at definition resolution so a manual start, an
+   * auto-start and every crash-restart share the one code path — an injection that lives at any
+   * earlier point is exactly what a respawn loses (measured live as N3: the framed view 404'd
+   * because nothing told the dev server its base). Set <em>after</em> {@link #overlayEnv} so the
+   * computed value wins over a config-declared one: a value in the file cannot know the
+   * workspace's row id and can only be stale.
+   */
+  private void injectPublicBase(ProcessBuilder builder, ServiceDecl decl) {
+    if (decl.webView() == null) {
+      return;
+    }
+    if (serviceProxyBase.isEmpty()) {
+      emit.accept(
+          new DaemonLog(
+              "WARN",
+              "service '"
+                  + decl.name()
+                  + "' declares a web view but no service proxy base is configured"
+                  + " (qits.workspace-daemon.service-proxy-base) — QITS_PUBLIC_BASE stays unset"
+                  + " and the framed web view will not resolve."));
+      return;
+    }
+    StringBuilder base = new StringBuilder(serviceProxyBase).append('/').append(decl.id()).append('/');
+    String basePath = decl.webView().basePath();
+    if (basePath != null && !basePath.isBlank()) {
+      base.append(basePath).append('/');
+    }
+    builder.environment().put("QITS_PUBLIC_BASE", base.toString());
   }
 
   private static Pattern compileReady(String readyPattern, String serviceName) {

@@ -89,6 +89,14 @@ route below it is written as the path it is.
 The default is empty — no base, paths served as listed — which is what every direct caller gets, and
 is why a bare daemon behaves exactly as it did before a base existed.
 
+The same arrangement covers the services the daemon spawns, one hop further out: qits-workspaces
+injects `QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE` (`/workspaces/service/{workspaceId}`, the prefix
+its verbatim service proxy answers under), and the daemon completes it per spawn with the declared
+service id and `web-view.base-path`, baking the result into the dev server's environment as
+`QITS_PUBLIC_BASE`. The dev server serving under that base is the whole web-view contract — the
+proxy rewrites nothing, so an app that never learned its base 404s the framed view. With no proxy
+base injected, a web-viewable spawn warns and leaves `QITS_PUBLIC_BASE` unset rather than guessing.
+
 These paths are **not** under the `/<segment>/…` convention the six services adopted, and that is
 deliberate. Each of those six took its own gateway segment and serves the prefixed path itself. The
 daemon is one process per workspace container rather than a single service behind a segment, so its

@@ -5,10 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
+import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.WebViewDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
 import java.io.File;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -35,18 +38,22 @@ class ServiceSupervisorTest {
 
   private ServiceSupervisor supervisor() {
     if (supervisor == null) {
-      supervisor =
-          new ServiceSupervisor(
-              "ws-1",
-              workspace,
-              events::add,
-              () -> decls, /* readyGrace */
-              400, /* backoffInit */
-              50, /* backoffMax */
-              200, /* stopGrace */
-              1000);
+      supervisor = supervisor("/workspaces/service/42");
     }
     return supervisor;
+  }
+
+  private ServiceSupervisor supervisor(String serviceProxyBase) {
+    return new ServiceSupervisor(
+        "ws-1",
+        workspace,
+        events::add,
+        () -> decls, /* readyGrace */
+        400, /* backoffInit */
+        50, /* backoffMax */
+        200, /* stopGrace */
+        1000,
+        serviceProxyBase);
   }
 
   @AfterEach
@@ -200,5 +207,95 @@ class ServiceSupervisorTest {
     awaitCondition(() -> statesFor("dev").size() > before, 3000, () -> "a re-reported state event");
 
     supervisor().signal("dev", "TERM");
+  }
+
+  @Test
+  void aWebViewableServiceKeepsItsPublicBaseAcrossARestart() throws Exception {
+    // N3: the verbatim web-view proxy only works while the dev server serves under
+    // /workspaces/service/{rowId}/{serviceId}/, and spawn is the only place it learns that base.
+    // Every spawn — first start and crash-restart alike — must carry it, keyed by the declared
+    // ID (the proxy path segment), not the display name, with the declared base-path appended.
+    decls =
+        List.of(
+            new ServiceDecl(
+                "web-id",
+                "Web UI",
+                null,
+                "echo \"$QITS_PUBLIC_BASE\" >> pb.out; exit 1",
+                null,
+                true,
+                "ON_FAILURE",
+                2,
+                "TERM",
+                Map.of(),
+                new WebViewDecl(4200, null, "app"),
+                List.of()));
+    supervisor().startAutoStart();
+
+    awaitState("Web UI", ServiceTransition.State.CRASHED, 15000);
+    List<String> bases = Files.readAllLines(workspace.toPath().resolve("pb.out"));
+    assertEquals(3, bases.size(), "the initial spawn plus two restarts each wrote their base");
+    for (String base : bases) {
+      assertEquals("/workspaces/service/42/web-id/app/", base);
+    }
+  }
+
+  @Test
+  void theComputedPublicBaseWinsOverAConfigDeclaredOne() throws Exception {
+    // A QITS_PUBLIC_BASE in the file cannot know the workspace's row id, so it can only be stale;
+    // the spawn-time computation overrides it rather than merging.
+    decls =
+        List.of(
+            new ServiceDecl(
+                "web",
+                "web",
+                null,
+                "echo \"${QITS_PUBLIC_BASE:-UNSET}\" > pb-once.out; true",
+                null,
+                true,
+                "NEVER",
+                0,
+                "TERM",
+                Map.of("QITS_PUBLIC_BASE", "/stale/"),
+                new WebViewDecl(4200, null, null),
+                List.of()));
+    supervisor().startAutoStart();
+
+    awaitState("web", ServiceTransition.State.STOPPED, 8000);
+    assertEquals(
+        "/workspaces/service/42/web/",
+        Files.readString(workspace.toPath().resolve("pb-once.out")).strip());
+  }
+
+  @Test
+  void aWebViewableServiceWithoutAProxyBaseWarnsAndSpawnsWithoutOne() throws Exception {
+    decls =
+        List.of(
+            new ServiceDecl(
+                "web",
+                "web",
+                null,
+                "echo \"${QITS_PUBLIC_BASE:-UNSET}\" > pb-unset.out; true",
+                null,
+                true,
+                "NEVER",
+                0,
+                "TERM",
+                Map.of(),
+                new WebViewDecl(4200, null, null),
+                List.of()));
+    supervisor = supervisor(""); // nothing fronting the daemon: no base to hand down
+    supervisor.startAutoStart();
+
+    awaitState("web", ServiceTransition.State.STOPPED, 8000);
+    assertEquals("UNSET", Files.readString(workspace.toPath().resolve("pb-unset.out")).strip());
+    assertTrue(
+        events.stream()
+            .anyMatch(
+                m ->
+                    m instanceof DaemonLog log
+                        && "WARN".equals(log.level())
+                        && log.message().contains("service-proxy-base")),
+        "a web view with no proxy base to serve under must say so");
   }
 }

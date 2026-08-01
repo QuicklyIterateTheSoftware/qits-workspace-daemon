@@ -139,7 +139,7 @@ a 404, and a 404 from an MCP server surfaces to the user as *a tool that isn't t
 looks like it worked. Failing loudly at the boundary is the only place it is legible.
 
 **The open question, stated so it is not lost:** none of the three non-control-socket hosts is
-injected today. qits-workspaces' `WorkspaceContainerFactory` sets fourteen `QITS_WORKSPACE_DAEMON_*`
+injected today. qits-workspaces' `WorkspaceContainerFactory` sets fifteen `QITS_WORKSPACE_DAEMON_*`
 vars and none of them names qits-artifacts, qits-projects or qits-observability. So in a
 host-created container all three fall back to the control socket's authority, and the daemon is
 running on the assumption that one authority routes every segment. That is either correct (the url

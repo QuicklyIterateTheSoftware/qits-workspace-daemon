@@ -127,7 +127,8 @@ class ServicesApiTest {
             500,
             50,
             500,
-            500);
+            500,
+            "");
     api.wireServices(supervisor);
     client = vertx.createHttpClient();
   }

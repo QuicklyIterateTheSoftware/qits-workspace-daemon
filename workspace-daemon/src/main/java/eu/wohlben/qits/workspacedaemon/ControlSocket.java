@@ -285,6 +285,15 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.service-stop-grace-ms", defaultValue = "5000")
   long serviceStopGraceMs;
 
+  // The per-workspace half of every web-viewable service's public base, injected by the host as
+  // QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE (/workspaces/service/{workspaceRowId}). Optional<> for
+  // the same SmallRye reason as the identity knobs: an empty default resolves as "no value" and a
+  // plain String would then fail at startup. Absent ⇒ web-viewable spawns warn and leave
+  // QITS_PUBLIC_BASE unset rather than deriving a path from a sibling address (the arrangement the
+  // API base path already models: told, never derived).
+  @ConfigProperty(name = "qits.workspace-daemon.service-proxy-base")
+  Optional<String> serviceProxyBase;
+
   /** Off-event-loop pool for blocking process/git work; one thread per in-flight request. */
   private final ExecutorService workers =
       Executors.newCachedThreadPool(
@@ -416,7 +425,8 @@ public class ControlSocket {
             serviceReadyGraceMs,
             serviceBackoffInitialMs,
             serviceBackoffMaxMs,
-            serviceStopGraceMs);
+            serviceStopGraceMs,
+            normalizeProxyBase(serviceProxyBase == null ? null : serviceProxyBase.orElse(null)));
     // Both surfaces are wired here rather than beside the file/detection wiring in
     // startGitStatusMonitor, because neither needs a provisioned checkout to answer: the service
     // list is the declared set plus live state, and the bootstrap chain is read from the config the
@@ -721,6 +731,15 @@ public class ControlSocket {
     if (servicesAutostart && s != null) {
       s.startAutoStart();
     }
+  }
+
+  /** The injected service proxy base, normalized: no trailing slash, empty when unset. */
+  private static String normalizeProxyBase(String value) {
+    if (value == null || value.isBlank()) {
+      return "";
+    }
+    String v = value.trim();
+    return v.endsWith("/") ? v.substring(0, v.length() - 1) : v;
   }
 
   private void connect(int attempt) {
