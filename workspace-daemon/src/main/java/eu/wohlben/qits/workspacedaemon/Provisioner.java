@@ -215,13 +215,23 @@ public final class Provisioner {
    * project-scoped name was injected (mirrors the host's {@code cloneUrl}).
    */
   static String rootUrl(String gitBase, Env env) {
-    if (env.projectId() != null
-        && !env.projectId().isBlank()
-        && env.repoName() != null
-        && !env.repoName().isBlank()) {
+    if (nameAddressed(env)) {
       return gitBase + "/" + env.projectId() + "/" + env.repoName();
     }
     return gitBase + "/" + env.repoId();
+  }
+
+  /**
+   * Whether a name-addressed route ({@code /git/<projectId>/<repoName>}) exists for this workspace
+   * — the ONE predicate for both the clone url and the absolute-submodule redirect. Both env vars
+   * must be present: the project id now arrives on its own (it scopes the coding agents' MCP urls),
+   * and it alone names no servable route.
+   */
+  static boolean nameAddressed(Env env) {
+    return env.projectId() != null
+        && !env.projectId().isBlank()
+        && env.repoName() != null
+        && !env.repoName().isBlank();
   }
 
   /**
@@ -281,9 +291,11 @@ public final class Provisioner {
       String url = committedUrl.exitCode() == 0 ? committedUrl.stdout().trim() : "";
       boolean relative = url.isEmpty() || url.startsWith("./") || url.startsWith("../");
       // A relative url resolves natively against the name-addressed origin; only an absolute url
-      // needs redirecting to the name-addressed sibling (by basename) to stay offline. We can only
-      // do that when a project scope is known.
-      if (!relative && env.projectId() != null && !env.projectId().isBlank()) {
+      // needs redirecting to the name-addressed sibling (by basename) to stay offline. That target
+      // only exists when the clone itself is name-addressed (nameAddressed — the same predicate
+      // rootUrl uses): a rewrite keyed on the project id alone would point every absolute
+      // submodule at a /git/<projectId>/<name> route the git host does not serve.
+      if (!relative && nameAddressed(env)) {
         runStreaming(
             List.of(
                 "git",

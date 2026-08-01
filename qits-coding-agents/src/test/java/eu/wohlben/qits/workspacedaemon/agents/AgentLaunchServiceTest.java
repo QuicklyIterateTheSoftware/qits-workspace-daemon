@@ -212,7 +212,40 @@ class AgentLaunchServiceTest {
         }
       };
 
+  /** A context whose repo id is the given value — the rest matches {@link #WORKSPACE_CONTEXT}. */
+  private static WorkspaceContext contextWithRepo(String repoId) {
+    return new WorkspaceContext() {
+      @Override
+      public String repoId() {
+        return repoId;
+      }
+
+      @Override
+      public String workspaceId() {
+        return WORKSPACE;
+      }
+
+      @Override
+      public String branch() {
+        return "feature/x";
+      }
+
+      @Override
+      public String commitHash() {
+        return "abc1234";
+      }
+    };
+  }
+
+  private AgentLaunchService serviceWithRepo(String repoId) {
+    return serviceWith(contextWithRepo(repoId), ENDPOINTS);
+  }
+
   private AgentLaunchService service() {
+    return serviceWith(WORKSPACE_CONTEXT, ENDPOINTS);
+  }
+
+  private AgentLaunchService serviceWith(WorkspaceContext context, McpEndpoints endpoints) {
     ProcessRunner probe =
         (command, cwd, env, timeout) ->
             new ProcessRunner.Result(loggedIn ? 0 : 1, loggedIn ? "" : "signed out", "", false);
@@ -247,8 +280,8 @@ class AgentLaunchServiceTest {
         transcripts,
         new AgentTranscriptTailService(transcripts, new CommandLogService(store, null)),
         defaults,
-        ENDPOINTS,
-        WORKSPACE_CONTEXT,
+        endpoints,
+        context,
         CLAUDE_MOUNT,
         HOOKS_PORT);
   }
@@ -276,6 +309,33 @@ class AgentLaunchServiceTest {
               + "&workspaceId="
               + WORKSPACE,
           servers.get(0).url());
+    }
+
+    @Test
+    void thePlatformsSlugRepositoryIdsAreValidScopeIds() {
+      // Repository ids on this platform are directory-name slugs (qits-stt) — the join key
+      // everywhere. Validating them as strict UUIDs 400'd every launch on every real repository:
+      // D2's `Invalid repository id: qits-stt`. UUIDs still pass as a subset of the slug grammar.
+      List<AgentLaunchService.ScopedMcp> servers =
+          serviceWithRepo("qits-stt").serversFor(AgentMcpScope.REPOSITORY);
+
+      assertTrue(servers.get(0).url().contains("repositoryId=qits-stt"));
+    }
+
+    @Test
+    void aScopeIdOutsideTheSlugAlphabetIsStillRefused() {
+      // The relaxation is exactly to the platform grammar, no further: these values are
+      // interpolated into single-quoted launch args, so a quote, a space, or a leading dash must
+      // still refuse the launch.
+      assertThrows(
+          InvalidCommandRequestException.class,
+          () -> serviceWithRepo("qits'stt").serversFor(AgentMcpScope.REPOSITORY));
+      assertThrows(
+          InvalidCommandRequestException.class,
+          () -> serviceWithRepo("-leading").serversFor(AgentMcpScope.REPOSITORY));
+      assertThrows(
+          InvalidCommandRequestException.class,
+          () -> serviceWithRepo("").serversFor(AgentMcpScope.REPOSITORY));
     }
 
     @Test

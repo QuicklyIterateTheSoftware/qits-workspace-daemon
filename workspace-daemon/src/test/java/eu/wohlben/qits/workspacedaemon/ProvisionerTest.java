@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -102,6 +103,20 @@ class ProvisionerTest {
     assertEquals(
         "http://qits:8080/artifacts/git/repo-abc",
         Provisioner.rootUrl("http://qits:8080/artifacts/git", env("", "")));
+  }
+
+  @Test
+  void aProjectIdAloneDoesNotNameAddressAnything() {
+    // The project id now ships on its own (it scopes the coding agents' MCP urls, D2), while the
+    // repo name stays blank until name-addressed git serving exists. It must not flip the clone —
+    // or the absolute-submodule redirect, which shares this exact predicate — onto a
+    // /git/<projectId>/<name> route the git host does not serve.
+    assertEquals(
+        "http://qits:8080/artifacts/git/repo-abc",
+        Provisioner.rootUrl(
+            "http://qits:8080/artifacts/git", env("53c78589-6af3-4221-b3ef-315c867b0863", "")));
+    assertFalse(Provisioner.nameAddressed(env("53c78589-6af3-4221-b3ef-315c867b0863", "")));
+    assertTrue(Provisioner.nameAddressed(env("proj-1", "my-repo")));
   }
 
   /**

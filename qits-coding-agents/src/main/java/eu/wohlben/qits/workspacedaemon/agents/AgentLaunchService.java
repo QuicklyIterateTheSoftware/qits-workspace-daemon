@@ -24,8 +24,9 @@ import java.util.regex.Pattern;
  * agent session shows up in the Commands list and is attachable and terminable like any other.
  *
  * <p>Owns the MCP scope→URL construction (the read-only allowlists and the {@code ?repositoryId=} /
- * {@code ?projectId=} query parameters). Scope ids are validated as UUIDs before being interpolated
- * into the single-quoted launch args, since the agent renderer does no escaping of its own.
+ * {@code ?projectId=} query parameters). Scope ids are validated against the platform's slug
+ * grammar (UUIDs pass as a subset) before being interpolated into the single-quoted launch args,
+ * since the agent renderer does no escaping of its own.
  *
  * <p><strong>What the move removed.</strong> The host version had twelve injected collaborators
  * spanning five sibling domains. Inside the container:
@@ -56,8 +57,20 @@ import java.util.regex.Pattern;
  */
 public final class AgentLaunchService {
 
-  /** Repository and project ids are generated UUIDs; only hex and dashes ever appear. */
+  /** Session ids are generated UUIDs; only hex and dashes ever appear. */
   private static final Pattern UUID_PATTERN = Pattern.compile("[0-9a-fA-F-]{36}");
+
+  /**
+   * The platform's id grammar: the same slug the git host accepts for a repo id — alphanumerics
+   * and dashes, no leading dash, bounded (qits-ci's {@code CiIdentifiers.REPO_ID}, mirrored).
+   * Repository ids on this platform ARE directory-name slugs ({@code qits-stt}) — the join key
+   * everywhere — and project ids are UUIDs, which this grammar accepts as a subset. Validating
+   * either as a strict UUID rejected every real repository id (D2: 400 "Invalid repository id").
+   * What the check protects is the same as ever: these values are interpolated into the
+   * single-quoted MCP launch args, so nothing outside the slug alphabet may pass.
+   */
+  private static final Pattern PLATFORM_ID_PATTERN =
+      Pattern.compile("[A-Za-z0-9][A-Za-z0-9-]{0,63}");
 
   /**
    * The one-sentence bootstrap turn pushed in place of the composed prompt: it carries the user's
@@ -582,8 +595,8 @@ public final class AgentLaunchService {
    * repository} server presented.
    */
   List<ScopedMcp> serversFor(AgentMcpScope scope) {
-    String repo = requireUuid(workspace.repoId(), "repository id");
-    String projectId = requireUuid(endpoints.projectId(), "project id");
+    String repo = requireId(workspace.repoId(), "repository id");
+    String projectId = requireId(endpoints.projectId(), "project id");
     // Project-scoped, then narrowed to this one repository so a per-subtree session only sees its
     // own repo, not its siblings in the project.
     ScopedMcp narrowedRepositoryServer =
@@ -664,6 +677,14 @@ public final class AgentLaunchService {
 
   private String requireUuid(String value, String label) {
     if (value == null || !UUID_PATTERN.matcher(value).matches()) {
+      throw new InvalidCommandRequestException("Invalid " + label + ": " + value);
+    }
+    return value;
+  }
+
+  /** Repository/project ids: the platform slug grammar (UUIDs pass as a subset). */
+  private String requireId(String value, String label) {
+    if (value == null || !PLATFORM_ID_PATTERN.matcher(value).matches()) {
       throw new InvalidCommandRequestException("Invalid " + label + ": " + value);
     }
     return value;
