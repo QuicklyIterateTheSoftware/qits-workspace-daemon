@@ -8,10 +8,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.workspacedaemon.Provisioner.Env;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Container-free coverage of the {@link Provisioner}'s pure decision helpers — url derivation,
@@ -103,6 +106,32 @@ class ProvisionerTest {
     assertEquals(
         "http://qits:8080/artifacts/git/repo-abc",
         Provisioner.rootUrl("http://qits:8080/artifacts/git", env("", "")));
+  }
+
+  @Test
+  void aPreservedCheckoutIsRetargetedToTheNameAddressedOrigin(@TempDir Path checkout)
+      throws IOException, InterruptedException {
+    Env env = env("proj-1", "my-repo");
+    git(checkout, "init");
+    git(checkout, "remote", "add", "origin", "http://qits:8080/artifacts/git/legacy-uuid");
+
+    assertTrue(
+        Provisioner.alignExistingCheckoutOrigin(
+            checkout.toFile(), "http://qits:8080/artifacts/git", env, ignored -> {}));
+    assertEquals(
+        "http://qits:8080/artifacts/git/proj-1/my-repo",
+        git(checkout, "remote", "get-url", "origin").trim(),
+        "a preserved volume must not keep resolving relative submodules beside its UUID");
+  }
+
+  private static String git(Path directory, String... arguments)
+      throws IOException, InterruptedException {
+    List<String> command = new ArrayList<>(List.of("git", "-C", directory.toString()));
+    command.addAll(List.of(arguments));
+    Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+    String output = new String(process.getInputStream().readAllBytes());
+    assertEquals(0, process.waitFor(), output);
+    return output;
   }
 
   @Test
