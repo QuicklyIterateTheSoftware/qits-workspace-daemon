@@ -1,0 +1,63 @@
+# The bump train: follow the released workspace toolchain.
+#
+# images/qits-oci-workspace publishes `qits/workspace-base:<version>` and nothing else — no floating
+# tag by its own ONE TAG PER PIPELINE rule. So this repository pins the toolchain by version in
+# `.config/qits/workspace-base.version`, and this file is what moves that pin.
+#
+# WHAT IT DOES NOT DO IS RELEASE. It writes one line and pushes a branch. The
+# `maintenance/` leg in ci-post-receive.yml sees that push and calls the release endpoint;
+# ci-event-release.yml then rebuilds `qits/workspace` on the new base. Three files, one hand-off
+# each, and no step doing two jobs.
+#
+# WHY THE BRANCH IS FORCE-PUSHED AND ALWAYS THE SAME NAME. Two toolchain releases in a row must not
+# leave two open branches racing to release the same repository; the second overwrites the first,
+# and the pin it carries is the newer one either way. The branch is named after the upstream
+# repository so a different train never collides with this one.
+#
+# THE EVENT IS SCMRelease, WHICH FIRES WHEN THE TOOLCHAIN IS TAGGED — not when its image finishes
+# pushing. That is the same event every sibling train follows, and it is the earliest honest signal.
+# It does mean the pin can land while the upstream's ~3.4 GB build is still running. The release
+# this train triggers has its own ~3.4 GB build in front of the pull, so in practice the base is
+# there by then; if a release ever fails on a base that is not pushed yet, re-release rather than
+# adding a wait here. `SoftwareRelease {docker, qits/workspace-base}` is the event that would remove
+# the race, and switching to it is a one-line change to the two lines below.
+event: SCMRelease
+when:
+  - repository: { exact: qits-oci-workspace }
+steps:
+    # ci-base: git to commit and push, jq to read the payload. No docker socket — this step builds
+    # nothing, and the image it is bumping towards is not pulled here.
+  - image: qits/build-images/ci-base:latest
+    timeout-seconds: 600
+    script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed `git commit` would
+      # be swallowed and the push would ship whatever was already on the branch. -u stops the step
+      # on an unset injected variable rather than pushing to an empty url.
+      set -eu
+
+      # The payload reaches the container verbatim as one string in $QITS_EVENT_PAYLOAD; there is no
+      # per-field projection. `jq -er` fails the step on an absent field rather than writing the
+      # word "null" into the pin.
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      # Refused before it is written, because this value becomes part of an image reference in
+      # ci-event-release.yml. A CalVer is digits and dots; anything carrying `:` or `/` would make
+      # a later release pull a different image, and the release pipeline's own guard would then be
+      # rejecting a value this train had already committed.
+      case "$version" in
+        ''|*[!0-9.]*) echo "SCMRelease carries no valid CalVer" >&2; exit 1 ;;
+      esac
+
+      # The whole file is one line, which is why it is its own file: the edit is unambiguous and
+      # needs no expression that could match something else. Written rather than `sed`-ed for the
+      # same reason.
+      printf '%s\n' "$version" > .config/qits/workspace-base.version
+
+      # ALREADY ON THAT VERSION IS A SUCCESS, NOT A NO-OP TO HIDE. A replayed event, or a toolchain
+      # release this repository already followed, must not push an empty commit and must not turn
+      # the release train red.
+      git add .config/qits/workspace-base.version
+      git diff --cached --quiet && exit 0
+
+      git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \
+        -m "bump(qits-oci-workspace@$version): follow the workspace toolchain"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-oci-workspace

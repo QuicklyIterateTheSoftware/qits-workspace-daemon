@@ -1,11 +1,13 @@
 # The pipeline qits-ci runs on every push to a tracked branch of this repository.
 #
-# Two steps, and the order is the point:
+# Three steps. The first two run on every branch and their order is the point; the third runs on
+# `maintenance/` alone:
 #
 #   1. `./mvnw verify` — this repo's first rule (CLAUDE.md): a clone of this repo alone builds and
 #      tests green, with no docker and no prior install anywhere. It runs FIRST because it is the
 #      cheap gate. A broken test must not cost a GraalVM native build.
 #   2. the shipping form — the container image, whose builder stage is the native compile.
+#   3. release the branch — the bump train's last leg, described at the bottom of this comment.
 #
 # THIS REPO NEEDS NO HAND-ROLLED BUILDER CONTAINER. docker/Dockerfile already native-compiles the
 # binary in a Mandrel builder stage, so a plain `docker build` is the whole native build.
@@ -30,6 +32,15 @@
 #
 # ci-event-release.yml BESIDE THIS FILE IS THE OTHER HALF. This one names a build by its commit;
 # that one names a release by its version. Neither pushes the other's coordinate.
+#
+# THIS FILE DOES NOT BUILD `qits/workspace`. The layered workspace image is a ~3.4 GB pull and push,
+# and nothing starts a workspace from a sha — so paying that on every commit would buy a coordinate
+# no consumer can use. ci-event-release.yml builds it, once, per version.
+#
+# THE THIRD STEP IS WHAT CLOSES THE BUMP TRAIN'S LOOP. ci-event-upstream-oci-workspace.yml follows a
+# toolchain release by rewriting `.config/qits/workspace-base.version` and pushing
+# `maintenance/qits-oci-workspace`. That push lands here, this step releases the repository, and the
+# release republishes `qits/workspace` on the new toolchain — with nobody in the loop.
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
@@ -54,3 +65,70 @@ steps:
       # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
       # failed build.
       docker rmi "$ref" || true
+
+    # node-base, not ci-base: the POST below goes through node because node has `fetch` built in and
+    # ci-base promises no curl-with-json ergonomics worth the difference. No docker socket — this
+    # step builds nothing.
+    #
+    # `branches:` is what keeps it off main. Every push to a tracked branch runs the two steps
+    # above; only a `maintenance/` push runs this one, so an ordinary commit never calls the
+    # release endpoint.
+  - image: qits/build-images/node-base:latest
+    branches:
+      - prefix: maintenance/
+    timeout-seconds: 300
+    script: |
+      # Same reason as the steps above: `bash -c` with no -e would let a failed release call be
+      # swallowed by the next command's exit code.
+      set -eu
+
+      # Belt and braces over `branches:` above. The selector is qits-ci's and this guard is the
+      # step's own, so a selector that ever widens cannot silently release main.
+      case "$QITS_CI_BRANCH" in
+        maintenance/*) ;;
+        *) echo "not a maintenance branch: $QITS_CI_BRANCH"; exit 1 ;;
+      esac
+
+      # The bump commit's subject, reused verbatim as the release summary. It is under the summary
+      # field's 100 characters by construction — the bump pipeline's convention is what keeps it so.
+      summary=$(git log -1 --format=%s)
+
+      # RELEASE, not merge and not integrate. Releasing is the only door onto main: it stamps a
+      # version, writes one two-parent commit and publishes SCMRelease — which is the event
+      # ci-event-release.yml waits for. Integrating targets the branch's PARENT and would refuse
+      # with RELEASE_REQUIRED when that parent is main.
+      #
+      # The step self-identifies entirely from injected environment, so no deployment address is
+      # spelled here: $QITS_WORKSPACES_URL is qits-workspaces' root (scheme, host and port, no path
+      # — the path is the caller's to spell), $QITS_CI_REPO_ID and $QITS_CI_BRANCH are this run's.
+      #
+      # Statuses: 200 is the receipt and prints it, a 409 saying the branch is already released is a
+      # replayed push finding its work done and is a success, and everything else is red with the
+      # body on screen. The body is read defensively — some refusals are a plain 400 with no
+      # `reason`.
+      node -e '
+        const [url, branch, summary] = process.argv.slice(1);
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ branch, summary }),
+        }).then(async (res) => {
+          const text = await res.text();
+          let body = {};
+          try { body = JSON.parse(text); } catch {}
+          if (res.ok) {
+            console.log(`released ${body.version} as ${body.commitSha} from ${body.branch}`);
+            return;
+          }
+          if (res.status === 409 && body.reason === "ALREADY_INTEGRATED") {
+            console.log(`${branch} is already released - nothing to do`);
+            return;
+          }
+          console.error(`release refused: HTTP ${res.status} ${text}`);
+          process.exit(1);
+        }).catch((err) => {
+          console.error(`release call failed: ${err.message}`);
+          process.exit(1);
+        });
+      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID" \
+        "$QITS_CI_BRANCH" "$summary"
