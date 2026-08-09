@@ -1,0 +1,56 @@
+# The pipeline qits-ci runs on every push to a tracked branch of this repository.
+#
+# Two steps, and the order is the point:
+#
+#   1. `./mvnw verify` — this repo's first rule (CLAUDE.md): a clone of this repo alone builds and
+#      tests green, with no docker and no prior install anywhere. It runs FIRST because it is the
+#      cheap gate. A broken test must not cost a GraalVM native build.
+#   2. the shipping form — the container image, whose builder stage is the native compile.
+#
+# THIS REPO NEEDS NO HAND-ROLLED BUILDER CONTAINER. docker/Dockerfile already native-compiles the
+# binary in a Mandrel builder stage, so a plain `docker build` is the whole native build.
+# qits-ci-daemon starts a builder container by hand and copies the binary out because it ships a
+# bare binary and no image at all; that shape does not belong here.
+#
+# WHY THE IMAGE STEP DECLARES `docker: true`: it hands the step the HOST daemon's socket, which is
+# the side the Dockerfile is written for. Its `FROM localhost:8081/…` lines are qits-artifacts'
+# pull-through mirrors of quay.io and registry.access.redhat.com — an address the host daemon
+# resolves and nothing inside this step's container can. The native build's memory is the host
+# daemon's for the same reason.
+#
+# No `--network` flag: nothing in this build dials the platform. The reactor declares no
+# `<repositories>`, so the builder stage resolves from Maven Central, and the base images are the
+# host daemon's to pull.
+#
+# THE NAME SEGMENT IS `workspace-daemon`, NOT THIS REPOSITORY'S NAME. `qits/workspace-daemon` is
+# what the Dockerfile, the consumers and the sibling daemon already say. The rule that the segment
+# must equal the repository id is qits-deployments' — it derives what to run from the repository and
+# the sha of a green build — and it does not reach here: a daemon has no container of its own to
+# deploy, so this repo carries no deployments.yml and nothing derives a ref from its name.
+#
+# THERE IS NO ci-event-release.yml BESIDE THIS FILE, AND ITS ABSENCE IS DELIBERATE. README.md in
+# this directory says why, and what has to be fixed before it can be added.
+steps:
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed build is swallowed
+      # and the run reports SUCCESS.
+      set -eu
+      ./mvnw -B -ntp verify
+
+  - image: qits/build-images/ci-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # Same reason as above, and one more: without -e a failed `docker build` lets the push run on
+      # a stale local image, `docker rmi || true` answers 0, and the run reports SUCCESS for an
+      # image that was never built. -u stops the step on an unset registry variable rather than
+      # composing a ref out of empty strings.
+      set -eu
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-daemon:$QITS_CI_SHA"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
+      # failed build.
+      docker rmi "$ref" || true
