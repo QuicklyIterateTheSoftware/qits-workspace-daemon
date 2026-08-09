@@ -227,10 +227,11 @@ class CommandRegistryTest {
     assertTrue(registry.terminate("c8"), "terminate should find the session");
     assertTrue(exited.await(30, TimeUnit.SECONDS), "the command should have ended");
     assertEquals(Boolean.TRUE, manual.get(), "the exit should be reported as manual");
-    waitUntil(() -> ProcessHandle.of(grandchild).isEmpty(), 15_000);
+    waitUntil(() -> isNoLongerRunning(grandchild), 15_000);
     assertTrue(
-        ProcessHandle.of(grandchild).isEmpty(),
-        "the backgrounded grandchild should have been killed with the group");
+        isNoLongerRunning(grandchild),
+        "the backgrounded grandchild should have been killed with the group, but "
+            + describe(grandchild));
   }
 
   @Test
@@ -240,6 +241,67 @@ class CommandRegistryTest {
     assertFalse(registry.terminate("never-launched"));
     assertFalse(registry.input("never-launched", new byte[] {1}));
     assertFalse(registry.resize("never-launched", 80, 24));
+  }
+
+  /**
+   * True when the pid no longer names a running process: either the kernel has dropped it, or it
+   * is a zombie waiting to be collected.
+   *
+   * <p>Why {@code ProcessHandle.of(pid).isEmpty()} is not enough on its own. A killed process stays
+   * in the process table as a zombie until its parent calls {@code wait()} for it. The grandchild
+   * in this test is backgrounded by the session shell, so killing the group orphans it and the
+   * kernel reparents it onto PID 1. PID 1 then decides how long the corpse lingers. On a developer
+   * host PID 1 is systemd, which reaps orphans at once, so the pid vanishes and the plain
+   * {@code ProcessHandle} check passes. In a CI step container PID 1 is whatever the step launched
+   * — for this suite the Maven JVM — and a JVM never calls {@code wait()} for a process it did not
+   * start. The zombie therefore stays forever, {@code /proc/<pid>} keeps answering, and
+   * {@code ProcessHandle.of(pid)} keeps reporting the process as present.
+   *
+   * <p>That difference is a property of the container, not of the code under test. A zombie is
+   * dead: it holds no memory, runs no code, and cannot be signalled. For the question this test
+   * asks — did killing the session kill the backgrounded grandchild — gone and zombie are the same
+   * answer, so the assertion must accept both.
+   *
+   * <p>Reading {@code /proc} is fair here. The whole class is {@code @EnabledOnOs(OS.LINUX)}, and
+   * the registry under test needs PTYs and {@code setsid --ctty}, so there is no other platform to
+   * serve.
+   */
+  private static boolean isNoLongerRunning(long pid) {
+    if (ProcessHandle.of(pid).isEmpty()) {
+      return true;
+    }
+    return "Z".equals(processState(pid));
+  }
+
+  /**
+   * The single-letter process state from {@code /proc/<pid>/stat}, or {@code null} when there is no
+   * such process.
+   *
+   * <p>The state is field 3, but field 2 is the executable name wrapped in parentheses and may
+   * itself contain spaces and parentheses. Splitting the whole line on whitespace would therefore
+   * pick the wrong field, so the scan starts after the last {@code ')'}.
+   */
+  private static String processState(long pid) {
+    try {
+      String stat = Files.readString(Path.of("/proc", Long.toString(pid), "stat"));
+      int endOfName = stat.lastIndexOf(')');
+      if (endOfName < 0) {
+        return null;
+      }
+      String[] fields = stat.substring(endOfName + 1).trim().split("\\s+");
+      return fields.length > 0 && !fields[0].isEmpty() ? fields[0] : null;
+    } catch (Exception e) {
+      // No /proc entry at all: the process is gone, the strongest form of "not running".
+      return null;
+    }
+  }
+
+  /** What the pid looks like right now, so a failure says why it was judged still running. */
+  private static String describe(long pid) {
+    String state = processState(pid);
+    return state == null
+        ? "pid " + pid + " has no /proc entry"
+        : "pid " + pid + " is still there in state " + state;
   }
 
   private static String readQuietly(Path path) {
