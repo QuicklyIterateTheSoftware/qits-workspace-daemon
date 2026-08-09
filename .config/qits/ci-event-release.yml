@@ -58,9 +58,17 @@
 # THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease FOR THIS REPOSITORY. The bus is
 # at-most-once with no catch-up and no replay, so the file has to be in place before the event it
 # selects exists. The other order loses a release and looks like a train that quietly did not roll.
+#
+# IT WAS INERT FOR A SECOND REASON, AND THAT ONE HAD NO SYMPTOM. The selection matched `repository`,
+# which carries the repository's ROW ID — and this repository was registered by the projects
+# self-seed reconcile, so its row id is a UUID minted per platform instance. No committed config can
+# name it. The selection therefore matched nothing, and CI logs matches and never non-matches, so
+# the pipeline read exactly like a train that quietly did not roll. `repositoryName` is the stable
+# coordinate; qits-workspaces publishes it beside the id.
 event: SCMRelease
 when:
-  - repository: { exact: qits-workspace-daemon }
+  # matching repositoryName because this repository's row id is a per-platform UUID.
+  - repositoryName: { exact: qits-workspace-daemon }
 artifacts:
   - { type: docker, name: qits/workspace-daemon }
   - { type: docker, name: qits/workspace }
