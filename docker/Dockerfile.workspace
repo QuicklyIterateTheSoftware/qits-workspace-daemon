@@ -1,30 +1,41 @@
-# A workspace container image: an existing toolchain image with this daemon as its entrypoint.
+# A workspace container image: the toolchain image with this daemon as its entrypoint.
 #
 # This is the shape a workspace container actually runs — the toolchain the user's checkout needs,
 # with the daemon as PID 1 — assembled from the two halves that own themselves. The toolchain is
-# not built here and could not be: it is the monolith's `workspace-base` stage, shared with its app
-# image, and reproducing it would put node, maven and a native toolchain in a repo whose rule is
-# that a clone alone builds green with no monorepo and no docker.
+# not built here and could not be: reproducing it would put node, maven and a native toolchain in a
+# repo whose rule is that a clone alone builds green with no monorepo and no docker.
 #
-# Build the daemon image first, then layer it:
+# THE BASE IS `qits/workspace-base`, WHICH IS NOW A RELEASED IMAGE. It used to default to
+# `qits/workspace:latest` — this file's own output tag — so a rebuild consumed the image it was
+# about to overwrite, and the only untouched copy of the toolchain was a hand-kept
+# `qits/workspace-base:latest` on one machine. The toolchain lives in `images/qits-oci-workspace`
+# now and CI publishes it, so the base is a name with a history behind it rather than whatever was
+# last built locally.
+#
+# BOTH ARGS ARE UNQUALIFIED AND BOTH SHOULD BE OVERRIDDEN. No registry-qualified reference is
+# portable here — the registry is `qits-platform-artifacts:8080` inside a step container and
+# `localhost:8081` outside — so the defaults name the local convenience tags and anything building
+# for real passes a qualified, version-pinned value:
+#
+#     docker build -f docker/Dockerfile.workspace \
+#       --build-arg BASE=localhost:8081/qits/workspace-base:<version> \
+#       --build-arg DAEMON_IMAGE=localhost:8081/qits/workspace-daemon:<version> \
+#       -t localhost:8081/qits/workspace:<version> .
+#
+# Build the daemon image first when working from local tags:
 #
 #     docker build -t qits/workspace-daemon:latest -f docker/Dockerfile .
 #     docker build -t qits/workspace:native -f docker/Dockerfile.workspace .
 #
-# What it is for: running the daemon against a real workspace without waiting on the monolith's
-# image pipeline. DaemonApiGateIT self-skips unless the image it is given entrypoints to
-# `qits-workspace-daemon`, so this is what makes that gate — and the full-chain harness behind it —
-# runnable at all:
+# What it is for: running the daemon against a real workspace. DaemonApiGateIT self-skips unless the
+# image it is given entrypoints to `qits-workspace-daemon`, so this is what makes that gate — and
+# the full-chain harness behind it — runnable at all:
 #
 #     cd ../../services/qits-workspaces
 #     ./mvnw test -pl service -Dtest=DaemonApiGateIT -Dsurefire.failIfNoSpecifiedTests=false \
 #       -Dqits.workspace.image=qits/workspace:native
 #
-# This is NOT how a workspace image is released. The monolith builds that, and should get the binary
-# by COPYing it out of qits/workspace-daemon rather than compiling its own copy — see the header of
-# docker/Dockerfile. Two images that both claim to be "the workspace image" is exactly the drift
-# that left qits/workspace:latest several capability versions behind.
-ARG BASE=qits/workspace:latest
+ARG BASE=qits/workspace-base:latest
 ARG DAEMON_IMAGE=qits/workspace-daemon:latest
 
 FROM ${DAEMON_IMAGE} AS daemon
@@ -32,7 +43,6 @@ FROM ${DAEMON_IMAGE} AS daemon
 FROM ${BASE}
 COPY --from=daemon /work/qits-workspace-daemon /usr/local/bin/qits-workspace-daemon
 
-# Replaces whatever the base entrypoints to — for the monolith's workspace image that is the same
-# binary, one release older. No CMD and no `sleep infinity` fallback: a container whose daemon
+# The base entrypoints to nothing useful for a workspace, so this sets it. No CMD and no `sleep infinity` fallback: a container whose daemon
 # cannot start is not a usable workspace, and should fail visibly rather than idle looking healthy.
 ENTRYPOINT ["/usr/local/bin/qits-workspace-daemon"]
