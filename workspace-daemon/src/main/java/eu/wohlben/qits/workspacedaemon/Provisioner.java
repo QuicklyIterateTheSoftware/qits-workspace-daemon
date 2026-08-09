@@ -121,6 +121,13 @@ public final class Provisioner {
             new DaemonLog(
                 "INFO",
                 "/workspace already checked out — skipping root clone, re-checking submodules."));
+        if (!alignExistingCheckoutOrigin(WORKSPACE_DIR, gitBase, env, emit)) {
+          emit.accept(
+              new ProvisionFailed(
+                  env.workspaceId(),
+                  "could not align the existing checkout with its project-scoped origin"));
+          return false;
+        }
         materializeSubmodules(gitBase, env, ".", 0, emit);
         emit.accept(new Provisioned(env.workspaceId(), head()));
         return true;
@@ -232,6 +239,54 @@ public final class Provisioner {
         && !env.projectId().isBlank()
         && env.repoName() != null
         && !env.repoName().isBlank();
+  }
+
+  /**
+   * Upgrade a preserved checkout from the legacy id-addressed origin to the project-scoped one.
+   *
+   * <p>A container recreate deliberately preserves {@code /workspace}: it may contain commits the
+   * daemon already pushed, and replacing the container must not replace the durable working volume.
+   * That means provisioning's existing-checkout path can inherit an origin such as {@code
+   * /git/<uuid>} from a container created before name-addressing shipped. Relative submodule urls
+   * then resolve one level too high ({@code /git/<sibling>}) and every update quietly skips, even
+   * though the new container has both project id and repository name injected.
+   *
+   * <p>Only a fully name-addressable checkout is migrated. With either scope value absent the
+   * id-addressed origin remains the only route this daemon can prove exists. {@code submodule sync}
+   * is part of the migration: a failed earlier update may already have cached the wrongly resolved
+   * sibling urls in {@code .git/config}, and changing {@code remote.origin.url} alone does not
+   * replace them.
+   */
+  static boolean alignExistingCheckoutOrigin(
+      File workspace, String gitBase, Env env, Consumer<DaemonMessage> emit) {
+    if (!nameAddressed(env)) {
+      return true;
+    }
+    String scopedOrigin = rootUrl(gitBase, env);
+    int remoteUpdate =
+        runStreaming(
+            List.of(
+                "git",
+                "-C",
+                workspace.getPath(),
+                "remote",
+                "set-url",
+                "origin",
+                scopedOrigin),
+            emit);
+    if (remoteUpdate != 0) {
+      return false;
+    }
+    return runStreaming(
+            List.of(
+                "git",
+                "-C",
+                workspace.getPath(),
+                "submodule",
+                "sync",
+                "--recursive"),
+            emit)
+        == 0;
   }
 
   /**
