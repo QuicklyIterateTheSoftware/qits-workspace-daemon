@@ -1,0 +1,93 @@
+# The release pipeline: this repository reacts to its OWN release and pushes the image under the
+# released VERSION.
+#
+# THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT — the same shape every
+# sibling's release pipeline has. `SCMRelease` says only "source control has this version";
+# qits-workspaces publishes it the instant the release push is accepted, and nothing here publishes
+# it. The event that could loop is `SoftwareRelease`, and this file neither listens for it nor
+# emits it.
+#
+# THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT. ci-post-receive.yml
+# keeps pushing `:$QITS_CI_SHA` on every green push; what this adds is a name a human and a
+# downstream consumer can say out loud. The two coordinates have two owners — a build is named by
+# its commit, a release by its version — and the step below says why that split is also the only
+# shape that pushes reliably.
+#
+# `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the
+# `docker push` below is this repository's own step — so it cannot see what landed. It announces
+# `SoftwareRelease {docker, qits/workspace-daemon}` on the strength of these two lines once the whole
+# pipeline is green. Keep them true.
+#
+# THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified reference is portable here — the
+# registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci
+# and qits-deployments — and an OCI reference cannot carry a path prefix. So the declaration carries
+# `qits/workspace-daemon` and the reader supplies its own host, exactly as the step below composes
+# one from environment.
+#
+# THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file explains why
+# `docker: true` is what the Dockerfile's `localhost:8081` bases need, why no hand-rolled builder
+# container is involved, and why there is no `--network` flag; this one carries the short form and
+# points there rather than keeping a second copy of the reasoning to drift.
+#
+# THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease FOR THIS REPOSITORY. The bus is
+# at-most-once with no catch-up and no replay, so the file has to be in place before the event it
+# selects exists. The other order loses a release and looks like a train that quietly did not roll.
+event: SCMRelease
+when:
+  - repository: { exact: qits-workspace-daemon }
+artifacts:
+  - { type: docker, name: qits/workspace-daemon }
+steps:
+    # ci-base: the docker CLI for the build, git for the tag checkout, jq for the event payload.
+    # Nothing needs maven on THIS side of the socket — the reactor is built inside the image's own
+    # builder stage.
+  - image: qits/build-images/ci-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
+      # swallowed: the push runs on a stale local image or fails, `docker rmi || true` answers 0,
+      # and the run reports SUCCESS — and a green release run is what makes qits-ci announce the
+      # artifact. -u makes an unset injected variable stop the step too.
+      set -eu
+
+      # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
+      # $QITS_EVENT_PAYLOAD; there is no per-field projection.
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      # SCMRelease versions are CalVer — digits and dots. Checked before anything is built, because
+      # the version becomes a registry TAG: an absent or malformed one would publish the daemon
+      # under a coordinate nobody can guess, and a value carrying `:` or `/` would land it under a
+      # different name entirely. qits-ci-daemon and qits-oci refuse the same way for the same
+      # reason.
+      case "$version" in
+        ''|*[!0-9.]*) echo "SCMRelease carries no valid CalVer" >&2; exit 1 ;;
+      esac
+      echo "releasing qits/workspace-daemon:$version"
+
+      # THE TAG IS THE CHECKOUT TARGET. An event-triggered run is cloned at the head of main, which
+      # is where the release commit is *now* — a later push moves that and the tag does not, so a
+      # busy main cannot make this pipeline ship a different tree than the one that was released.
+      # The clone is shallow and carries no tags, hence the explicit refspec; the URL rather than
+      # `origin` because every address a step needs arrives as environment.
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+
+      # THE VERSION IS THE ONLY COORDINATE THIS STEP PUSHES, and the sha coordinate is not missing:
+      # the release lands a commit on main, main's push runs ci-post-receive.yml, and that pushes
+      # `:<sha>` for the very same tree. Publishing both from here as well was tried in the sibling
+      # qits-projects-daemon, and its first release failed on it: `docker build -t A -t B` reported
+      # naming both tags,
+      # then `docker push B` answered "tag does not exist", because BuildKit's exporter does not
+      # reliably leave every alias of a multi-tag build in the local image store. A second
+      # `docker tag` would paper over it, but the honest reading is that the two coordinates have
+      # two owners: post-receive names a build by its commit, and a release names it by its version.
+      #
+      # The build is therefore one build and one push, which is also the shape that cannot leave a
+      # partial release behind — the rule qits-oci's release pipeline states for its five images.
+      repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-daemon"
+      docker build -t "$repository:$version" -f docker/Dockerfile .
+
+      docker push "$repository:$version"
+      # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
+      # failed release.
+      docker rmi "$repository:$version" || true

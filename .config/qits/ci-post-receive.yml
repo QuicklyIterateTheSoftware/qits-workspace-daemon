@@ -28,8 +28,8 @@
 # the sha of a green build — and it does not reach here: a daemon has no container of its own to
 # deploy, so this repo carries no deployments.yml and nothing derives a ref from its name.
 #
-# THERE IS NO ci-event-release.yml BESIDE THIS FILE, AND ITS ABSENCE IS DELIBERATE. README.md in
-# this directory says why, and what has to be fixed before it can be added.
+# ci-event-release.yml BESIDE THIS FILE IS THE OTHER HALF. This one names a build by its commit;
+# that one names a release by its version. Neither pushes the other's coordinate.
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
