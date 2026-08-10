@@ -32,9 +32,9 @@
 # composes one from environment.
 #
 # THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file explains why
-# `docker: true` is what the Dockerfile's `localhost:8081` bases need, why no hand-rolled builder
-# container is involved, and why there is no `--network` flag; this one carries the short form and
-# points there rather than keeping a second copy of the reasoning to drift.
+# `docker: true` is what the Dockerfile's `localhost:8082` and `localhost:8081` bases need, why no
+# hand-rolled builder container is involved, and why there is no `--network` flag; this one carries
+# the short form and points there rather than keeping a second copy of the reasoning to drift.
 #
 # THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease FOR THIS REPOSITORY. The bus is
 # at-most-once with no catch-up and no replay, so the file has to be in place before the event it

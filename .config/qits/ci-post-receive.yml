@@ -15,10 +15,10 @@
 # binary out because it ships a bare binary and no image at all; that shape does not belong here.
 #
 # WHY THE IMAGE STEP DECLARES `docker: true`: it hands the step the HOST daemon's socket, which is
-# the side the Dockerfile is written for. Its `localhost:8081/…` references — the quay and Red Hat
-# pull-through mirrors, and the pinned toolchain base — are addresses the host daemon resolves and
-# nothing inside this step's container can. The native build's memory is the host daemon's for the
-# same reason.
+# the side the Dockerfile is written for. Its registry references — the quay and Red Hat
+# pull-through mirrors on `localhost:8082`, and the pinned toolchain base on `localhost:8081` — are
+# addresses the host daemon resolves and nothing inside this step's container can. The native
+# build's memory is the host daemon's for the same reason.
 #
 # No `--network` flag: nothing in this build dials the platform. The reactor declares no
 # `<repositories>`, so the builder stage resolves from Maven Central, and every base image is the

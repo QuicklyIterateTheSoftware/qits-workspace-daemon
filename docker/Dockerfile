@@ -43,15 +43,16 @@ ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:2026.810.104734
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `localhost:8081/quay/…` is qits-artifacts' pull-through mirror of quay.io: the first build fetches
-# the image from upstream and caches it, every later build is served from local disk. The tag is
-# upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves it.
+# `localhost:8082/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the first build
+# fetches the image from upstream and caches it, every later build is served from local disk. The
+# tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves
+# it.
 #
 # All three base references here are the HOST DAEMON's to resolve, not this build's, which is why
 # the CI step declares `docker: true` and passes no `--network`: nothing inside the build dials the
 # platform. The reactor declares no `<repositories>`, so the compile below resolves from Maven
 # Central.
-FROM localhost:8081/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
+FROM localhost:8082/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
 
