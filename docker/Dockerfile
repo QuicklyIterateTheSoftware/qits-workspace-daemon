@@ -37,7 +37,7 @@
 #     cd ../../services/qits-workspaces
 #     ./mvnw test -pl service -Dtest=DaemonApiGateIT -Dsurefire.failIfNoSpecifiedTests=false \
 #       -Dqits.workspace.image=qits/workspace:native
-ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:2026.809.141134
+ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:2026.810.104734
 
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
