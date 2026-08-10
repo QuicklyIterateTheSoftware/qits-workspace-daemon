@@ -20,6 +20,6 @@
 .sdkmanrc
 
 # Docs and the docker/ dir itself: nothing in the build reads them, and keeping them out means
-# editing this Dockerfile, Dockerfile.workspace or a README does not bust the `COPY . .` layer.
+# editing the Dockerfile or a README does not bust the `COPY . .` layer.
 *.md
 docker

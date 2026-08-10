@@ -1,40 +1,44 @@
-# qits-workspace-daemon as a GraalVM-native container IMAGE — the same shape as qits-gateway's
-# docker/Dockerfile: a Mandrel builder stage compiles the binary, a minimal runtime stage carries
-# only it.
+# The workspace container image: the released toolchain with this daemon compiled in as PID 1.
 #
-# This file is not how the binary is built; it is how the binary is SHIPPED. `./mvnw package
-# -Dnative` produces `workspace-daemon/target/qits-workspace-daemon` with whatever GraalVM is on
-# PATH. What this adds is the image around it — and a way for a machine with no GraalVM to get a
-# binary at all, since the builder stage brings its own native-image.
+# ONE BUILD PRODUCES THE IMAGE A WORKSPACE RUNS. There is no second Dockerfile and no intermediate
+# "daemon image" any more. Until 2026-08-10 there were two — `docker/Dockerfile` shipped a bare
+# binary on ubi-minimal, `docker/Dockerfile.workspace` layered that image onto the toolchain — so the
+# runnable image needed two builds, two coordinates and a build argument naming the first from the
+# second. The layering was the only thing the second file did, and a `COPY --from` inside one build
+# does it with nothing to keep matched.
 #
-# Build from the repo root:
+# WHAT THIS IMAGE IS PUBLISHED AS: `<registry>/<repository>/qits-workspace-daemon`, sha-tagged on
+# every push and CalVer-tagged on release. See `.config/qits/ci-post-receive.yml` and
+# `.config/qits/ci-event-release.yml`. There is no `:latest` — the hand-built `qits/workspace:latest`
+# this replaces had no version, no registry and no pipeline, and every platform unwrap deleted it.
 #
-#     docker build -t qits/workspace-daemon:latest -f docker/Dockerfile .
+# --- the base pin ---------------------------------------------------------------------------------
+# ONE LINE, ONE VERSION TOKEN, AND A MACHINE EDITS IT. `.config/qits/ci-event-upstream-oci-workspace.yml`
+# seds this exact line when images/qits-oci-workspace releases a toolchain, so the anchored prefix
+# `ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:` is a contract with that file. Move the
+# registry host or the image name here and the bump silently matches nothing — which is why that
+# file re-reads the line after its sed and fails when it did not take.
 #
-# --- what this image is FOR, because it is not a workspace container ------------------------------
-# A workspace container is this binary running as PID 1 inside a toolchain image — debian plus node,
-# maven, a JDK and a native toolchain, because the daemon's whole job is to build and run the user's
-# checkout. That toolchain is the qits monolith's `workspace-base` stage and is shared with its app
-# image, so it is not this repo's to own and could not be built here: a clone of this repo alone
-# builds and tests green with no monorepo and no docker, which is the rule that shape protects.
+# PINNED BY VERSION, NEVER FOLLOWED BY A FLOATING TAG. images/qits-oci-workspace publishes only
+# `:<version>` (its own ONE TAG PER PIPELINE rule), so there is no floating tag to follow even if we
+# wanted one — and following one would make this image unreproducible: rebuilding a released tag
+# would silently pick up a different toolchain.
 #
-# So this image is the DISTRIBUTION of the binary, and the two consumers take it differently:
+# THE DEFAULT IS THE PIN, WHICH IS WHY OVERRIDING IT IS SAFE. CI passes no `--build-arg`, so a
+# release rebuilds on exactly the toolchain its tree was released with. A developer with a
+# hand-built base passes one:
 #
-#   the monolith    replaces its `workspace-daemon-build` stage with
-#                     COPY --from=qits/workspace-daemon:latest \
-#                          /work/qits-workspace-daemon /usr/local/bin/qits-workspace-daemon
-#                   Today that stage compiles the monolith's OWN pre-extraction `workspace-daemon`
-#                   module — no qits-commands, no PTY, no reverse tunnel — so `qits/workspace:latest`
-#                   ships a daemon several capability versions behind this one. Pointing it here is
-#                   what makes a released workspace image carry this code.
+#     docker build -t qits/workspace:native -f docker/Dockerfile \
+#       --build-arg WORKSPACE_BASE=qits/workspace-base:latest .
 #
-#   a test          layers the binary onto an existing toolchain image; see Dockerfile.workspace
-#                   next to this file, which is what DaemonApiGateIT and the full-chain harness run
-#                   against.
+# That is the whole local-dev story. `DaemonApiGateIT` in qits-workspaces self-skips unless the image
+# it is given entrypoints to `qits-workspace-daemon`, so this is what makes that gate runnable:
 #
-# Running this image directly is legitimate but idle: with no QITS_WORKSPACE_DAEMON_URL it logs
-# "no url configured — workspace-daemon is idle" and stays up. There is no checkout here to serve.
-#
+#     cd ../../services/qits-workspaces
+#     ./mvnw test -pl service -Dtest=DaemonApiGateIT -Dsurefire.failIfNoSpecifiedTests=false \
+#       -Dqits.workspace.image=qits/workspace:native
+ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:2026.809.141134
+
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
@@ -42,6 +46,11 @@
 # `localhost:8081/quay/…` is qits-artifacts' pull-through mirror of quay.io: the first build fetches
 # the image from upstream and caches it, every later build is served from local disk. The tag is
 # upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves it.
+#
+# All three base references here are the HOST DAEMON's to resolve, not this build's, which is why
+# the CI step declares `docker: true` and passes no `--network`: nothing inside the build dials the
+# platform. The reactor declares no `<repositories>`, so the compile below resolves from Maven
+# Central.
 FROM localhost:8081/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
@@ -65,24 +74,30 @@ COPY . .
 #
 # Tests are skipped because they are not skippable HERE: CommandRegistryTest spawns real PTYs and
 # the git suites fork real git, both of which want a workspace this stage does not have. `./mvnw
-# verify` on a clone is the gate for those.
+# verify` on a clone is the gate for those, and the CI pipeline runs it before this build so a broken
+# test never costs a GraalVM compile.
 RUN ./mvnw -B -ntp -pl workspace-daemon -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g
 
-# --- runtime --------------------------------------------------------------------------------------
-# `localhost:8081/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
-FROM localhost:8081/redhat/ubi9/ubi-minimal:9.6
-WORKDIR /work
+# --- runtime: the toolchain, with the daemon as its entrypoint ------------------------------------
+# The toolchain is not built here and could not be: reproducing it would put node, maven, a JDK, a
+# Chromium and a native toolchain in a repo whose first rule is that a clone alone builds green with
+# no monorepo and no docker. It lives in images/qits-oci-workspace and arrives as a released image.
+FROM ${WORKSPACE_BASE}
 
 # `quarkus.package.output-name` names the binary `qits-workspace-daemon` (no -runner suffix), so the
-# process is identifiable in `ps`/`docker top` — which matters more here than elsewhere, since this
+# process is identifiable in `ps`/`docker top` — which matters here more than elsewhere, since this
 # is PID 1 of a container a user is working inside.
-COPY --from=build --chown=1001:root /src/workspace-daemon/target/qits-workspace-daemon /work/qits-workspace-daemon
-RUN chmod +x /work/qits-workspace-daemon
+COPY --from=build /src/workspace-daemon/target/qits-workspace-daemon /usr/local/bin/qits-workspace-daemon
+RUN chmod +x /usr/local/bin/qits-workspace-daemon
 
-# NOT exposed, and that is the point: WorkspaceApi binds 127.0.0.1 and is reached over the reverse
-# tunnel it dials out for. A peer container on qits-net gets a connection refused by the network
-# stack rather than by a token check. See README.md, "The two channels".
-USER 1001
-
-ENTRYPOINT ["/work/qits-workspace-daemon"]
+# NO `USER`, NO `WORKDIR`, NO `EXPOSE`, and each absence is deliberate. The base already sets
+# `WORKDIR /workspace` and runs as root, which is what the user's checkout and its build tools need;
+# a `USER 1001` here — which the retired bare-binary image did carry — would break every workspace.
+# And nothing is exposed because WorkspaceApi binds 127.0.0.1 and is reached over the reverse tunnel
+# the daemon dials out for: a peer container on qits-net gets a connection refused from the network
+# stack rather than from a token check. See README.md, "The two channels".
+#
+# No CMD and no `sleep infinity` fallback: a container whose daemon cannot start is not a usable
+# workspace, and should fail visibly rather than idle looking healthy.
+ENTRYPOINT ["/usr/local/bin/qits-workspace-daemon"]

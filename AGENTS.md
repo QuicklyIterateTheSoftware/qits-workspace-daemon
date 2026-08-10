@@ -184,6 +184,40 @@ normalized and required to sit under the harness config dir, plugin ids are patt
 reaching a shell, and pid-file contents are digits-only. When you add a value that crosses from the
 checkout or a hook into a path or an argv, validate it at the boundary and say why in a comment.
 
+## The image and the release train
+
+`README.md`'s "The image" has the shape: one `docker build`, published as
+`<registry>/<repository>/qits-workspace-daemon`, sha-tagged on push and CalVer-tagged on release,
+with **no `latest`**. What follows is what bites when you change any of it.
+
+**The image name is this repository's name, and that is new.** It used to publish two —
+`qits/workspace-daemon` (a bare binary on ubi-minimal) and `qits/workspace` (that image layered onto
+the toolchain, built on release only) — so the image a workspace actually runs had no sha coordinate
+and the layering had no owner. One build, one name, two coordinates. If you find yourself adding a
+second `-t` to either pipeline, read `.config/qits/ci-event-release.yml`'s note first: BuildKit's
+exporter does not reliably leave every alias of a multi-tag build in the local store, and the second
+push fails with "tag does not exist".
+
+**Every push now pays the toolchain's ~3.4 GB.** That is the price of one Dockerfile and it was
+taken deliberately — the alternative is CI proving a half of the image green. Both publish steps get
+`timeout-seconds: 7200`; do not trim them.
+
+**The base pin is a machine-edited line.** `ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:<version>`
+is `sed`-ed by `.config/qits/ci-event-upstream-oci-workspace.yml`. Reflow it, rename the image or move
+the registry host, and the sed matches nothing — which produces an *empty diff*, indistinguishable
+from "already up to date". The bump reads the line back for exactly that reason. Move the line, move
+the sed and the read-back in the same commit.
+
+**`$QITS_REGISTRY` is not reachable from inside a step container.** It is the host daemon's view
+(`localhost:8081`), correct in a `FROM` and in a `docker build`/`docker push` across a mounted
+socket, and useless to `curl`. The bump step's registry probe therefore takes qits-artifacts' origin
+off `$QITS_MAVEN_REGISTRY_URL` and asks `/v2/…/manifests/<version>` there. Do not "simplify" it to
+`$QITS_REGISTRY`.
+
+**Do not add a `latest` tag anywhere.** Not to a pipeline, not as a convenience in a README, not as a
+default in a consumer. The whole failure this replaced was a floating local tag with nothing behind
+it.
+
 ## Formatting
 
 `google-java-format`, 100 columns, two-space indent. Javadoc explains *why* — the tradeoff, the

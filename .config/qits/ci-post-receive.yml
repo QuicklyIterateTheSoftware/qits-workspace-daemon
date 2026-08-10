@@ -6,41 +6,42 @@
 #   1. `./mvnw verify` — this repo's first rule (CLAUDE.md): a clone of this repo alone builds and
 #      tests green, with no docker and no prior install anywhere. It runs FIRST because it is the
 #      cheap gate. A broken test must not cost a GraalVM native build.
-#   2. the shipping form — the container image, whose builder stage is the native compile.
+#   2. the shipping form — the workspace image, whose builder stage is the native compile.
 #   3. release the branch — the bump train's last leg, described at the bottom of this comment.
 #
-# THIS REPO NEEDS NO HAND-ROLLED BUILDER CONTAINER. docker/Dockerfile already native-compiles the
-# binary in a Mandrel builder stage, so a plain `docker build` is the whole native build.
-# qits-ci-daemon starts a builder container by hand and copies the binary out because it ships a
-# bare binary and no image at all; that shape does not belong here.
+# THIS REPO NEEDS NO HAND-ROLLED BUILDER CONTAINER. docker/Dockerfile native-compiles the binary in a
+# Mandrel builder stage and layers it onto the released toolchain in the same build, so a plain
+# `docker build` is the whole thing. qits-ci-daemon starts a builder container by hand and copies the
+# binary out because it ships a bare binary and no image at all; that shape does not belong here.
 #
 # WHY THE IMAGE STEP DECLARES `docker: true`: it hands the step the HOST daemon's socket, which is
-# the side the Dockerfile is written for. Its `FROM localhost:8081/…` lines are qits-artifacts'
-# pull-through mirrors of quay.io and registry.access.redhat.com — an address the host daemon
-# resolves and nothing inside this step's container can. The native build's memory is the host
-# daemon's for the same reason.
+# the side the Dockerfile is written for. Its `localhost:8081/…` references — the quay and Red Hat
+# pull-through mirrors, and the pinned toolchain base — are addresses the host daemon resolves and
+# nothing inside this step's container can. The native build's memory is the host daemon's for the
+# same reason.
 #
 # No `--network` flag: nothing in this build dials the platform. The reactor declares no
-# `<repositories>`, so the builder stage resolves from Maven Central, and the base images are the
+# `<repositories>`, so the builder stage resolves from Maven Central, and every base image is the
 # host daemon's to pull.
 #
-# THE NAME SEGMENT IS `workspace-daemon`, NOT THIS REPOSITORY'S NAME. `qits/workspace-daemon` is
-# what the Dockerfile, the consumers and the sibling daemon already say. The rule that the segment
-# must equal the repository id is qits-deployments' — it derives what to run from the repository and
-# the sha of a green build — and it does not reach here: a daemon has no container of its own to
-# deploy, so this repo carries no deployments.yml and nothing derives a ref from its name.
+# ONE IMAGE, NAMED AFTER THIS REPOSITORY. `qits-workspace-daemon` is both the repository and the
+# image now. It used to be two — a bare-binary `qits/workspace-daemon` here and a layered
+# `qits/workspace` built only on release — and the split meant the image a workspace actually runs
+# had no sha coordinate at all. The consumer pins one name and this pipeline is what keeps a sha
+# coordinate under it.
+#
+# THE COST OF THAT IS PAID HERE AND IT IS REAL. This image carries the ~3.4 GB toolchain, so every
+# push pulls and pushes it — where the retired bare-binary build was a few tens of megabytes. It buys
+# the thing the split could not: what CI proves green on a commit is the image that runs, rather than
+# one of its two halves. The timeout matches images/qits-oci-workspace's for the same bytes.
 #
 # ci-event-release.yml BESIDE THIS FILE IS THE OTHER HALF. This one names a build by its commit;
 # that one names a release by its version. Neither pushes the other's coordinate.
 #
-# THIS FILE DOES NOT BUILD `qits/workspace`. The layered workspace image is a ~3.4 GB pull and push,
-# and nothing starts a workspace from a sha — so paying that on every commit would buy a coordinate
-# no consumer can use. ci-event-release.yml builds it, once, per version.
-#
 # THE THIRD STEP IS WHAT CLOSES THE BUMP TRAIN'S LOOP. ci-event-upstream-oci-workspace.yml follows a
-# toolchain release by rewriting `.config/qits/workspace-base.version` and pushing
+# toolchain release by rewriting the base pin in docker/Dockerfile and pushing
 # `maintenance/qits-oci-workspace`. That push lands here, this step releases the repository, and the
-# release republishes `qits/workspace` on the new toolchain — with nobody in the loop.
+# release republishes the image on the new toolchain — with nobody in the loop.
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
@@ -52,14 +53,14 @@ steps:
 
   - image: qits/build-images/ci-base:latest
     docker: true
-    timeout-seconds: 3600
+    timeout-seconds: 7200
     script: |
       # Same reason as above, and one more: without -e a failed `docker build` lets the push run on
       # a stale local image, `docker rmi || true` answers 0, and the run reports SUCCESS for an
       # image that was never built. -u stops the step on an unset registry variable rather than
       # composing a ref out of empty strings.
       set -eu
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-daemon:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspace-daemon:$QITS_CI_SHA"
       docker build -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a

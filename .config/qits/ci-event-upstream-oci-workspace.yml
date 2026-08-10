@@ -1,32 +1,45 @@
 # The bump train: follow the released workspace toolchain.
 #
 # images/qits-oci-workspace publishes `qits/workspace-base:<version>` and nothing else — no floating
-# tag by its own ONE TAG PER PIPELINE rule. So this repository pins the toolchain by version in
-# `.config/qits/workspace-base.version`, and this file is what moves that pin.
+# tag, by its own ONE TAG PER PIPELINE rule. So docker/Dockerfile pins the toolchain by version on
+# one line, and this file is what moves that line.
 #
-# WHAT IT DOES NOT DO IS RELEASE. It writes one line and pushes a branch. The
-# `maintenance/` leg in ci-post-receive.yml sees that push and calls the release endpoint;
-# ci-event-release.yml then rebuilds `qits/workspace` on the new base. Three files, one hand-off
-# each, and no step doing two jobs.
+# WHAT IT DOES NOT DO IS RELEASE. It writes one line and pushes a branch. The `maintenance/` leg in
+# ci-post-receive.yml sees that push and calls the release endpoint; ci-event-release.yml then
+# rebuilds the workspace image on the new base. Three files, one hand-off each, and no step doing two
+# jobs.
 #
 # WHY THE BRANCH IS FORCE-PUSHED AND ALWAYS THE SAME NAME. Two toolchain releases in a row must not
-# leave two open branches racing to release the same repository; the second overwrites the first,
-# and the pin it carries is the newer one either way. The branch is named after the upstream
-# repository so a different train never collides with this one.
+# leave two open branches racing to release the same repository; the second overwrites the first, and
+# the pin it carries is the newer one either way. The branch is named after the upstream repository so
+# a different train never collides with this one.
 #
-# THE EVENT IS SCMRelease, WHICH FIRES WHEN THE TOOLCHAIN IS TAGGED — not when its image finishes
-# pushing. That is the same event every sibling train follows, and it is the earliest honest signal.
-# It does mean the pin can land while the upstream's ~3.4 GB build is still running. The release
-# this train triggers has its own ~3.4 GB build in front of the pull, so in practice the base is
-# there by then; if a release ever fails on a base that is not pushed yet, re-release rather than
-# adding a wait here. `SoftwareRelease {docker, qits/workspace-base}` is the event that would remove
-# the race, and switching to it is a one-line change to the two lines below.
-event: SCMRelease
+# --- the event -------------------------------------------------------------------------------------
+# `SoftwareRelease`, NOT `SCMRelease`, AND THE DIFFERENCE IS A RACE. SCMRelease fires when the
+# toolchain is TAGGED, which is before its ~3.4 GB image finishes pushing — so a pin could land, get
+# released, and reach `docker build` while the base it names did not exist yet. SoftwareRelease is
+# qits-ci announcing that the artifact is IN the registry, which is the fact this file actually needs.
+#
+# THE THREE SELECTORS ARE READ OFF THE UPSTREAM'S OWN DECLARATION, not guessed:
+# images/qits-oci-workspace's `.config/qits/ci-event-release.yml` declares
+# `artifacts: [{ type: docker, name: qits/workspace-base }]`, and qits-ci turns the declared `type`
+# into `packageType` and the declared `name` into `packageName` verbatim — the keyword IS the wire
+# value. `repository` on a SoftwareRelease is qits-ci's own repo id for the run, which for that
+# repository is its name. (Contrast ci-event-release.yml beside this file, which had to match
+# `repositoryName` because SCMRelease's `repository` is a per-platform UUID row id. Two events, two
+# fields, and they are not interchangeable.)
+#
+# MATCHING ALL THREE IS NOT BELT AND BRACES. A repository publishing several images emits one of
+# these per artifact, so `repository` alone would fire this train on any of them.
+event: SoftwareRelease
 when:
   - repository: { exact: qits-oci-workspace }
+    packageType: { exact: docker }
+    packageName: { exact: "qits/workspace-base" }
 steps:
-    # ci-base: git to commit and push, jq to read the payload. No docker socket — this step builds
-    # nothing, and the image it is bumping towards is not pulled here.
+    # ci-base: git to commit and push, jq to read the payload, curl for the registry probe. No docker
+    # socket — this step builds nothing, and it deliberately does not pull the image it is bumping
+    # towards.
   - image: qits/build-images/ci-base:latest
     timeout-seconds: 600
     script: |
@@ -39,23 +52,56 @@ steps:
       # per-field projection. `jq -er` fails the step on an absent field rather than writing the
       # word "null" into the pin.
       version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
-      # Refused before it is written, because this value becomes part of an image reference in
-      # ci-event-release.yml. A CalVer is digits and dots; anything carrying `:` or `/` would make
-      # a later release pull a different image, and the release pipeline's own guard would then be
-      # rejecting a value this train had already committed.
+      # Refused before it is written, because this value becomes a docker TAG in docker/Dockerfile
+      # and part of a URL just below. A CalVer is digits and dots; anything carrying `:` or `/` would
+      # make a later release pull a different image, and the release pipeline's own guard would then
+      # be rejecting a value this train had already committed. It also keeps `#` out of the `sed`
+      # expression below, where `#` is the delimiter — a version carrying one closes the expression,
+      # and GNU sed's `e` command then runs a shell.
       case "$version" in
-        ''|*[!0-9.]*) echo "SCMRelease carries no valid CalVer" >&2; exit 1 ;;
+        ''|*[!0-9.]*) echo "SoftwareRelease carries no valid CalVer: $version" >&2; exit 1 ;;
       esac
 
-      # The whole file is one line, which is why it is its own file: the edit is unambiguous and
-      # needs no expression that could match something else. Written rather than `sed`-ed for the
-      # same reason.
-      printf '%s\n' "$version" > .config/qits/workspace-base.version
+      # THE TAG HAS TO EXIST BEFORE THE PIN NAMES IT. A dangling pin is not a red build here — it is
+      # a red build two hand-offs later, in a release pipeline, blaming a Dockerfile that was correct
+      # when it was written. This repository has already been in that state: a pin bumped off
+      # SCMRelease named a toolchain version the registry never received.
+      #
+      # $QITS_REGISTRY IS THE WRONG ADDRESS FOR THIS AND THAT IS THE TRAP WORTH SPELLING. It is the
+      # HOST DAEMON's view of the registry (`localhost:8081` on the local stack), usable only on the
+      # far side of a mounted docker socket; inside a step container `localhost` is the step
+      # container. The registry's in-network address is not injected on its own, but qits-artifacts
+      # serves the OCI Distribution API at its HOST ROOT `/v2` — it has no choice, since a client
+      # resolves a reference against `<host>/v2/` and accepts no path prefix — and $QITS_MAVEN_REGISTRY_URL
+      # is the same deployment's origin plus a path. So the origin is taken off that variable rather
+      # than written here: no deployment address is hard-coded, and moving qits-artifacts moves both.
+      artifacts_origin=$(printf '%s' "$QITS_MAVEN_REGISTRY_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
+      # HEAD, not GET: a manifest lookup is the existence check, and the Accept list is what makes a
+      # registry answer with the manifest rather than 404 on a media type it will not negotiate. The
+      # name is the packageName the selection above pins, so the probe asks about exactly the artifact
+      # the event announced.
+      curl -fsS -o /dev/null -I \
+        -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+        "$artifacts_origin/v2/qits/workspace-base/manifests/$version"
+
+      # THE PIN IS ONE ANCHORED LINE IN docker/Dockerfile, and the prefix below is a contract with
+      # that file's header. Written as a `sed` rather than a rewritten file because the pin now lives
+      # with the build that uses it: a committed `.version` file beside this one was a second place
+      # to read, and the release pipeline had to cat it to compose a `--build-arg`.
+      sed -i -E "s#^(ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:).*#\1$version#" \
+        docker/Dockerfile
+
+      # A SED THAT MATCHES NOTHING IS SILENT, AND ITS SYMPTOM IS INDISTINGUISHABLE FROM SUCCESS —
+      # both leave an empty diff, and the quiet exit below would then report a train that is up to
+      # date while the pin sits at whatever it was. So the line is read back. Rename the image, move
+      # the registry host or reflow that line, and this fails loudly in the commit that did it.
+      grep -qxF "ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:$version" docker/Dockerfile \
+        || { echo "the base pin in docker/Dockerfile did not take - has that line moved?" >&2; exit 1; }
 
       # ALREADY ON THAT VERSION IS A SUCCESS, NOT A NO-OP TO HIDE. A replayed event, or a toolchain
       # release this repository already followed, must not push an empty commit and must not turn
       # the release train red.
-      git add .config/qits/workspace-base.version
+      git add docker/Dockerfile
       git diff --cached --quiet && exit 0
 
       git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \

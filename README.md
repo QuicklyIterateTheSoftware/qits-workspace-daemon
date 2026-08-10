@@ -214,6 +214,44 @@ in particular: the hook webhook binds one and the agent launch renders it into e
 two independent reads that disagree would leave agents running fine and silently never reporting
 lineage or activity.
 
+## The image
+
+This repository publishes the image a workspace container **runs**, not a binary and not a layer:
+
+    <registry>/<repository>/qits-workspace-daemon
+
+One `docker build -f docker/Dockerfile .` produces it. A Mandrel builder stage native-compiles the
+daemon; the final stage is the released toolchain base from `images/qits-oci-workspace` with that
+binary copied to `/usr/local/bin/qits-workspace-daemon` and set as the entrypoint.
+
+**There is no `latest` and there is no local tag.** The predecessor was a hand-built
+`qits/workspace:latest` on one machine: no version, no registry, no pipeline, and deleted by every
+platform unwrap. Two coordinates replace it, each owned by one pipeline:
+
+| Coordinate | Pushed by | Means |
+|---|---|---|
+| `:<sha>` | `.config/qits/ci-post-receive.yml` | this commit built green |
+| `:<calver>` | `.config/qits/ci-event-release.yml` | this version was released |
+
+A consumer pins the CalVer. `ci-event-release.yml` declares
+`artifacts: [{ type: docker, name: qits/qits-workspace-daemon }]`, so a release announces one
+`SoftwareRelease` that a consumer's own bump pipeline follows.
+
+**The toolchain base is pinned, and the pin rides the train.** `docker/Dockerfile`'s first line is
+
+    ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:<version>
+
+One line, one version token. `.config/qits/ci-event-upstream-oci-workspace.yml` seds it when
+`qits-oci-workspace` publishes a toolchain — it probes the registry that the tag really exists, then
+force-pushes `maintenance/qits-oci-workspace`, whose push releases this repository, whose release
+republishes the image on the new base. Nobody is in that loop. Reflowing or renaming that line
+breaks the sed, which is why the bump reads it back and fails when it did not take.
+
+Local dev overrides the pin rather than editing it:
+
+    docker build -t qits/workspace:native -f docker/Dockerfile \
+      --build-arg WORKSPACE_BASE=qits/workspace-base:latest .
+
 ## Where the code came from
 
 Extracted from the qits monolith. `qits-commands` and `qits-coding-agents` were **reimplemented**

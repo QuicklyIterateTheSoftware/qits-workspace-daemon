@@ -1,5 +1,5 @@
-# The release pipeline: this repository reacts to its OWN release and pushes TWO images under the
-# released VERSION — the daemon image, and the layered workspace image built on top of it.
+# The release pipeline: this repository reacts to its OWN release and pushes the workspace image
+# under the released VERSION.
 #
 # THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT — the same shape every
 # sibling's release pipeline has. `SCMRelease` says only "source control has this version";
@@ -10,50 +10,31 @@
 # THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT. ci-post-receive.yml
 # keeps pushing `:$QITS_CI_SHA` on every green push; what this adds is a name a human and a
 # downstream consumer can say out loud. The two coordinates have two owners — a build is named by
-# its commit, a release by its version — and the step below says why that split is also the only
-# shape that pushes reliably.
+# its commit, a release by its version — and that split is also the only shape that pushes reliably:
+# a sibling tried `docker build -t A -t B` and its first release failed on `docker push B` with "tag
+# does not exist", because BuildKit's exporter does not reliably leave every alias of a multi-tag
+# build in the local image store. One build, one tag, one push.
 #
-# THE LAYERED IMAGE IS THIS PIPELINE'S SECOND OUTPUT, AND IT EXISTS ONLY HERE. `qits/workspace` is
-# docker/Dockerfile.workspace — the released toolchain with this daemon copied in as its
-# entrypoint — and it was a hand-built local tag on one machine until this file built it. Both
-# halves it layers were already published; the layering was not, so the image a workspace actually
-# runs had no history and no coordinate anyone could name.
-#
-# WHY IT IS NOT ALSO BUILT IN ci-post-receive.yml. The toolchain base is ~3.4 GB, so a
-# sha-coordinate copy would pull and push that on every commit — and nothing consumes this image by
-# sha. A workspace is started from a version, so the version is the only coordinate worth the bytes.
-# The daemon image stays in post-receive because it is small and because qits-deployments reads sha
-# coordinates.
-#
-# THE BASE IS PINNED BY VERSION, NOT FOLLOWED BY A FLOATING TAG.
-# `.config/qits/workspace-base.version` beside this file holds one line. images/qits-oci-workspace
-# publishes only `:<version>` — no `:latest`, by its own ONE TAG PER PIPELINE rule — so there is no
-# floating tag to follow even if we wanted one, and following one would make this image
-# unreproducible: rebuilding a released version would silently pick up a different toolchain. The
-# pin is a committed file so a rebuild of a tag is the same build, and so the bump is a reviewable
-# diff.
-#
-# ci-event-upstream-oci-workspace.yml IS WHAT MOVES THAT PIN, and ci-post-receive.yml's maintenance
-# leg is what turns the moved pin into a release. The loop closes with nobody in it: the toolchain
-# releases, the pin bumps onto `maintenance/qits-oci-workspace`, that push releases this repository,
-# and this pipeline republishes `qits/workspace` on the new base.
+# ONE ARTIFACT, WHERE THERE USED TO BE TWO. Until 2026-08-10 this pipeline pushed a bare-binary
+# `qits/workspace-daemon` and then layered it into `qits/workspace` — two builds, two declarations,
+# and a partial release possible between them. docker/Dockerfile does both halves in one build now,
+# so there is one image and one thing to declare.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the
-# `docker push`es below are this repository's own step — so it cannot see what landed. It announces
-# one `SoftwareRelease` per entry on the strength of these lines once the whole pipeline is green.
-# Keep them true.
+# `docker push` below is this repository's own step — so it cannot see what landed. It announces one
+# `SoftwareRelease` per entry on the strength of this line once the whole pipeline is green. Keep it
+# true.
 #
-# THE NAMES ARE UNQUALIFIED ON PURPOSE. No registry-qualified reference is portable here — the
-# registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci
-# and qits-deployments — and an OCI reference cannot carry a path prefix. So the declaration carries
-# `qits/workspace-daemon` and `qits/workspace`, and the reader supplies its own host, exactly as the
-# step below composes one from environment.
+# THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified reference is portable here — the registry
+# is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
+# qits-deployments — and an OCI reference cannot carry a path prefix. So the declaration carries
+# `qits/qits-workspace-daemon` and the reader supplies its own host, exactly as the step below
+# composes one from environment.
 #
-# THE DAEMON BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file
-# explains why `docker: true` is what the Dockerfile's `localhost:8081` bases need, why no
-# hand-rolled builder container is involved, and why there is no `--network` flag; this one carries
-# the short form and points there rather than keeping a second copy of the reasoning to drift. The
-# layered build has no counterpart there and never will — see above.
+# THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file explains why
+# `docker: true` is what the Dockerfile's `localhost:8081` bases need, why no hand-rolled builder
+# container is involved, and why there is no `--network` flag; this one carries the short form and
+# points there rather than keeping a second copy of the reasoning to drift.
 #
 # THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease FOR THIS REPOSITORY. The bus is
 # at-most-once with no catch-up and no replay, so the file has to be in place before the event it
@@ -70,20 +51,15 @@ when:
   # matching repositoryName because this repository's row id is a per-platform UUID.
   - repositoryName: { exact: qits-workspace-daemon }
 artifacts:
-  - { type: docker, name: qits/workspace-daemon }
-  - { type: docker, name: qits/workspace }
+  - { type: docker, name: qits/qits-workspace-daemon }
 steps:
     # ci-base: the docker CLI for the build, git for the tag checkout, jq for the event payload.
     # Nothing needs maven on THIS side of the socket — the reactor is built inside the image's own
     # builder stage.
     #
-    # BOTH IMAGES ARE ONE STEP because the second consumes the first. A second step gets a fresh
-    # container and an empty local image store, so it would have to pull the daemon image straight
-    # back out of the registry it was just pushed to. Splitting buys nothing and costs a round trip.
-    #
-    # TWO HOURS, NOT ONE. The layered build pulls the ~3.4 GB toolchain base and pushes a layer on
-    # top of it, on top of the daemon's native compile. images/qits-oci-workspace found an hour
-    # short of headroom for the same bytes on a cold cache.
+    # TWO HOURS, NOT ONE. The build pulls the ~3.4 GB toolchain base and pushes a layer on top of it,
+    # on top of the daemon's native compile. images/qits-oci-workspace found an hour short of
+    # headroom for the same bytes on a cold cache.
   - image: qits/build-images/ci-base:latest
     docker: true
     timeout-seconds: 7200
@@ -95,81 +71,34 @@ steps:
       set -eu
 
       # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
-      # $QITS_EVENT_PAYLOAD; there is no per-field projection.
+      # $QITS_EVENT_PAYLOAD; there is no per-field projection. `jq -er` fails the step on an absent
+      # field rather than composing a reference out of the word "null".
       version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
       # SCMRelease versions are CalVer — digits and dots. Checked before anything is built, because
-      # the version becomes a registry TAG: an absent or malformed one would publish the daemon
-      # under a coordinate nobody can guess, and a value carrying `:` or `/` would land it under a
-      # different name entirely. qits-ci-daemon and qits-oci refuse the same way for the same
-      # reason.
+      # the version becomes a registry TAG: an absent or malformed one would publish under a
+      # coordinate nobody can guess, and a value carrying `:` or `/` would land it under a different
+      # name entirely. qits-ci-daemon and qits-oci refuse the same way for the same reason.
       case "$version" in
         ''|*[!0-9.]*) echo "SCMRelease carries no valid CalVer" >&2; exit 1 ;;
       esac
-      echo "releasing qits/workspace-daemon:$version and qits/workspace:$version"
+      echo "releasing qits/qits-workspace-daemon:$version"
 
       # THE TAG IS THE CHECKOUT TARGET. An event-triggered run is cloned at the head of main, which
       # is where the release commit is *now* — a later push moves that and the tag does not, so a
       # busy main cannot make this pipeline ship a different tree than the one that was released.
       # The clone is shallow and carries no tags, hence the explicit refspec; the URL rather than
       # `origin` because every address a step needs arrives as environment.
+      #
+      # It is also what makes the base pin reproducible. docker/Dockerfile's `ARG WORKSPACE_BASE`
+      # travels with the tree, so rebuilding a released tag rebuilds it on the toolchain that tag was
+      # released with — which is the whole reason the pin is a committed line rather than a floating
+      # tag.
       git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
       git checkout --detach "$version"
 
-      # THE TOOLCHAIN PIN, READ FROM THE RELEASED TREE. The checkout above already moved this tree
-      # to `$version`, so the base version is the one that tree was released with — rebuilding a tag
-      # rebuilds it on the same toolchain, which is the whole reason the pin is a committed file.
-      # Reading it before the checkout would have taken main's.
-      #
-      # READ AND VALIDATED HERE, BEFORE ANY BUILD, though it is only used by the second one. A bad
-      # pin caught after the daemon push would leave exactly the partial release this pipeline is
-      # shaped to avoid: one of the two declared artifacts published, the other never built, and the
-      # run red. Both inputs are checked while nothing has been pushed.
-      base_version=$(cat .config/qits/workspace-base.version)
-      # Validated exactly like $version, and for the same reason: it becomes part of an image
-      # reference. A stray `:` or `/` would pull a different image entirely, and an empty file would
-      # compose a reference with no tag — which docker reads as `:latest`, a tag
-      # images/qits-oci-workspace never publishes.
-      case "$base_version" in
-        ''|*[!0-9.]*) echo "workspace-base.version is not a CalVer: $base_version" >&2; exit 1 ;;
-      esac
-      echo "layering onto qits/workspace-base:$base_version"
-
-      # THE VERSION IS THE ONLY COORDINATE THIS STEP PUSHES FOR THE DAEMON, and the sha coordinate
-      # is not missing: the release lands a commit on main, main's push runs ci-post-receive.yml,
-      # and that pushes `:<sha>` for the very same tree. Publishing both from here as well was tried
-      # in the sibling qits-projects-daemon, and its first release failed on it: `docker build -t A
-      # -t B` reported naming both tags, then `docker push B` answered "tag does not exist", because
-      # BuildKit's exporter does not reliably leave every alias of a multi-tag build in the local
-      # image store. A second `docker tag` would paper over it, but the honest reading is that the
-      # two coordinates have two owners: post-receive names a build by its commit, and a release
-      # names it by its version.
-      #
-      # Each build is therefore one build and one push, which is also the shape that cannot leave a
-      # partial release behind — the rule qits-oci's release pipeline states for its five images.
-      repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-daemon"
-      docker build -t "$repository:$version" -f docker/Dockerfile .
-
-      docker push "$repository:$version"
-
-      # ---- the layered workspace image -------------------------------------------------------
-      #
-      # ONE TAG PER BUILD STILL HOLDS. This is a second build with a single `-t`, not a second `-t`
-      # on the first: the rule the paragraph above states is about aliases of ONE build, which
-      # BuildKit's exporter does not reliably leave in the local store. Two builds, two pushes, and
-      # each image is pushed before the next thing runs.
-      #
-      # BOTH ARGS ARE PASSED QUALIFIED. docker/Dockerfile.workspace defaults them to bare local
-      # convenience tags (`qits/workspace-base:latest`) for a developer's machine; nothing here has
-      # those, and a build that fell back to them would either fail or — worse — succeed against
-      # something stale. DAEMON_IMAGE is the reference just built and pushed, so the layer is this
-      # release's daemon and not a pull of some other version.
-      workspace="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$version"
-      docker build -t "$workspace" -f docker/Dockerfile.workspace \
-        --build-arg "BASE=$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base:$base_version" \
-        --build-arg "DAEMON_IMAGE=$repository:$version" .
-      docker push "$workspace"
-
-      # Best-effort: both images are pushed, so a failed local delete is housekeeping, not a failed
-      # release. The daemon image is deleted last because the layered build above needs it present.
-      docker rmi "$workspace" || true
-      docker rmi "$repository:$version" || true
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspace-daemon:$version"
+      docker build -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
+      # failed release.
+      docker rmi "$ref" || true
