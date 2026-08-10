@@ -28,7 +28,7 @@
 # THE NAME IS UNQUALIFIED ON PURPOSE. No registry-qualified reference is portable here — the registry
 # is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci and
 # qits-deployments — and an OCI reference cannot carry a path prefix. So the declaration carries
-# `qits/qits-workspace-daemon` and the reader supplies its own host, exactly as the step below
+# `qits/workspace` and the reader supplies its own host, exactly as the step below
 # composes one from environment.
 #
 # THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file explains why
@@ -51,7 +51,7 @@ when:
   # matching repositoryName because this repository's row id is a per-platform UUID.
   - repositoryName: { exact: qits-workspace-daemon }
 artifacts:
-  - { type: docker, name: qits/qits-workspace-daemon }
+  - { type: docker, name: qits/workspace }
 steps:
     # ci-base: the docker CLI for the build, git for the tag checkout, jq for the event payload.
     # Nothing needs maven on THIS side of the socket — the reactor is built inside the image's own
@@ -81,7 +81,7 @@ steps:
       case "$version" in
         ''|*[!0-9.]*) echo "SCMRelease carries no valid CalVer" >&2; exit 1 ;;
       esac
-      echo "releasing qits/qits-workspace-daemon:$version"
+      echo "releasing qits/workspace:$version"
 
       # THE TAG IS THE CHECKOUT TARGET. An event-triggered run is cloned at the head of main, which
       # is where the release commit is *now* — a later push moves that and the tag does not, so a
@@ -96,7 +96,7 @@ steps:
       git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
       git checkout --detach "$version"
 
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspace-daemon:$version"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$version"
       docker build -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a

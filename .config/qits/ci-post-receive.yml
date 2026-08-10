@@ -24,11 +24,12 @@
 # `<repositories>`, so the builder stage resolves from Maven Central, and every base image is the
 # host daemon's to pull.
 #
-# ONE IMAGE, NAMED AFTER THIS REPOSITORY. `qits-workspace-daemon` is both the repository and the
-# image now. It used to be two — a bare-binary `qits/workspace-daemon` here and a layered
-# `qits/workspace` built only on release — and the split meant the image a workspace actually runs
-# had no sha coordinate at all. The consumer pins one name and this pipeline is what keeps a sha
-# coordinate under it.
+# ONE IMAGE, UNDER THE NAME ITS CONSUMERS ALREADY WRITE. The published name stays `qits/workspace`
+# — qits-workspaces' pin and its follow-bump trigger both spell it — while the repository keeps its
+# own name, the same split `qits-oci-workspace` publishing `qits/workspace-base` records. It used to
+# be two images (a bare-binary `qits/workspace-daemon`, a layered `qits/workspace` built only on
+# release), and the split meant the image a workspace actually runs had no sha coordinate at all.
+# This pipeline is what keeps a sha coordinate under the one name.
 #
 # THE COST OF THAT IS PAID HERE AND IT IS REAL. This image carries the ~3.4 GB toolchain, so every
 # push pulls and pushes it — where the retired bare-binary build was a few tens of megabytes. It buys
@@ -60,7 +61,7 @@ steps:
       # image that was never built. -u stops the step on an unset registry variable rather than
       # composing a ref out of empty strings.
       set -eu
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-workspace-daemon:$QITS_CI_SHA"
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$QITS_CI_SHA"
       docker build -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
       # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
