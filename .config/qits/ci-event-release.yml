@@ -1,11 +1,10 @@
-# The release pipeline: this repository reacts to its OWN release and pushes the workspace image
+# The release pipeline: this repository reacts to its OWN release TAG and pushes the workspace image
 # under the released VERSION.
 #
 # THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT — the same shape every
-# sibling's release pipeline has. `SCMRelease` says only "source control has this version";
-# qits-workspaces publishes it the instant the release push is accepted, and nothing here publishes
-# it. The event that could loop is `SoftwareRelease`, and this file neither listens for it nor
-# emits it.
+# sibling's release pipeline has. `SCMPublishTag` says only "this repository now has this tag", and
+# the git host says it the instant a push lands; nothing here pushes a tag. The event that could
+# loop is `SoftwareRelease`, and this file neither listens for it nor emits it.
 #
 # THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT. ci-post-receive.yml
 # keeps pushing `:$QITS_CI_SHA` on every green push; what this adds is a name a human and a
@@ -36,20 +35,27 @@
 # hand-rolled builder container is involved, and why there is no `--network` flag; this one carries
 # the short form and points there rather than keeping a second copy of the reasoning to drift.
 #
-# THIS FILE IS INERT UNTIL qits-workspaces PUBLISHES SCMRelease FOR THIS REPOSITORY. The bus is
-# at-most-once with no catch-up and no replay, so the file has to be in place before the event it
-# selects exists. The other order loses a release and looks like a train that quietly did not roll.
+# THE TAG IS THE TRIGGER SO THAT A RESTORE NEEDS NOTHING ELSE. The tag is the durable release stamp
+# — it outlives the event log, the run rows and every image store — so a bootstrap replay
+# re-establishes this release by pushing the tag alone, and this pipeline rebuilds and republishes
+# the image from it. A REAL release pushes the tag and has qits-workspaces publish `SCMRelease`
+# beside it; that second event buys the ANNOUNCEMENT, not the image — qits-ci emits
+# `SoftwareRelease` where a green run and an `SCMRelease` for the version meet. So a replay
+# republishes silently and wakes no train (bootstrap-replay-plan.md in the wrapper).
 #
-# IT WAS INERT FOR A SECOND REASON, AND THAT ONE HAD NO SYMPTOM. The selection matched `repository`,
-# which carries the repository's ROW ID — and this repository was registered by the projects
-# self-seed reconcile, so its row id is a UUID minted per platform instance. No committed config can
-# name it. The selection therefore matched nothing, and CI logs matches and never non-matches, so
-# the pipeline read exactly like a train that quietly did not roll. `repositoryName` is the stable
-# coordinate; qits-workspaces publishes it beside the id.
-event: SCMRelease
+# THE FILE HAS TO BE IN PLACE BEFORE THE TAG IT SELECTS IS PUSHED. The bus is at-most-once with no
+# catch-up and no replay, so a trigger file arriving after its event loses that release and looks
+# like a train that quietly did not roll.
+#
+# THE COORDINATE PROBLEM THE OLD SELECTION HAD IS GONE WITH THE EVENT. `SCMRelease.repository`
+# carries the repository's ROW ID, and this repository was registered by the projects self-seed
+# reconcile, so its row id could be a UUID minted per platform instance — nothing a committed config
+# can name. The selection matched nothing, silently, because CI logs matches and never non-matches;
+# `repositoryName` was the answer. `SCMPublishTag` has one identifier and no such ambiguity: the git
+# host's `repoId` is the address it serves the repository under, which is this repository's name.
+event: SCMPublishTag
 when:
-  # matching repositoryName because this repository's row id is a per-platform UUID.
-  - repositoryName: { exact: qits-workspace-daemon }
+  - repoId: { exact: qits-workspace-daemon }
 artifacts:
   - { type: docker, name: qits/workspace }
 steps:
@@ -73,13 +79,15 @@ steps:
       # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
       # $QITS_EVENT_PAYLOAD; there is no per-field projection. `jq -er` fails the step on an absent
       # field rather than composing a reference out of the word "null".
-      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
-      # SCMRelease versions are CalVer — digits and dots. Checked before anything is built, because
-      # the version becomes a registry TAG: an absent or malformed one would publish under a
-      # coordinate nobody can guess, and a value carrying `:` or `/` would land it under a different
-      # name entirely. qits-ci-daemon and qits-oci refuse the same way for the same reason.
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .tagName)
+      # THE TAG NAME IS THE VERSION, and release versions are CalVer — digits and dots. Checked
+      # before anything is built, because the version becomes a registry TAG: a malformed one would
+      # publish under a coordinate nobody can guess, and a value carrying `:` or `/` would land it
+      # under a different name entirely. It carries more weight than it did against SCMRelease: no
+      # release flow vets this string now, since any tag pushed here arrives as one of these events.
+      # qits-ci-daemon and qits-oci refuse the same way for the same reason.
       case "$version" in
-        ''|*[!0-9.]*) echo "SCMRelease carries no valid CalVer" >&2; exit 1 ;;
+        ''|*[!0-9.]*) echo "not a CalVer tag: $version" >&2; exit 1 ;;
       esac
       echo "releasing qits/workspace:$version"
 

@@ -25,9 +25,9 @@
 # `artifacts: [{ type: docker, name: qits/workspace-base }]`, and qits-ci turns the declared `type`
 # into `packageType` and the declared `name` into `packageName` verbatim — the keyword IS the wire
 # value. `repository` on a SoftwareRelease is qits-ci's own repo id for the run, which for that
-# repository is its name. (Contrast ci-event-release.yml beside this file, which had to match
-# `repositoryName` because SCMRelease's `repository` is a per-platform UUID row id. Two events, two
-# fields, and they are not interchangeable.)
+# repository is its name. (Contrast ci-event-release.yml beside this file, which selects an
+# `SCMPublishTag` by `repoId`. Every event names the repository with the field its own publisher
+# holds, and they are not interchangeable.)
 #
 # MATCHING ALL THREE IS NOT BELT AND BRACES. A repository publishing several images emits one of
 # these per artifact, so `repository` alone would fire this train on any of them.

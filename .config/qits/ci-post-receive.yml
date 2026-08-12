@@ -96,9 +96,10 @@ steps:
       summary=$(git log -1 --format=%s)
 
       # RELEASE, not merge and not integrate. Releasing is the only door onto main: it stamps a
-      # version, writes one two-parent commit and publishes SCMRelease — which is the event
-      # ci-event-release.yml waits for. Integrating targets the branch's PARENT and would refuse
-      # with RELEASE_REQUIRED when that parent is main.
+      # version, writes one two-parent commit and pushes the annotated tag — which is the fact
+      # ci-event-release.yml waits for. It publishes SCMRelease as well, and that is what turns the
+      # green release run into an announcement. Integrating targets the branch's PARENT and would
+      # refuse with RELEASE_REQUIRED when that parent is main.
       #
       # The step self-identifies entirely from injected environment, so no deployment address is
       # spelled here: $QITS_WORKSPACES_URL is qits-workspaces' root (scheme, host and port, no path
