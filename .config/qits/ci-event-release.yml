@@ -107,6 +107,7 @@ steps:
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$version"
       docker build -t "$ref" -f docker/Dockerfile .
       docker push "$ref"
-      # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
-      # failed release.
-      docker rmi "$ref" || true
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving, which is the
+      # race that broke the release of 2026-08-11.
