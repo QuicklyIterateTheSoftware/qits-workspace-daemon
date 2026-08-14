@@ -15,9 +15,9 @@
 # --- the base pin ---------------------------------------------------------------------------------
 # ONE LINE, ONE VERSION TOKEN, AND A MACHINE EDITS IT. `.config/qits/ci-event-upstream-oci-workspace.yml`
 # seds this exact line when images/qits-oci-workspace releases a toolchain, so the anchored prefix
-# `ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:` is a contract with that file. Move the
-# registry host or the image name here and the bump silently matches nothing — which is why that
-# file re-reads the line after its sed and fails when it did not take.
+# `ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:` is a contract with that
+# file. Move the registry host or the image name here and the bump silently matches nothing — which
+# is why that file re-reads the line after its sed and fails when it did not take.
 #
 # PINNED BY VERSION, NEVER FOLLOWED BY A FLOATING TAG. images/qits-oci-workspace publishes only
 # `:<version>` (its own ONE TAG PER PIPELINE rule), so there is no floating tag to follow even if we
@@ -37,22 +37,22 @@
 #     cd ../../services/qits-workspaces
 #     ./mvnw test -pl service -Dtest=DaemonApiGateIT -Dsurefire.failIfNoSpecifiedTests=false \
 #       -Dqits.workspace.image=qits/workspace:native
-ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:2026.810.104734
+ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.810.104734
 
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `localhost:8082/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the first build
-# fetches the image from upstream and caches it, every later build is served from local disk. The
-# tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves
-# it.
+# `mirror.dev.localhost:8080/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the
+# first build fetches the image from upstream and caches it, every later build is served from local
+# disk. The tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when
+# quay moves it.
 #
 # All three base references here are the HOST DAEMON's to resolve, not this build's, which is why
 # the CI step declares `docker: true` and passes no `--network`: nothing inside the build dials the
 # platform. The reactor declares no `<repositories>`, so the compile below resolves from Maven
 # Central.
-FROM localhost:8082/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
+FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
 

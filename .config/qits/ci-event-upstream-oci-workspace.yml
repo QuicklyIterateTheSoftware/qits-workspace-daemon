@@ -88,14 +88,14 @@ steps:
       # that file's header. Written as a `sed` rather than a rewritten file because the pin now lives
       # with the build that uses it: a committed `.version` file beside this one was a second place
       # to read, and the release pipeline had to cat it to compose a `--build-arg`.
-      sed -i -E "s#^(ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:).*#\1$version#" \
+      sed -i -E "s#^(ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:).*#\1$version#" \
         docker/Dockerfile
 
       # A SED THAT MATCHES NOTHING IS SILENT, AND ITS SYMPTOM IS INDISTINGUISHABLE FROM SUCCESS —
       # both leave an empty diff, and the quiet exit below would then report a train that is up to
       # date while the pin sits at whatever it was. So the line is read back. Rename the image, move
       # the registry host or reflow that line, and this fails loudly in the commit that did it.
-      grep -qxF "ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:$version" docker/Dockerfile \
+      grep -qxF "ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:$version" docker/Dockerfile \
         || { echo "the base pin in docker/Dockerfile did not take - has that line moved?" >&2; exit 1; }
 
       # ALREADY ON THAT VERSION IS A SUCCESS, NOT A NO-OP TO HIDE. A replayed event, or a toolchain

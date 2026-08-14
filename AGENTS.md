@@ -202,7 +202,8 @@ push fails with "tag does not exist".
 taken deliberately — the alternative is CI proving a half of the image green. Both publish steps get
 `timeout-seconds: 7200`; do not trim them.
 
-**The base pin is a machine-edited line.** `ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:<version>`
+**The base pin is a machine-edited line.**
+`ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:<version>`
 is `sed`-ed by `.config/qits/ci-event-upstream-oci-workspace.yml`. Reflow it, rename the image or move
 the registry host, and the sed matches nothing — which produces an *empty diff*, indistinguishable
 from "already up to date". The bump reads the line back for exactly that reason. Move the line, move

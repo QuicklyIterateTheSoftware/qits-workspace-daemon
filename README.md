@@ -239,7 +239,7 @@ A consumer pins the CalVer. `ci-event-release.yml` declares
 
 **The toolchain base is pinned, and the pin rides the train.** `docker/Dockerfile`'s first line is
 
-    ARG WORKSPACE_BASE=localhost:8081/qits/workspace-base:<version>
+    ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:<version>
 
 One line, one version token. `.config/qits/ci-event-upstream-oci-workspace.yml` seds it when
 `qits-oci-workspace` publishes a toolchain — it probes the registry that the tag really exists, then
