@@ -26,8 +26,8 @@ import java.util.function.Consumer;
  * git} CLI via {@link ProcessBuilder}, mirroring {@link WorkspaceDescriber}, and unit-tests
  * directly against a collecting {@code Consumer}.
  *
- * <p>The clone is name-addressed ({@code <gitBase>/<projectId>/<repoName>}, from the git base + the
- * {@code …_PROJECT_ID}/{@code …_REPO_NAME} env) so committed <b>relative</b> submodule urls resolve
+ * <p>The clone is name-addressed ({@code <gitBase>/<repoName>}, from the git base + the
+ * {@code …_REPO_NAME} env) so committed <b>relative</b> submodule urls resolve
  * natively against the served project siblings; an <b>absolute</b> committed url is redirected to
  * the name-addressed sibling by basename. Submodules are discovered from the checkout's own {@code
  * .gitmodules} in a bounded, depth-capped walk (the daemon has no DB) — a submodule that can't be
@@ -36,8 +36,8 @@ import java.util.function.Consumer;
  * re-emits {@link Provisioned} from the current {@code HEAD}.
  *
  * <p><b>Where the git base comes from, and the assumption it still carries.</b> The git host is
- * <b>qits-artifacts</b>, which serves {@code /artifacts/git/<repoId>} and {@code
- * /artifacts/git/<projectId>/<repoName>} (the path convention: {@code /<segment>/git/…}, verbatim
+ * <b>qits-githost</b>, which serves {@code /git/<repoId-or-name>} (the path convention: {@code
+ * /<segment>/git/…}, verbatim
  * through the gateway <em>and</em> on {@code qits-net}, so the prefix is not a gateway rewrite the
  * daemon may drop when it dials a container directly). The control socket, by contrast, is
  * qits-workspaces. Those are two different hosts, so {@link #derivedGitBase} — authority of the
@@ -51,10 +51,9 @@ import java.util.function.Consumer;
  * Git treats the superproject's remote as a <em>directory</em> and {@code ../} drops one whole
  * segment (its own rule, not RFC 3986 — URI resolution would discard {@code <repoName>} as a
  * filename first and land a level too high). So {@code ../sibling} against {@code
- * …/artifacts/git/<projectId>/<repoName>} yields {@code …/artifacts/git/<projectId>/sibling}: the
- * same sibling the shorter base produced, one segment deeper. What must be preserved is the
- * <em>length</em> below the base — one segment id-addressed, two name-addressed — and a prefix
- * added above the base preserves it. Verified against real git, not assumed.
+ * …/git/<repoName>} yields {@code …/git/sibling}: the sibling route qits-githost serves. Both
+ * id- and name-addressed forms therefore remain one segment below the base. Verified against real
+ * git, not assumed.
  */
 public final class Provisioner {
 
@@ -125,7 +124,7 @@ public final class Provisioner {
           emit.accept(
               new ProvisionFailed(
                   env.workspaceId(),
-                  "could not align the existing checkout with its project-scoped origin"));
+                  "could not align the existing checkout with its name-addressed origin"));
           return false;
         }
         materializeSubmodules(gitBase, env, ".", 0, emit);
@@ -217,28 +216,25 @@ public final class Provisioner {
   }
 
   /**
-   * The name-addressed clone url ({@code <gitBase>/<projectId>/<repoName>}) so relative submodules
+   * The name-addressed clone url ({@code <gitBase>/<repoName>}) so relative submodules
    * resolve natively; falls back to the id-addressed route ({@code <gitBase>/<repoId>}) when no
    * project-scoped name was injected (mirrors the host's {@code cloneUrl}).
    */
   static String rootUrl(String gitBase, Env env) {
     if (nameAddressed(env)) {
-      return gitBase + "/" + env.projectId() + "/" + env.repoName();
+      return gitBase + "/" + env.repoName();
     }
     return gitBase + "/" + env.repoId();
   }
 
   /**
-   * Whether a name-addressed route ({@code /git/<projectId>/<repoName>}) exists for this workspace
+   * Whether a name-addressed route ({@code /git/<repoName>}) exists for this workspace
    * — the ONE predicate for both the clone url and the absolute-submodule redirect. Both env vars
    * must be present: the project id now arrives on its own (it scopes the coding agents' MCP urls),
    * and it alone names no servable route.
    */
   static boolean nameAddressed(Env env) {
-    return env.projectId() != null
-        && !env.projectId().isBlank()
-        && env.repoName() != null
-        && !env.repoName().isBlank();
+    return env.repoName() != null && !env.repoName().isBlank();
   }
 
   /**
@@ -349,7 +345,7 @@ public final class Provisioner {
       // needs redirecting to the name-addressed sibling (by basename) to stay offline. That target
       // only exists when the clone itself is name-addressed (nameAddressed — the same predicate
       // rootUrl uses): a rewrite keyed on the project id alone would point every absolute
-      // submodule at a /git/<projectId>/<name> route the git host does not serve.
+      // submodule at a route the git host does not serve.
       if (!relative && nameAddressed(env)) {
         runStreaming(
             List.of(
@@ -358,7 +354,7 @@ public final class Provisioner {
                 rel,
                 "config",
                 "submodule." + sub.name() + ".url",
-                gitBase + "/" + env.projectId() + "/" + basename(url)),
+                gitBase + "/" + basename(url)),
             emit);
       }
       int update =

@@ -97,7 +97,7 @@ class ProvisionerTest {
   @Test
   void rootUrlIsNameAddressedWhenProjectScopePresent() {
     assertEquals(
-        "http://qits:8080/artifacts/git/proj-1/my-repo",
+        "http://qits:8080/artifacts/git/my-repo",
         Provisioner.rootUrl("http://qits:8080/artifacts/git", env("proj-1", "my-repo")));
   }
 
@@ -119,7 +119,7 @@ class ProvisionerTest {
         Provisioner.alignExistingCheckoutOrigin(
             checkout.toFile(), "http://qits:8080/artifacts/git", env, ignored -> {}));
     assertEquals(
-        "http://qits:8080/artifacts/git/proj-1/my-repo",
+        "http://qits:8080/artifacts/git/my-repo",
         git(checkout, "remote", "get-url", "origin").trim(),
         "a preserved volume must not keep resolving relative submodules beside its UUID");
   }
@@ -154,36 +154,34 @@ class ProvisionerTest {
    * RFC 3986 would first discard {@code my-repo} as a filename and land a level too high.
    *
    * <p>Verified against real git rather than assumed: a superproject whose {@code origin} is {@code
-   * http://qits-artifacts:8080/artifacts/git/proj-1/my-repo} with {@code submodule.sib.url=../sib}
+   * http://qits-artifacts:8080/artifacts/git/my-repo} with {@code submodule.sib.url=../sib}
    * resolves, under {@code git submodule sync}, to {@code
-   * http://qits-artifacts:8080/artifacts/git/proj-1/sib}.
+   * http://qits-artifacts:8080/artifacts/git/sib}.
    */
   private static String gitRelative(String remote, String relative) {
     return remote.substring(0, remote.lastIndexOf('/')) + "/" + relative.substring("../".length());
   }
 
   /**
-   * The clone url must stay exactly two segments below the base when name-addressed and one when
-   * id-addressed: that length is what distinguishes the two forms on the git host, and it is what
-   * decides where a relative submodule url lands. The {@code /artifacts} prefix is added above the
-   * base, so it shifts both forms down together and changes neither.
+   * Both name- and id-addressed clone urls are exactly one segment below the base. That is the
+   * githost contract and what lets a relative submodule land on a sibling repository.
    */
   @Test
   void theArtifactsPrefixDoesNotChangeHowManySegmentsSitBelowTheBase() {
     String base = "http://qits-artifacts:8080/artifacts/git";
 
     assertEquals(
-        "/proj-1/my-repo",
+        "/my-repo",
         Provisioner.rootUrl(base, env("proj-1", "my-repo")).substring(base.length()),
-        "name-addressed: two segments below the base");
+        "name-addressed: one segment below the base");
     assertEquals(
         "/repo-abc",
         Provisioner.rootUrl(base, env("", "")).substring(base.length()),
         "id-addressed: one segment below the base");
     assertEquals(
-        "http://qits-artifacts:8080/artifacts/git/proj-1/sibling",
+        "http://qits-artifacts:8080/artifacts/git/sibling",
         gitRelative(Provisioner.rootUrl(base, env("proj-1", "my-repo")), "../sibling"),
-        "a relative submodule url still lands on the project sibling, one segment deeper");
+        "a relative submodule url lands on the sibling repository");
   }
 
   @Test
