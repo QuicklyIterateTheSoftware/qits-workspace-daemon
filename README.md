@@ -35,6 +35,12 @@ agent activity and change nudges all ride it. Message shapes live in `workspace-
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.
 
+When the container has a commissioned IdP client, it exchanges that pair at the injected token URL
+for a `qits-workspaces`-audience bearer and sends it on every initial and reconnecting WebSocket
+handshake. The four values — the client pair, token URL and audience — are all-or-nothing: an absent
+set keeps the clone-alone/local topology anonymous, while a partial set fails closed and retries
+rather than silently dropping authentication.
+
 **The HTTP API** — a bearer-authenticated server on `127.0.0.1:13338` serving the working tree, the
 commands surface, the coding-agent surface, the service and bootstrap surfaces, and the two
 interactive websockets. It **does not bind** without `qits.workspace-daemon.api-token`: it serves an
