@@ -340,13 +340,11 @@ public final class Provisioner {
                   "--get",
                   "submodule." + sub.name() + ".url"));
       String url = committedUrl.exitCode() == 0 ? committedUrl.stdout().trim() : "";
-      boolean relative = url.isEmpty() || url.startsWith("./") || url.startsWith("../");
-      // A relative url resolves natively against the name-addressed origin; only an absolute url
-      // needs redirecting to the name-addressed sibling (by basename) to stay offline. That target
-      // only exists when the clone itself is name-addressed (nameAddressed — the same predicate
-      // rootUrl uses): a rewrite keyed on the project id alone would point every absolute
-      // submodule at a route the git host does not serve.
-      if (!relative && nameAddressed(env)) {
+      // Normalize every project submodule to the githost's name route. Committed relative URLs end
+      // in `.git`; native Git resolution preserves that suffix, while qits-githost deliberately
+      // serves `/git/<name>` without it. basename strips the suffix for relative and absolute URLs
+      // alike and also keeps external absolute origins inside this project's imported siblings.
+      if (!url.isEmpty() && nameAddressed(env)) {
         runStreaming(
             List.of(
                 "git",
