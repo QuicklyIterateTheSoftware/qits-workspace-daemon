@@ -10,6 +10,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -195,6 +196,122 @@ class ProvisionerTest {
     assertEquals(2, subs.size());
     assertTrue(subs.toString().contains("child-a"));
     assertTrue(subs.toString().contains("libs/shared"));
+  }
+
+  /**
+   * The aggregate case: the host created the workspace branch in this sibling too, so the
+   * materialized submodule has to leave the gitlink and follow it — a detached checkout can commit
+   * to nothing.
+   */
+  @Test
+  void aSubmoduleWhoseOriginCarriesTheWorkspaceBranchFollowsIt(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path origin = originWith(tmp, "adhoc-changes");
+    Path child = materializedAtGitlink(tmp, origin);
+
+    Provisioner.checkoutWorkspaceBranch(child.toString(), "adhoc-changes", ignored -> {});
+
+    assertEquals("adhoc-changes", git(child, "rev-parse", "--abbrev-ref", "HEAD").trim());
+    assertEquals(
+        git(origin, "rev-parse", "adhoc-changes").trim(),
+        git(child, "rev-parse", "HEAD").trim(),
+        "the branch tip, not the recorded gitlink");
+  }
+
+  /** Every ordinary workspace's case, and it must stay exactly as it was. */
+  @Test
+  void aSubmoduleWithoutThatBranchKeepsItsDetachedGitlink(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path origin = originWith(tmp, "adhoc-changes");
+    Path child = materializedAtGitlink(tmp, origin);
+    String gitlink = git(child, "rev-parse", "HEAD").trim();
+
+    Provisioner.checkoutWorkspaceBranch(child.toString(), "some-other-workspace", ignored -> {});
+
+    assertEquals("HEAD", git(child, "rev-parse", "--abbrev-ref", "HEAD").trim(), "still detached");
+    assertEquals(gitlink, git(child, "rev-parse", "HEAD").trim());
+  }
+
+  /**
+   * A container recreate preserves {@code /workspace}, so provisioning runs again over a checkout
+   * that may hold commits nobody pushed. Selecting the branch must never move it.
+   */
+  @Test
+  void anExistingLocalBranchKeepsItsUnpushedCommits(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path origin = originWith(tmp, "adhoc-changes");
+    Path child = materializedAtGitlink(tmp, origin);
+    git(child, "switch", "--create", "adhoc-changes", "--track", "origin/adhoc-changes");
+    git(child, "commit", "--allow-empty", "-m", "work nobody pushed yet");
+    String unpushed = git(child, "rev-parse", "HEAD").trim();
+    git(origin, "switch", "adhoc-changes");
+    git(origin, "commit", "--allow-empty", "-m", "meanwhile, on the host");
+
+    Provisioner.checkoutWorkspaceBranch(child.toString(), "adhoc-changes", ignored -> {});
+
+    assertEquals(unpushed, git(child, "rev-parse", "HEAD").trim(), "a force-move would lose this");
+    assertEquals(
+        git(origin, "rev-parse", "adhoc-changes").trim(),
+        git(child, "rev-parse", "refs/remotes/origin/adhoc-changes").trim(),
+        "the remote tip is still fetched, so the user can merge it");
+  }
+
+  /**
+   * An origin that cannot answer reads exactly like an origin without the branch. Only the log
+   * separates them, and without it a workspace nobody can commit from looks provisioned.
+   */
+  @Test
+  void anUnreachableOriginSaysSoRatherThanReadingAsNoSuchBranch(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path origin = originWith(tmp, "adhoc-changes");
+    Path child = materializedAtGitlink(tmp, origin);
+    git(child, "remote", "set-url", "origin", tmp.resolve("gone").toString());
+    List<DaemonMessage> log = new ArrayList<>();
+
+    Provisioner.checkoutWorkspaceBranch(child.toString(), "adhoc-changes", log::add);
+
+    assertEquals("HEAD", git(child, "rev-parse", "--abbrev-ref", "HEAD").trim());
+    assertTrue(
+        log.stream().anyMatch(m -> m instanceof DaemonLog entry && "WARN".equals(entry.level())),
+        "the question could not be asked, and that is not the same as a no");
+  }
+
+  /** A branch name is a bare git argument here, so it may never start reading as an option. */
+  @Test
+  void aBranchNameThatWouldReadAsAnOptionIsRefused(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path origin = originWith(tmp, "adhoc-changes");
+    Path child = materializedAtGitlink(tmp, origin);
+    String gitlink = git(child, "rev-parse", "HEAD").trim();
+
+    Provisioner.checkoutWorkspaceBranch(child.toString(), "--orphan", ignored -> {});
+
+    assertEquals(gitlink, git(child, "rev-parse", "HEAD").trim());
+  }
+
+  /** A repository serving {@code main} plus {@code branch}, with a commit on each. */
+  private static Path originWith(Path tmp, String branch) throws IOException, InterruptedException {
+    Path origin = Files.createDirectories(tmp.resolve("origin"));
+    git(origin, "init", "--quiet", "--initial-branch=main");
+    git(origin, "config", "user.email", "test@example.invalid");
+    git(origin, "config", "user.name", "Test");
+    git(origin, "commit", "--allow-empty", "-m", "first");
+    git(origin, "branch", branch);
+    git(origin, "switch", "--quiet", branch);
+    git(origin, "commit", "--allow-empty", "-m", "branch work");
+    git(origin, "switch", "--quiet", "main");
+    return origin;
+  }
+
+  /** What {@code git submodule update --init} leaves behind: a clone detached at the gitlink. */
+  private static Path materializedAtGitlink(Path tmp, Path origin)
+      throws IOException, InterruptedException {
+    Path child = tmp.resolve("child");
+    git(tmp, "clone", "--quiet", origin.toString(), child.toString());
+    git(child, "config", "user.email", "test@example.invalid");
+    git(child, "config", "user.name", "Test");
+    git(child, "switch", "--quiet", "--detach", "main");
+    return child;
   }
 
   @Test

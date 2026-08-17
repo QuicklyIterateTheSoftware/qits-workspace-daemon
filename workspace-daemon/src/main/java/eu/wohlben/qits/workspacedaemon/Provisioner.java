@@ -307,6 +307,15 @@ public final class Provisioner {
    * closure (the rejected option). Severity is bounded by the project model — a project is one
    * maintainer's curated repo set, so this is a naming mistake in their own project, not an outside
    * threat (see docs/guides/project-model.md).
+   *
+   * <p><b>Following the workspace branch is inferred from its name</b> ({@link
+   * #checkoutWorkspaceBranch}). The container is handed one branch name and no flag saying whether
+   * the workspace forked a whole tree, so any sibling that happens to carry a branch of that name
+   * is followed — including the case where the workspace branch <em>is</em> the sibling's main
+   * branch, which moves it off the recorded gitlink. That is right for an aggregate workspace (the
+   * host proved the branch was new in every repository before creating it) and it is a widening for
+   * an ordinary one. Settling it needs the host to say which kind of workspace this is, i.e. a new
+   * injected key on both sides, not a guess here.
    */
   private static void materializeSubmodules(
       String gitBase, Env env, String rel, int depth, Consumer<DaemonMessage> emit) {
@@ -371,6 +380,7 @@ public final class Provisioner {
                     + ")"));
         continue;
       }
+      checkoutWorkspaceBranch(childRel(rel, sub.path()), env.branch(), emit);
       present.add(sub);
     }
     for (Submodule sub : present) {
@@ -379,6 +389,104 @@ public final class Provisioner {
   }
 
   private record Submodule(String name, String path) {}
+
+  /**
+   * Follow the workspace branch in a submodule that carries it, once git has materialized the
+   * recorded gitlink.
+   *
+   * <p>An aggregate workspace creates the same branch in every repository of its closure, and a
+   * checkout parked on a detached gitlink can commit nothing to that branch. A repository without
+   * the branch keeps the detached gitlink — the behaviour every workspace had before.
+   *
+   * <p><b>The question is asked of the remote, not of the local clone.</b> The clone was made at
+   * the gitlink and knows nothing about a branch the host created after it. {@code ls-remote
+   * --exit-code} separates the three answers that matter: {@code 0} the branch is there, {@code 2}
+   * it is not (keep the gitlink, silently — that is the ordinary case), anything else the question
+   * could not be asked at all. The last one is announced: an unreachable or unauthenticated origin
+   * otherwise reads exactly like "no such branch" and produces a pinned checkout the user cannot
+   * commit from, with nothing in the provision log saying why.
+   *
+   * <p><b>Local work outranks the remote.</b> A container recreate deliberately preserves {@code
+   * /workspace}, so a submodule may already sit on this branch holding commits nobody pushed yet.
+   * The branch is therefore created from {@code origin} only when it does not exist locally, and
+   * never moved onto it — {@code switch -C} would have been one command and would have discarded
+   * those commits on the next boot.
+   *
+   * <p>{@code branch} is injected env and reaches git as a bare argument, so a leading dash is
+   * refused here rather than read as an option.
+   */
+  static void checkoutWorkspaceBranch(String child, String branch, Consumer<DaemonMessage> emit) {
+    if (branch == null || branch.isBlank() || branch.startsWith("-")) {
+      return;
+    }
+    Captured exists =
+        capture(
+            List.of(
+                "git",
+                "-C",
+                child,
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                "refs/heads/" + branch));
+    if (exists.exitCode() == 2) {
+      return;
+    }
+    if (exists.exitCode() != 0) {
+      emit.accept(
+          new DaemonLog(
+              "WARN",
+              "could not ask "
+                  + child
+                  + " whether it carries the workspace branch '"
+                  + branch
+                  + "' (ls-remote exited "
+                  + exists.exitCode()
+                  + ") — keeping the recorded gitlink"));
+      return;
+    }
+    // Forced refspec: a branch force-pushed since the last boot must not strand every later boot
+    // on a rejected non-fast-forward fetch.
+    int fetched =
+        runStreaming(
+            List.of(
+                "git",
+                "-C",
+                child,
+                "fetch",
+                "origin",
+                "+refs/heads/" + branch + ":refs/remotes/origin/" + branch),
+            emit);
+    int selected = fetched == 0 ? switchToWorkspaceBranch(child, branch, emit) : fetched;
+    if (selected != 0) {
+      emit.accept(
+          new DaemonLog("WARN", "could not select workspace branch '" + branch + "' in " + child));
+      return;
+    }
+    emit.accept(
+        new DaemonLog(
+            "INFO", child + " follows the workspace branch '" + branch + "', not its gitlink"));
+  }
+
+  /**
+   * Check out the workspace branch: the existing local branch as it stands, else a fresh tracking
+   * branch at the fetched remote tip. {@code --no-guess} keeps the first form from quietly becoming
+   * the second, so "keep local work" is a decision this method makes rather than one git's DWIM
+   * makes for it.
+   */
+  private static int switchToWorkspaceBranch(
+      String child, String branch, Consumer<DaemonMessage> emit) {
+    Captured localBranch =
+        capture(
+            List.of("git", "-C", child, "show-ref", "--verify", "--quiet", "refs/heads/" + branch));
+    return runStreaming(
+        localBranch.exitCode() == 0
+            ? List.of("git", "-C", child, "switch", "--no-guess", branch)
+            : List.of(
+                "git", "-C", child, "switch", "--create", branch, "--track", "origin/" + branch),
+        emit);
+  }
 
   /** Parse {@code git config --get-regexp} output lines ({@code submodule.<name>.path <path>}). */
   static List<Submodule> parseSubmodules(String getRegexpOutput) {
