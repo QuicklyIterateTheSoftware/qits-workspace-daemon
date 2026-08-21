@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.workspacedaemon.Provisioner.Env;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
@@ -18,25 +19,26 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Container-free coverage of the {@link Provisioner}'s pure decision helpers — url derivation,
- * name-vs-id addressing, {@code .gitmodules} parsing, and basename normalization. The end-to-end
+ * Container-free coverage of the {@link Provisioner}'s pure decision helpers — the git base,
+ * project-scoped vs. id addressing, {@code .gitmodules} parsing, and basename normalization. The
+ * end-to-end
  * clone + submodule walk (which touches {@code /workspace} and real git) is the extended
  * real-docker IT's job; here we pin the logic that decides <em>what</em> the daemon clones and how
  * it addresses submodule redirects, mirroring {@link WorkspaceDescriberTest}'s parse-only approach.
  */
 class ProvisionerTest {
 
-  private static final String DIAL_HOME = "ws://qits:8080/workspaces/daemon/ws-1";
+  private static final String GIT_BASE = "http://qits-githost:8080/git";
 
   private static Env env(String projectId, String repoName) {
     return env(projectId, repoName, "");
   }
 
   private static Env env(String projectId, String repoName, String gitBaseUrl) {
-    return new Env("ws-1", "repo-abc", "feature", projectId, repoName, DIAL_HOME, gitBaseUrl);
+    return new Env("ws-1", "repo-abc", "feature", projectId, repoName, gitBaseUrl);
   }
 
-  /** Collects the messages a derivation emits, so a silent fallback fails the test. */
+  /** Collects the messages a decision emits, so a silent refusal fails the test. */
   private static List<DaemonMessage> emitted(Env env) {
     List<DaemonMessage> out = new ArrayList<>();
     Provisioner.gitBase(env, out::add);
@@ -44,85 +46,102 @@ class ProvisionerTest {
   }
 
   @Test
-  void derivedGitBaseCarriesTheArtifactsSegment() {
-    assertEquals(
-        "http://qits:8080/artifacts/git",
-        Provisioner.derivedGitBase("ws://qits:8080/workspaces/daemon/ws-1"),
-        "the git host is qits-artifacts, and it serves its own segment on qits-net too");
-  }
-
-  @Test
-  void derivedGitBaseDerivesHttpsFromWss() {
-    assertEquals(
-        "https://host:443/artifacts/git",
-        Provisioner.derivedGitBase("wss://host:443/workspaces/daemon/x"));
-  }
-
-  @Test
-  void derivedGitBaseOmitsPortWhenAbsent() {
-    assertEquals(
-        "http://host/artifacts/git", Provisioner.derivedGitBase("ws://host/workspaces/daemon/x"));
-  }
-
-  @Test
-  void derivedGitBaseNullOnBlankOrUnparseable() {
-    assertNull(Provisioner.derivedGitBase(null));
-    assertNull(Provisioner.derivedGitBase(""));
-    assertNull(Provisioner.derivedGitBase("::::not a url"));
-  }
-
-  @Test
-  void anInjectedGitBaseWinsOverTheDerivedOneAndIsTakenSilently() {
-    Env env = env("proj-1", "my-repo", "http://qits-artifacts:8080/artifacts/git/");
+  void anInjectedGitBaseIsTakenSilently() {
+    Env env = env("proj-1", "my-repo", GIT_BASE + "/");
 
     assertEquals(
-        "http://qits-artifacts:8080/artifacts/git",
+        GIT_BASE,
         Provisioner.gitBase(env, m -> {}),
         "trailing slash trimmed, so rootUrl never doubles it");
     assertTrue(
         emitted(env).isEmpty(), "a configured host is not an assumption worth warning about");
   }
 
+  /**
+   * The derivation this replaced built {@code <control-socket authority>/artifacts/git}, a host that
+   * serves no git since the byte-plane split. A missing setting has to read as a missing setting.
+   */
   @Test
-  void aDerivedGitBaseSaysSoRatherThanCloningQuietlyFromTheControlSocketsHost() {
+  void noInjectedGitBaseRefusesToCloneRatherThanGuessingAHost() {
     Env env = env("proj-1", "my-repo");
 
-    assertEquals("http://qits:8080/artifacts/git", Provisioner.gitBase(env, m -> {}));
+    assertNull(Provisioner.gitBase(env, m -> {}));
     assertTrue(
         emitted(env).stream()
-            .anyMatch(m -> m instanceof DaemonLog log && log.message().contains("qits-artifacts")),
-        "the single-authority assumption has to be visible where a wrong host is a bare"
-            + " connection error");
+            .anyMatch(
+                m ->
+                    m instanceof DaemonLog log
+                        && "WARN".equals(log.level())
+                        && log.message().contains("qits.workspace-daemon.git-base-url")),
+        "the refusal names the key nobody set");
   }
 
   @Test
-  void rootUrlIsNameAddressedWhenProjectScopePresent() {
+  void rootUrlIsProjectScopedWhenBothScopeValuesArePresent() {
     assertEquals(
-        "http://qits:8080/artifacts/git/my-repo",
-        Provisioner.rootUrl("http://qits:8080/artifacts/git", env("proj-1", "my-repo")));
+        GIT_BASE + "/proj-1/my-repo", Provisioner.rootUrl(GIT_BASE, env("proj-1", "my-repo")));
   }
 
+  /**
+   * The public address is {@code (projectId, repoName)}; half of it addresses nothing. A container
+   * created before the scoped form shipped carries the id-addressed storage route instead — the one
+   * route this daemon can still prove exists.
+   */
   @Test
-  void rootUrlFallsBackToIdAddressedWhenScopeBlank() {
+  void rootUrlFallsBackToTheIdAddressedRouteWhenEitherHalfIsBlank() {
+    assertEquals(GIT_BASE + "/repo-abc", Provisioner.rootUrl(GIT_BASE, env("", "")));
+    assertEquals(GIT_BASE + "/repo-abc", Provisioner.rootUrl(GIT_BASE, env("proj-1", "")));
+    assertEquals(GIT_BASE + "/repo-abc", Provisioner.rootUrl(GIT_BASE, env("", "my-repo")));
+    assertFalse(Provisioner.nameAddressed(env("proj-1", "")));
+    assertFalse(Provisioner.nameAddressed(env("", "my-repo")));
+    assertTrue(Provisioner.nameAddressed(env("proj-1", "my-repo")));
+  }
+
+  /** A project's repositories are siblings under the project segment, never below the bare base. */
+  @Test
+  void aSubmoduleIsRedirectedToTheSiblingUnderTheSameProjectSegment() {
     assertEquals(
-        "http://qits:8080/artifacts/git/repo-abc",
-        Provisioner.rootUrl("http://qits:8080/artifacts/git", env("", "")));
+        GIT_BASE + "/proj-1/sibling",
+        Provisioner.siblingUrl(GIT_BASE, env("proj-1", "my-repo"), "../sibling.git"));
+    assertEquals(
+        GIT_BASE + "/proj-1/sibling",
+        Provisioner.siblingUrl(GIT_BASE, env("proj-1", "my-repo"), "https://github.com/o/sibling"),
+        "an external absolute origin stays inside this project's imported siblings");
+    assertEquals(
+        GIT_BASE + "/sibling",
+        Provisioner.siblingUrl(GIT_BASE, env("", ""), "../sibling.git"),
+        "an id-addressed checkout keeps the flat form its storage-id-equals-name world serves");
   }
 
   @Test
-  void aPreservedCheckoutIsRetargetedToTheNameAddressedOrigin(@TempDir Path checkout)
+  void aPreservedCheckoutIsRetargetedToTheProjectScopedOrigin(@TempDir Path checkout)
       throws IOException, InterruptedException {
     Env env = env("proj-1", "my-repo");
     git(checkout, "init");
-    git(checkout, "remote", "add", "origin", "http://qits:8080/artifacts/git/legacy-uuid");
+    git(checkout, "remote", "add", "origin", GIT_BASE + "/legacy-uuid");
+
+    assertTrue(
+        Provisioner.alignExistingCheckoutOrigin(checkout.toFile(), GIT_BASE, env, ignored -> {}));
+    assertEquals(
+        GIT_BASE + "/proj-1/my-repo",
+        git(checkout, "remote", "get-url", "origin").trim(),
+        "a preserved volume must not keep resolving relative submodules beside its UUID");
+  }
+
+  /**
+   * The flat form a pre-cutover container was handed. Retargeting it needs both scope values, and
+   * with either absent the inherited origin is the only route left — so it stays.
+   */
+  @Test
+  void aPreservedCheckoutWithoutBothScopeValuesKeepsItsOrigin(@TempDir Path checkout)
+      throws IOException, InterruptedException {
+    git(checkout, "init");
+    git(checkout, "remote", "add", "origin", GIT_BASE + "/my-repo");
 
     assertTrue(
         Provisioner.alignExistingCheckoutOrigin(
-            checkout.toFile(), "http://qits:8080/artifacts/git", env, ignored -> {}));
-    assertEquals(
-        "http://qits:8080/artifacts/git/my-repo",
-        git(checkout, "remote", "get-url", "origin").trim(),
-        "a preserved volume must not keep resolving relative submodules beside its UUID");
+            checkout.toFile(), GIT_BASE, env("", "my-repo"), ignored -> {}));
+    assertEquals(GIT_BASE + "/my-repo", git(checkout, "remote", "get-url", "origin").trim());
   }
 
   private static String git(Path directory, String... arguments)
@@ -135,18 +154,15 @@ class ProvisionerTest {
     return output;
   }
 
+  /** No checkout is better than a checkout from a host nobody named. */
   @Test
-  void aProjectIdAloneDoesNotNameAddressAnything() {
-    // The project id now ships on its own (it scopes the coding agents' MCP urls, D2), while the
-    // repo name stays blank until name-addressed git serving exists. It must not flip the clone —
-    // or the absolute-submodule redirect, which shares this exact predicate — onto a
-    // /git/<projectId>/<name> route the git host does not serve.
-    assertEquals(
-        "http://qits:8080/artifacts/git/repo-abc",
-        Provisioner.rootUrl(
-            "http://qits:8080/artifacts/git", env("53c78589-6af3-4221-b3ef-315c867b0863", "")));
-    assertFalse(Provisioner.nameAddressed(env("53c78589-6af3-4221-b3ef-315c867b0863", "")));
-    assertTrue(Provisioner.nameAddressed(env("proj-1", "my-repo")));
+  void aProvisionWithNoGitBaseFailsInsteadOfCloning() {
+    List<DaemonMessage> out = new ArrayList<>();
+
+    assertFalse(Provisioner.provision(env("proj-1", "my-repo"), out::add));
+    assertTrue(
+        out.getLast() instanceof ProvisionFailed failed
+            && failed.message().contains("qits.workspace-daemon.git-base-url"));
   }
 
   /**
@@ -155,34 +171,28 @@ class ProvisionerTest {
    * RFC 3986 would first discard {@code my-repo} as a filename and land a level too high.
    *
    * <p>Verified against real git rather than assumed: a superproject whose {@code origin} is {@code
-   * http://qits-artifacts:8080/artifacts/git/my-repo} with {@code submodule.sib.url=../sib}
-   * resolves, under {@code git submodule sync}, to {@code
-   * http://qits-artifacts:8080/artifacts/git/sib}.
+   * http://qits-githost:8080/git/proj-1/my-repo} with {@code submodule.sib.url=../sib} resolves,
+   * under {@code git submodule sync}, to {@code http://qits-githost:8080/git/proj-1/sib}.
    */
   private static String gitRelative(String remote, String relative) {
     return remote.substring(0, remote.lastIndexOf('/')) + "/" + relative.substring("../".length());
   }
 
   /**
-   * Both name- and id-addressed clone urls are exactly one segment below the base. That is the
-   * githost contract and what lets a relative submodule land on a sibling repository.
+   * A relative submodule url has to land on a repository of the <b>same project</b>. That works
+   * because the project segment sits above the repository name in the clone url, so dropping one
+   * segment keeps it.
    */
   @Test
-  void theArtifactsPrefixDoesNotChangeHowManySegmentsSitBelowTheBase() {
-    String base = "http://qits-artifacts:8080/artifacts/git";
-
+  void aRelativeSubmoduleUrlStaysInsideTheProjectSegment() {
     assertEquals(
-        "/my-repo",
-        Provisioner.rootUrl(base, env("proj-1", "my-repo")).substring(base.length()),
-        "name-addressed: one segment below the base");
+        GIT_BASE + "/proj-1/sibling",
+        gitRelative(Provisioner.rootUrl(GIT_BASE, env("proj-1", "my-repo")), "../sibling"),
+        "a relative submodule url lands on this project's sibling repository");
     assertEquals(
-        "/repo-abc",
-        Provisioner.rootUrl(base, env("", "")).substring(base.length()),
-        "id-addressed: one segment below the base");
-    assertEquals(
-        "http://qits-artifacts:8080/artifacts/git/sibling",
-        gitRelative(Provisioner.rootUrl(base, env("proj-1", "my-repo")), "../sibling"),
-        "a relative submodule url lands on the sibling repository");
+        GIT_BASE + "/sibling",
+        gitRelative(Provisioner.rootUrl(GIT_BASE, env("", "")), "../sibling"),
+        "id-addressed: one segment below the base, as the flat world served it");
   }
 
   @Test

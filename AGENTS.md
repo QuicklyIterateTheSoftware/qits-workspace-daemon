@@ -111,9 +111,10 @@ took the control-socket url apart and appended `/mcp/<server>`, and `gitBase` di
 qits-projects and qits-observability, git is qits-artifacts, the control socket is qits-workspaces —
 and it was wrong *before* the paths changed. The paths only made it visible.
 
-Both derivations survive as **fallbacks**, because the container is still handed exactly one address
-and nobody has decided whether that address is the gateway. What is left open is a *topology*
-question — which host each segment belongs to — and inventing an answer here would be guessing.
+The MCP derivation survives as a **fallback**, because the container is still handed exactly one
+address and nobody has decided whether that address is the gateway. What is left open is a *topology*
+question — which host each segment belongs to — and inventing an answer here would be guessing. The
+git one is gone outright: see the list below.
 
 The websocket half of it is **closed**, and this file used to say otherwise: there is no
 `SameOriginUpgradeCheck` in the Quarkus the gateway builds against and there never was. The shipped
@@ -125,14 +126,16 @@ that fails through the gateway, it is not an origin check.
 
 What is not allowed is deriving an address **silently**:
 
-- an explicit key exists for every derived address — `qits.workspace-daemon.git-base-url`,
-  `qits.repository-mcp.url`, `qits.observability-mcp.url` — and wins outright when set;
-- taking the fallback says so, at the point it is taken: a `DaemonLog` `WARN` from `Provisioner`,
-  a logged `WARN` from `DaemonMcpEndpoints`;
-- an address with no derivable form at all **throws** rather than being made up.
+- an explicit key exists for every derived address — `qits.repository-mcp.url`,
+  `qits.observability-mcp.url` — and wins outright when set;
+- taking the fallback says so, at the point it is taken: a logged `WARN` from `DaemonMcpEndpoints`;
+- an address with no derivable form at all **fails loudly** rather than being made up.
   `qits.actions-mcp.url` is that case: no service in the split serves the `actions` MCP server
   (`migration-plan.md` §9 item 6), so an ACTIONS-scope launch fails with that sentence instead of
-  handing the agent a URL that 404s.
+  handing the agent a URL that 404s. **`qits.workspace-daemon.git-base-url` joined it**: its
+  fallback derived `<control-socket authority>/artifacts/git`, a host that stopped serving git at
+  the byte-plane split, so the guess bought nothing over naming the missing key. Unset ⇒
+  `Provisioner` emits its `DaemonLog` `WARN` and reports `ProvisionFailed`.
 
 That last point is the shape of the whole rule. A wrong address here fails as a connection error or
 a 404, and a 404 from an MCP server surfaces to the user as *a tool that isn't there* — the launch

@@ -141,18 +141,19 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.parent")
   Optional<String> parentConfig;
 
-  // The project-scoped name the daemon self-clones under (<gitBase>/<projectId>/<repoName>), so
-  // committed relative submodule urls resolve natively (docs/epics/qits-workspace-daemon/ Part 1).
-  // Blank ⇒ the Provisioner id-addresses (<gitBase>/<repositoryId>).
+  // The project-scoped address the daemon self-clones from (<gitBase>/<projectId>/<repoName>), so
+  // committed relative submodule urls resolve against the project's siblings
+  // (docs/epics/qits-workspace-daemon/ Part 1). BOTH halves are needed: either one blank ⇒ the
+  // Provisioner falls back to the internal id-addressed route (<gitBase>/<repositoryId>).
   @ConfigProperty(name = "qits.workspace-daemon.project-id")
   Optional<String> projectIdConfig;
 
   @ConfigProperty(name = "qits.workspace-daemon.repo-name")
   Optional<String> repoNameConfig;
 
-  // The git host the self-clone reads from: qits-artifacts, serving /artifacts/git/... Unset ⇒ the
-  // Provisioner derives it from the dial-home authority and says so in a WARN, because that is a
-  // guess about a different service's host (see Provisioner's javadoc).
+  // The git host the self-clone reads from: qits-githost, serving /git/<projectId>/<repoName>.
+  // Unset ⇒ the Provisioner refuses to clone and says so, because the git host's address is not
+  // derivable from this one (see Provisioner's javadoc).
   @ConfigProperty(name = "qits.workspace-daemon.git-base-url")
   Optional<String> gitBaseUrlConfig;
 
@@ -499,7 +500,6 @@ public class ControlSocket {
               branch,
               projectId,
               repoName,
-              url.get(),
               gitBaseUrlConfig.orElse(""));
       workers.execute(
           () -> {

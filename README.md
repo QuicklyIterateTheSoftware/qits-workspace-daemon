@@ -191,16 +191,20 @@ Four different services, on four hosts on `qits-net`. Every address follows
 | What | Path | Served by | Where the host comes from |
 |---|---|---|---|
 | the control socket | `/workspaces/daemon/{workspaceId}` | qits-workspaces | `qits.workspace-daemon.url`, injected — the whole url, dialled verbatim |
-| the self-clone origin | `/artifacts/git/{repoId}` or `/artifacts/git/{projectId}/{repoName}` | qits-artifacts | `qits.workspace-daemon.git-base-url` if injected, else **derived** |
+| the self-clone origin | `/git/{projectId}/{repoName}` (or `/git/{repoId}` with the scope absent) | qits-githost | `qits.workspace-daemon.git-base-url`, injected — **no fallback** |
 | MCP `repository` | `/projects/mcp` | qits-projects | `qits.repository-mcp.url` if set, else **derived** |
 | MCP `observability` | `/observability/mcp` | qits-observability | `qits.observability-mcp.url` if set, else **derived** |
 | MCP `actions` | — | nobody | `qits.actions-mcp.url` only; unset ⇒ an ACTIONS launch fails saying so |
 
 **"Derived" means the authority of the control-socket url, and that is an assumption.** It is only
-right where one authority routes every segment — i.e. where the daemon was handed the gateway. Only
-one address is genuinely told to the container today, and it is qits-workspaces'. So each derivation
-announces itself: the git base as a `DaemonLog` `WARN` at provision time, the MCP hosts as a `WARN`
-at agent-wiring time. Nothing here silently invents a host and then fails as a 404 nobody sees.
+right where one authority routes every segment — i.e. where the daemon was handed the gateway. So
+each derivation announces itself as a `WARN` at agent-wiring time. Nothing here silently invents a
+host and then fails as a 404 nobody sees.
+
+**The git base is no longer among them.** It used to derive `<control-socket authority>/artifacts/git`
+with a `WARN`. That named a pre-split host which serves no git at all, so the derivation could only
+turn a missing setting into a connection error against the wrong service. Unset now fails the
+provision with a `DaemonLog` `WARN` naming the key.
 
 What is still unsettled is which host serves each segment. The websocket question that used to sit
 beside it is settled: the gateway forwards an upgrade through `EdgeHeaders.applyToUpgrade`, one path
