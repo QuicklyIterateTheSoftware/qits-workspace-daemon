@@ -116,7 +116,8 @@ steps:
       #
       # The step self-identifies entirely from injected environment, so no deployment address is
       # spelled here: $QITS_WORKSPACES_URL is qits-workspaces' root (scheme, host and port, no path
-      # — the path is the caller's to spell), $QITS_CI_REPO_ID and $QITS_CI_BRANCH are this run's.
+      # — the path is the caller's to spell), and $QITS_CI_PROJECT_ID, $QITS_CI_REPO_NAME and
+      # $QITS_CI_BRANCH are this run's.
       #
       # Statuses: 200 is the receipt and prints it, a 409 saying the branch is already released is a
       # replayed push finding its work done and is a success, and everything else is red with the
@@ -207,5 +208,5 @@ steps:
           console.error(`release call failed: ${err.message}`);
           process.exit(1);
         });
-      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?repositoryId=$QITS_CI_REPO_ID" \
+      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?projectId=$QITS_CI_PROJECT_ID&repositoryName=$QITS_CI_REPO_NAME" \
         "$QITS_CI_BRANCH" "$summary"
