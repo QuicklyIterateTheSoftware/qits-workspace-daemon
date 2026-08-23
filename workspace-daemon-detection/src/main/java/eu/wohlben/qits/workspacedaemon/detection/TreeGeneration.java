@@ -41,6 +41,9 @@ public final class TreeGeneration {
    * The one normalization every producer of the path list owes: drop blanks, dedupe, sort. {@code
    * ls-files --cached --others} can list the same path twice (staged and on disk), and its order is
    * index order, not lexical — both would otherwise make two identical trees hash differently.
+   * {@link DetectionService} no longer calls this — it takes the already-normalized list straight
+   * from {@code WorkspaceTreeScan}, the same producer the file listing hashes — but the contract
+   * stands for any future producer that arrives with raw output.
    */
   public static List<String> normalize(String lsFilesOutput) {
     return lsFilesOutput.lines().filter(line -> !line.isBlank()).distinct().sorted().toList();

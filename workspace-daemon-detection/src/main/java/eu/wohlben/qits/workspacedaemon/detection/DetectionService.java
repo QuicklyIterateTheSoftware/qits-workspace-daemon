@@ -4,6 +4,7 @@ import eu.wohlben.qits.workspacedaemon.detection.FrameworkDetection.DetectedProj
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFiles;
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFiles.Entry;
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFiles.EntryType;
+import eu.wohlben.qits.workspacedaemon.files.WorkspaceTreeScan;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -121,9 +122,11 @@ public final class DetectionService {
   }
 
   private Detection scan() {
-    List<String> paths =
-        TreeGeneration.normalize(
-            files.git("ls-files", "--cached", "--others", "--exclude-standard"));
+    // The same submodule-aware walk the file listing serves, and it must be: the generation token
+    // below is compared byte-for-byte against the listing's, so the two path lists have to come
+    // from the one producer. It also means a framework rooted inside a submodule is detected like
+    // any other — which, in a workspace that is mostly submodules, is most of them.
+    List<String> paths = WorkspaceTreeScan.of(files).eagerPaths();
 
     // Consult the declared frameworks first (a config hint/override), then fall back to
     // marker-based detection for everything not declared. Declared entries win on the (kind, root)

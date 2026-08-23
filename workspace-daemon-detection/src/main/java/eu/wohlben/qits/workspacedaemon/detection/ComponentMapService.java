@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspacedaemon.detection;
 
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFiles;
+import eu.wohlben.qits.workspacedaemon.files.WorkspaceTreeScan;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -90,15 +91,38 @@ public final class ComponentMapService {
 
   /**
    * The {@code .ts} files mentioning {@code @Component}, tracked and untracked alike (uncommitted
-   * agent edits are the whole point of scanning the working tree). {@code git grep} exits non-zero
-   * when nothing matches, which {@link WorkspaceFiles#git} surfaces as an exception — treated as
-   * "no candidates" here. That also swallows a genuine grep failure, deliberately: the endpoint's
-   * contract is an empty map over an error.
+   * agent edits are the whole point of scanning the working tree). Run per repository — the
+   * superproject and each initialized submodule — because {@code git grep --untracked} refuses
+   * {@code --recurse-submodules}, and a workspace that is mostly submodules would otherwise map no
+   * components at all. {@code git grep} exits non-zero when nothing matches, which {@link
+   * WorkspaceFiles#git} surfaces as an exception — treated as "no candidates" here, per repository.
+   * That also swallows a genuine grep failure, deliberately: the endpoint's contract is an empty
+   * map over an error.
    */
   private List<String> candidateFiles() {
+    List<String> candidates = new ArrayList<>();
+    candidates.addAll(grepComponents(""));
+    for (String submodule : WorkspaceTreeScan.of(files).initializedSubmodules()) {
+      candidates.addAll(grepComponents(submodule));
+    }
+    return List.copyOf(candidates);
+  }
+
+  /** One repository's candidates, workspace-root-relative ({@code ""} = the superproject). */
+  private List<String> grepComponents(String prefix) {
     String output;
     try {
-      output = files.git("grep", "-l", "--untracked", "-e", "@Component", "--", "*.ts");
+      output =
+          files.git(
+              "-C",
+              prefix.isEmpty() ? "." : prefix,
+              "grep",
+              "-l",
+              "--untracked",
+              "-e",
+              "@Component",
+              "--",
+              "*.ts");
     } catch (RuntimeException e) {
       return List.of();
     }
@@ -107,6 +131,7 @@ public final class ComponentMapService {
         .map(String::trim)
         .filter(line -> !line.isEmpty())
         .filter(line -> !line.endsWith(".spec.ts"))
+        .map(line -> prefix.isEmpty() ? line : prefix + "/" + line)
         .toList();
   }
 }

@@ -41,7 +41,8 @@ class GitignoreLazyDirectoryStrategyTest {
     Files.writeString(root.resolve("dist/b.js"), "y");
     Files.writeString(root.resolve("keep.ts"), "z");
 
-    assertEquals(List.of("dist", "node_modules"), strategy.lazyDirectories(files));
+    assertEquals(
+        List.of("dist", "node_modules"), strategy.lazyDirectories(files, WorkspaceTreeScan.of(files)));
   }
 
   @Test
@@ -50,7 +51,7 @@ class GitignoreLazyDirectoryStrategyTest {
     Files.createDirectories(root.resolve("node_modules/a/b/c"));
     Files.writeString(root.resolve("node_modules/a/b/c/deep.js"), "x");
 
-    List<String> dirs = strategy.lazyDirectories(files);
+    List<String> dirs = strategy.lazyDirectories(files, WorkspaceTreeScan.of(files));
 
     // --directory collapses the whole ignored tree to one stub — nested dirs are NOT enumerated
     assertEquals(List.of("node_modules"), dirs);
@@ -63,7 +64,7 @@ class GitignoreLazyDirectoryStrategyTest {
     Files.writeString(root.resolve("stray.log"), "l");
     Files.createDirectories(root.resolve("build")); // empty → --no-empty-directory drops it
 
-    List<String> dirs = strategy.lazyDirectories(files);
+    List<String> dirs = strategy.lazyDirectories(files, WorkspaceTreeScan.of(files));
 
     // an ignored *file* is not a lazy dir; an empty ignored dir is dropped
     assertTrue(dirs.isEmpty(), () -> "expected no lazy dirs but got " + dirs);

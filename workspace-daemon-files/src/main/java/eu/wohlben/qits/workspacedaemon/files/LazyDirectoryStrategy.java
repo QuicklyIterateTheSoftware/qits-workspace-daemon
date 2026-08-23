@@ -26,6 +26,9 @@ public interface LazyDirectoryStrategy {
    * it marks lazy.
    *
    * @param files the workspace's filesystem seam, rooted at the checkout this daemon owns
+   * @param scan the tree walk the listing already paid for, so a strategy that covers submodules
+   *     ({@link GitignoreLazyDirectoryStrategy} does) takes the initialized-submodule list from it
+   *     instead of re-deriving the walk
    */
-  List<String> lazyDirectories(WorkspaceFiles files);
+  List<String> lazyDirectories(WorkspaceFiles files, WorkspaceTreeScan scan);
 }

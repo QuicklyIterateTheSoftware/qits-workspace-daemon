@@ -57,7 +57,28 @@ final class FakeWorkspaceFiles implements WorkspaceFiles {
   @Override
   public String git(String... args) {
     List<String> argv = List.of(args);
+    // The production callers now address a repository explicitly (`git -C . …` for the
+    // superproject); this fake models a workspace without submodules, so `.` is the only
+    // repository it will answer for.
+    if (argv.size() >= 2 && argv.get(0).equals("-C")) {
+      if (!argv.get(1).equals(".")) {
+        throw new UnsupportedOperationException("this fake has no submodules: git " + argv);
+      }
+      argv = argv.subList(2, argv.size());
+    }
     if (!argv.isEmpty() && argv.get(0).equals("ls-files")) {
+      if (argv.contains("--stage")) {
+        // <mode> <sha> <stage>\t<path> — what WorkspaceTreeScan parses; everything is an ordinary
+        // blob here (no gitlinks), replayed unsorted and with duplicates kept, as before.
+        return lsFilesOrder.stream()
+            .map(p -> "100644 0000000000000000000000000000000000000000 0\t" + p)
+            .reduce("", (acc, line) -> acc + line + "\n");
+      }
+      if (argv.contains("--others")) {
+        // The fake keeps no tracked/untracked distinction — every registered file replays as
+        // tracked through the --stage call above, so the untracked half is empty.
+        return "";
+      }
       return String.join("\n", lsFilesOrder) + "\n";
     }
     if (argv.size() >= 6 && argv.get(0).equals("grep")) {
