@@ -42,8 +42,9 @@ import org.jboss.logging.Logger;
  * bounded cadence instead of going silent forever.
  *
  * <p>Dedup is on the full working-tree <b>marker</b> (sha256 of {@code git status --porcelain=v2
- * --branch -uall} + {@code git diff}), not the {@code clean} boolean — the same algorithm the host
- * {@code WorkingTreeMarker} used. This preserves the "files changed" signal on a dirty→dirty edit
+ * --branch -uall} + {@code git diff} + the recursive per-submodule {@code status --porcelain=v2
+ * -uall}, see {@link #settleFromGit}), not the {@code clean} boolean — the superproject halves are
+ * the same algorithm the host {@code WorkingTreeMarker} used. This preserves the "files changed" signal on a dirty→dirty edit
  * (a second file touched while the tree is already dirty) that a bare boolean would swallow, while
  * still ignoring churn under an excluded/gitignored path. The heavy build dirs, the noisy {@code
  * .git/objects}/{@code .git/logs}, and the remote-tracking bookkeeping ({@code
@@ -244,17 +245,36 @@ final class GitStatusMonitor {
     settleAction.run();
   }
 
-  /** Fork the two git reads and feed them to {@link #settle}. */
+  /** Fork the git reads and feed them to {@link #settle}. */
   private void settleFromGit() {
-    // --no-optional-locks: neither read takes .git/index.lock (git skips the opportunistic index
+    // --no-optional-locks: no read takes .git/index.lock (git skips the opportunistic index
     // refresh), so the recompute can never race a concurrent commit/push for that lock. This is
     // what
     // lets the debounce be a short quiescence gate rather than the 20s lock-avoidance window it
     // once
     // had to be (see the class javadoc and the resolved index.lock-contention issue).
+    //
+    // The recursive submodule status joins the *marker* input only, not the status the clean flag
+    // is parsed from. Both halves are deliberate. A workspace's .gitmodules says `ignore = all`
+    // (gitlink drift is the expected state there, so the badge must not see it), which also hides
+    // an agent's edits *inside* a submodule from the superproject reads — without this third
+    // capture the marker never moved and the file tree never learned to refetch. And it stays out
+    // of the clean flag because each submodule's own status shows worktree edits but not the
+    // drift, so folding it into `dirty` would change badge (and release-gate) semantics — a
+    // decision that is not this monitor's to take. `--quiet` keeps foreach's "Entering …" banner
+    // out of the hash, which would otherwise move it when a submodule is added.
+    String submoduleStatus =
+        capture(
+            "git",
+            "submodule",
+            "--quiet",
+            "foreach",
+            "--recursive",
+            "git --no-optional-locks status --porcelain=v2 -uall");
     settle(
         capture("git", "--no-optional-locks", "status", "--porcelain=v2", "--branch", "-uall"),
-        capture("git", "--no-optional-locks", "diff"));
+        capture("git", "--no-optional-locks", "diff")
+            + (submoduleStatus.isBlank() ? "" : "\n" + submoduleStatus));
   }
 
   /**
