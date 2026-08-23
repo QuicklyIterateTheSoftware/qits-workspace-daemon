@@ -56,9 +56,10 @@ public final class WorkspaceFileBrowser {
   /**
    * Lists a level of the workspace. With no {@code path} this is the root: eager files from {@code
    * git ls-files --cached --others --exclude-standard} (tracked + new untracked, gitignore
-   * honoured) plus the directories the active laziness strategy marked as lazy stubs. With a {@code
-   * path} it is that one directory's immediate listing (a lazy directory git refuses to walk), so
-   * arbitrarily deep lazy nesting resolves through the same call.
+   * honoured), walked through every initialized submodule by {@link WorkspaceTreeScan}, plus the
+   * directories the active laziness strategy marked as lazy stubs. With a {@code path} it is that
+   * one directory's immediate listing (a lazy directory git refuses to walk), so arbitrarily deep
+   * lazy nesting resolves through the same call.
    */
   public FileListing listFiles(String path) {
     if (path == null || path.isBlank()) {
@@ -69,16 +70,21 @@ public final class WorkspaceFileBrowser {
 
   /** The eager (non-lazy) tree from the workspace root, with the strategy's lazy dirs alongside. */
   private FileListing listRoot() {
-    List<String> paths =
-        WorkspaceTreeFingerprint.normalize(
-            files.git("ls-files", "--cached", "--others", "--exclude-standard"));
+    WorkspaceTreeScan scan = WorkspaceTreeScan.of(files);
 
-    List<LazyDir> lazyDirs =
-        strategy().lazyDirectories(files).stream()
-            .map(dir -> new LazyDir(dir, files.childCount(dir)))
-            .toList();
-    // The root already holds the whole-tree ls-files, so fingerprint it directly (no second call).
-    return new FileListing(paths, lazyDirs, WorkspaceTreeFingerprint.of(paths));
+    List<LazyDir> lazyDirs = new ArrayList<>();
+    for (String dir : strategy().lazyDirectories(files, scan)) {
+      lazyDirs.add(new LazyDir(dir, files.childCount(dir)));
+    }
+    // An uninitialized (or broken) submodule is a stub too: dimmed and openable beats invisible,
+    // and beats the bare gitlink path this listing used to serve — a "file" that 404s on open.
+    for (String sub : scan.uninitializedSubmodules()) {
+      lazyDirs.add(new LazyDir(sub, files.childCount(sub)));
+    }
+    lazyDirs.sort(Comparator.comparing(LazyDir::path));
+    // The scan already holds the whole normalized tree, so fingerprint it directly (no second walk).
+    return new FileListing(
+        scan.eagerPaths(), lazyDirs, WorkspaceTreeFingerprint.of(scan.eagerPaths()));
   }
 
   /**

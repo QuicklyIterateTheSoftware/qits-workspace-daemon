@@ -117,6 +117,55 @@ class WorkspaceFileBrowserTest {
     assertNotEquals(rootGeneration, browser.listFiles(null).generation());
   }
 
+  // --- submodules ----------------------------------------------------------------------------
+
+  @Test
+  void submoduleContentsAreListedEagerlyRatherThanAsAnOpaqueGitlink() throws Exception {
+    submoduleFixture();
+    // an agent's uncommitted work inside the submodule is part of the working tree too
+    Files.writeString(root.resolve("sub/notes.txt"), "wip\n");
+
+    FileListing listing = browser.listFiles(null);
+
+    // the submodule's files appear under their workspace-relative paths, tracked and new alike…
+    assertTrue(listing.paths().contains("sub/src/app.ts"), () -> listing.paths().toString());
+    assertTrue(listing.paths().contains("sub/notes.txt"));
+    // …and the gitlink itself is gone: served as a path it rendered as a file that 404s on open
+    assertFalse(listing.paths().contains("sub"));
+    // the submodule's own gitignore draws its own lazy boundary, prefixed like everything else
+    assertEquals(1, onlyLazyDir(listing, "sub/node_modules").childCount());
+    assertFalse(listing.paths().stream().anyMatch(p -> p.startsWith("sub/node_modules/")));
+  }
+
+  @Test
+  void uninitializedSubmoduleIsACollapsedStubRatherThanAPhantomFile() throws Exception {
+    submoduleFixture();
+    files.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x");
+    // a plain clone leaves the gitlink as git's empty placeholder directory — no checkout behind it
+    Path clone = outside.resolve("clone");
+    files.git("clone", "--quiet", root.toString(), clone.toString());
+    WorkspaceFileBrowser cloned = new WorkspaceFileBrowser(new LocalWorkspaceFiles(clone));
+
+    FileListing listing = cloned.listFiles(null);
+
+    assertFalse(listing.paths().contains("sub"));
+    assertFalse(listing.paths().stream().anyMatch(p -> p.startsWith("sub/")));
+    assertEquals(0, onlyLazyDir(listing, "sub").childCount());
+    // and opening the stub answers an empty level, never an error
+    assertEquals(List.of(), cloned.listFiles("sub").paths());
+  }
+
+  @Test
+  void generationMovesWhenAFileAppearsInsideASubmodule() throws Exception {
+    submoduleFixture();
+
+    String before = browser.listFiles(null).generation();
+    Files.writeString(root.resolve("sub/added.ts"), "x\n");
+
+    // structural change inside a submodule is a structural change of the workspace tree
+    assertNotEquals(before, browser.listFiles(null).generation());
+  }
+
   // --- file content --------------------------------------------------------------------------
 
   @Test
@@ -256,6 +305,29 @@ class WorkspaceFileBrowserTest {
   }
 
   // --- fixtures ------------------------------------------------------------------------------
+
+  /**
+   * A committed submodule at {@code sub}: a tracked source file, and an ignored {@code
+   * node_modules} of the submodule's own. The origin lives in {@code outside} (here standing in for
+   * "any other repository", not for an escape) because {@code submodule add} clones it into the
+   * workspace. {@code protocol.file.allow} is git's post-2.38 default refusal of local-path
+   * submodule clones — fine to open for a fixture this test itself just built.
+   */
+  private void submoduleFixture() throws Exception {
+    Path origin = outside.resolve("sub-origin");
+    Files.createDirectories(origin.resolve("src"));
+    LocalWorkspaceFiles originGit = new LocalWorkspaceFiles(origin);
+    originGit.git("init", "--quiet");
+    Files.writeString(origin.resolve("src/app.ts"), "x\n");
+    Files.writeString(origin.resolve(".gitignore"), "node_modules/\n");
+    originGit.git("add", ".");
+    originGit.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "i");
+
+    files.git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", origin.toString(), "sub");
+    Files.createDirectories(root.resolve("sub/node_modules/pkg"));
+    Files.writeString(root.resolve("sub/node_modules/pkg/index.js"), "y\n");
+  }
 
   /** The canonical lazy-boundary fixture: an ignored {@code node_modules} with a nested package. */
   private void ignoredNodeModules() throws Exception {

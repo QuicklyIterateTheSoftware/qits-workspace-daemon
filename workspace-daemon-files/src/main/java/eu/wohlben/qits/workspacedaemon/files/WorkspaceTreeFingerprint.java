@@ -23,10 +23,11 @@ public final class WorkspaceTreeFingerprint {
   private WorkspaceTreeFingerprint() {}
 
   /**
-   * Fetches {@code ls-files} and fingerprints it. Use when you don't already hold the path list.
+   * Walks the tree ({@link WorkspaceTreeScan}, submodules included) and fingerprints it. Use when
+   * you don't already hold the path list.
    */
   public static String compute(WorkspaceFiles files) {
-    return of(normalize(files.git("ls-files", "--cached", "--others", "--exclude-standard")));
+    return of(WorkspaceTreeScan.of(files).eagerPaths());
   }
 
   /**
@@ -36,7 +37,12 @@ public final class WorkspaceTreeFingerprint {
    * disagree.
    */
   public static List<String> normalize(String lsFilesOutput) {
-    return lsFilesOutput.lines().filter(line -> !line.isBlank()).distinct().sorted().toList();
+    return normalize(lsFilesOutput.lines().toList());
+  }
+
+  /** The same normalization over an already-split path list — what {@link WorkspaceTreeScan} runs. */
+  public static List<String> normalize(List<String> paths) {
+    return paths.stream().filter(path -> !path.isBlank()).distinct().sorted().toList();
   }
 
   /**

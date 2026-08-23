@@ -123,9 +123,16 @@ paths:
         Lists one level of the tree plus the whole-tree generation token. `path` is
         workspace-root-relative and optional — absent means the root level.
 
-        **Lazy directories are the gitignored ones.** There is no separate "ignored" flag: a
-        directory that git does not track is returned as a stub with its immediate child count
-        rather than being walked, and the caller asks for it by path when the user expands it.
+        **Submodules are part of the tree.** An initialized submodule's files (tracked and new
+        untracked, its own gitignore honoured) are listed eagerly under their workspace-relative
+        paths, recursively — never as the bare gitlink path, which a client would render as a file
+        that 404s on open. A submodule with no checkout behind its gitlink comes back as a lazy
+        stub instead.
+
+        **Lazy directories are otherwise the gitignored ones.** There is no separate "ignored"
+        flag: a directory that git does not track is returned as a stub with its immediate child
+        count rather than being walked, and the caller asks for it by path when the user expands
+        it.
 
         `.git` is refused like anything outside the root.
       parameters:
@@ -177,7 +184,8 @@ paths:
       summary: Frameworks, projects and the source-to-test graph.
       description: |
         Carries a `generation` token computed by a **byte-identical duplicate** of the algorithm
-        `/files` uses — a sha256 over the deduped, sorted `git ls-files` output.
+        `/files` uses — a sha256 over the deduped, sorted path list of the whole tree, submodules
+        walked like the listing walks them.
 
         That is not decoration. `/files` and `/detection` are two independently-fetched views over
         one mutable tree, and applying a detection result to a tree it was not computed from makes
@@ -967,9 +975,10 @@ components:
     Generation:
       type: string
       description: |
-        A sha256 over the deduped, sorted `git ls-files` output for the whole tree. `/files` and
-        `/detection` compute it with byte-identical implementations, so a matching pair is proof
-        the two views describe the same tree.
+        A sha256 over the deduped, sorted path list of the whole tree — `git ls-files` walked
+        through every initialized submodule. `/files` and `/detection` compute it with
+        byte-identical implementations, so a matching pair is proof the two views describe the
+        same tree.
 
     Detection:
       type: object
