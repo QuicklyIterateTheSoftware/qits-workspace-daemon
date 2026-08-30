@@ -51,11 +51,14 @@
 # carries the repository's ROW ID, and this repository was registered by the projects self-seed
 # reconcile, so its row id could be a UUID minted per platform instance — nothing a committed config
 # can name. The selection matched nothing, silently, because CI logs matches and never non-matches;
-# `repositoryName` was the answer. `SCMPublishTag` has one identifier and no such ambiguity: the git
-# host's `repoId` is the address it serves the repository under, which is this repository's name.
+# `repositoryName` was the answer. `SCMPublishTag` carries TWO identifiers rather than one, and only
+# the second is addressable — the condition below says which and why.
 event: SCMPublishTag
 when:
-  - repoId: { exact: qits-workspace-daemon }
+  # repoName, not repoId: since the identity cutover the git host's own coordinate is an opaque
+  # UUID, so a name match on repoId never fires. The tag event echoes the public name the push
+  # was addressed with; a rename updates this line in the same campaign.
+  - repoName: { exact: qits-workspace-daemon }
 artifacts:
   - { type: docker, name: qits/workspace }
 steps:
