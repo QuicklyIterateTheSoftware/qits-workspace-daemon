@@ -252,8 +252,8 @@ A consumer pins the CalVer. `ci-event-release.yml` declares
     ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:<version>
 
 One line, one version token. `.config/qits/ci-event-upstream-oci-workspace.yml` seds it when
-`qits-oci-workspace` publishes a toolchain — it probes the registry that the tag really exists, then
-force-pushes `maintenance/qits-oci-workspace`, whose push releases this repository, whose release
+`qits-workspace-oci` publishes a toolchain — it probes the registry that the tag really exists, then
+force-pushes `maintenance/qits-workspace-oci`, whose push releases this repository, whose release
 republishes the image on the new base. Nobody is in that loop. Reflowing or renaming that line
 breaks the sed, which is why the bump reads it back and fails when it did not take.
 

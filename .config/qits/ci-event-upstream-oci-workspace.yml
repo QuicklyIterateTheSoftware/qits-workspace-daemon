@@ -20,21 +20,26 @@
 # released, and reach `docker build` while the base it names did not exist yet. SoftwareRelease is
 # qits-ci announcing that the artifact is IN the registry, which is the fact this file actually needs.
 #
-# THE THREE SELECTORS ARE READ OFF THE UPSTREAM'S OWN DECLARATION, not guessed:
-# images/qits-oci-workspace's `.config/qits/ci-event-release.yml` declares
+# THE TWO SELECTORS ARE READ OFF THE UPSTREAM'S OWN DECLARATION, not guessed: the toolchain
+# repository's `.config/qits/ci-event-release.yml` declares
 # `artifacts: [{ type: docker, name: qits/workspace-base }]`, and qits-ci turns the declared `type`
 # into `packageType` and the declared `name` into `packageName` verbatim — the keyword IS the wire
-# value. `repository` on a SoftwareRelease is qits-ci's own repo id for the run, which for that
-# repository is its name. (Contrast ci-event-release.yml beside this file, which selects an
-# `SCMPublishTag` by `repoId`. Every event names the repository with the field its own publisher
-# holds, and they are not interchangeable.)
+# value. A docker image name and a maven GAV never change, so the pair carries the match on its own
+# and survives every rename of the repository behind it.
 #
-# MATCHING ALL THREE IS NOT BELT AND BRACES. A repository publishing several images emits one of
-# these per artifact, so `repository` alone would fire this train on any of them.
+# THERE IS NO `repository:` CONDITION HERE ANY MORE, AND ITS ABSENCE IS THE FIX. `repository` on a
+# SoftwareRelease is qits-ci's own STORAGE id for the run, which has been an opaque UUID since the
+# 2026-08-22 identity cutover — visible in the fleet's own bump messages, which read "follow the
+# bb84fea1-… release". A name written there matched nothing, so this train has been dead since,
+# pinned at 2026.820.152635 while the toolchain released again on 2026-08-29. (Contrast
+# ci-event-release.yml beside this file, which selects an `SCMPublishTag`. Every event names the
+# repository with the field its own publisher holds, and they are not interchangeable.)
+#
+# THE PAIR IS STILL NARROW. A repository publishing several images emits one of these per artifact,
+# and `packageName` is the one that says which.
 event: SoftwareRelease
 when:
-  - repository: { exact: qits-oci-workspace }
-    packageType: { exact: docker }
+  - packageType: { exact: docker }
     packageName: { exact: "qits/workspace-base" }
 steps:
     # ci-base: git to commit and push, jq to read the payload, curl for the registry probe. No docker
@@ -105,5 +110,5 @@ steps:
       git diff --cached --quiet && exit 0
 
       git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \
-        -m "bump(qits-oci-workspace@$version): follow the workspace toolchain"
-      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-oci-workspace
+        -m "bump(qits-workspace-oci@$version): follow the workspace toolchain"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-workspace-oci

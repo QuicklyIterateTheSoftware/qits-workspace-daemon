@@ -41,7 +41,7 @@
 #
 # THE THIRD STEP IS WHAT CLOSES THE BUMP TRAIN'S LOOP. ci-event-upstream-oci-workspace.yml follows a
 # toolchain release by rewriting the base pin in docker/Dockerfile and pushing
-# `maintenance/qits-oci-workspace`. That push lands here, this step releases the repository, and the
+# `maintenance/qits-workspace-oci`. That push lands here, this step releases the repository, and the
 # release republishes the image on the new toolchain — with nobody in the loop.
 steps:
   - image: qits/build-images/maven-base:latest
