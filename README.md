@@ -8,7 +8,7 @@ into `/workspace`. This binary is that container's PID-1 child. It provisions th
 synced with its origin, supervises the repository's dev servers, serves the working tree, and runs
 the commands and coding agents the user drives from the browser. Everything on the host's side of the
 boundary belongs to
-[qits-workspaces](https://github.com/QuicklyIterateTheSoftware/qits-workspaces).
+[qits-workspaces-service](https://github.com/QuicklyIterateTheSoftware/qits-workspaces-service).
 
     ./mvnw verify     # a clone of this repo alone builds and tests green — no monorepo, no docker
 
@@ -16,7 +16,7 @@ boundary belongs to
 
 | Module | What |
 |---|---|
-| `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. qits-workspaces vendors a byte-identical copy. |
+| `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. qits-workspaces-service vendors a byte-identical copy. |
 | `workspace-daemon-files/` | Reading the checkout: file listing, content, lazy directories, gitignore. |
 | `workspace-daemon-detection/` | Framework detection and the component map, over `workspace-daemon-files`. |
 | `qits-commands/` | Launching and supervising processes: the PTY, the process registry, chat transports, the in-memory command store and log buffer. |
@@ -231,8 +231,8 @@ This repository publishes the image a workspace container **runs**, not a binary
     <registry>/<repository>/qits-workspace-daemon
 
 One `docker build -f docker/Dockerfile .` produces it. A Mandrel builder stage native-compiles the
-daemon; the final stage is the released toolchain base from `images/qits-oci-workspace` with that
-binary copied to `/usr/local/bin/qits-workspace-daemon` and set as the entrypoint.
+daemon; the final stage is the released toolchain base from
+`components/qits-workspaces/qits-workspace-oci` with that binary copied to `/usr/local/bin/qits-workspace-daemon` and set as the entrypoint.
 
 **There is no `latest` and there is no local tag.** The predecessor was a hand-built
 `qits/workspace:latest` on one machine: no version, no registry, no pipeline, and deleted by every

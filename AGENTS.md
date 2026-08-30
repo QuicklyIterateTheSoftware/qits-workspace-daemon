@@ -84,8 +84,8 @@ both socket paths match the prefixes the handshake matches on, and no `$ref` dan
 3. Encode and decode arms in `DaemonCodec`.
 4. A round-trip case in `DaemonCodecTest`.
 5. Bump `DaemonProtocol.CAPABILITY_VERSION`.
-6. **Mirror the whole module into qits-workspaces**, byte-identical, and handle the new case in its
-   `WorkspaceDaemonRegistry.onMessage`. `DaemonCodecTest` living in both copies is the drift
+6. **Mirror the whole module into qits-workspaces-service**, byte-identical, and handle the new
+   case in its `WorkspaceDaemonRegistry.onMessage`. `DaemonCodecTest` living in both copies is the drift
    detector; `diff -r` the two `src/` trees before you push.
 
 Prefer extending an existing message to minting a new one. `WorkspaceChanged` carries a topic name
