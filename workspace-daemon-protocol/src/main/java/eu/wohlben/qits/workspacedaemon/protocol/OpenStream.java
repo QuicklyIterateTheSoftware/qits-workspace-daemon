@@ -32,5 +32,22 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  *     no path out of it — survives. <b>The daemon must refuse a path that is not host-relative</b>:
  *     an absolute URL here would be exactly the SSRF primitive that "the host never learns an
  *     address from a container" forbids, only pointed the other way.
+ * @param target which of the daemon's loopback listeners the stream is piped to — a {@link
+ *     StreamTarget} name, never a port. Optional on the wire: absent decodes to {@link
+ *     StreamTarget#API}, and {@code API} is not encoded, so an old host and a new daemon (and
+ *     the reverse) keep agreeing about every stream that existed before a second listener did. The
+ *     daemon resolves the name against its own allow-list; that is what keeps the "never learn an
+ *     address from a container" rule intact while still reaching a second port.
  */
-public record OpenStream(String nonce, String path) implements DaemonMessage {}
+public record OpenStream(String nonce, String path, StreamTarget target) implements DaemonMessage {
+
+  /** Normalizes an absent target to {@link StreamTarget#API}, so no switch ever sees a null. */
+  public OpenStream {
+    target = target == null ? StreamTarget.API : target;
+  }
+
+  /** The pre-target form: a stream to {@link StreamTarget#API}. */
+  public OpenStream(String nonce, String path) {
+    this(nonce, path, StreamTarget.API);
+  }
+}

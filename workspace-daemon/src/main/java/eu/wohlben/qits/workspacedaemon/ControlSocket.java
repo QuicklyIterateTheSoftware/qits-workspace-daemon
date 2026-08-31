@@ -210,6 +210,20 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.hooks-port", defaultValue = "13337")
   int hooksPort;
 
+  // The web editor (openvscode-server), off unless the image carries one AND the host says so.
+  // Injected as QITS_WORKSPACE_DAEMON_EDITOR_ENABLED / _PORT like every other daemon knob, and
+  // read here because EditorSupervisor — framework-free, like every capability class — cannot read
+  // configuration itself. Default false: a plain workspace image has no editor to supervise and
+  // must behave exactly as it did before one existed.
+  @ConfigProperty(name = "qits.workspace-daemon.editor-enabled", defaultValue = "false")
+  boolean editorEnabled;
+
+  // Loopback like the API and the hook sink, and for the API's reason: an editor on qits-net is an
+  // unauthenticated shell over someone else's untrusted checkout. Own port so the two surfaces stay
+  // separable at the tunnel's target allow-list.
+  @ConfigProperty(name = "qits.workspace-daemon.editor-port", defaultValue = "13339")
+  int editorPort;
+
   // Auto-push kill switch (host's qits.workspace.auto-push.enabled, injected as
   // QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED). When false the daemon never pushes committed work on
   // its own; incoming pulls (host-triggered) are unaffected
@@ -365,6 +379,13 @@ public class ControlSocket {
   private volatile DaemonStreamTunnel tunnel;
 
   /**
+   * The workspace's web editor, when the image carries one and the switch is on — otherwise null,
+   * and then nothing about this daemon changes: no frame is sent and the tunnel refuses the {@code
+   * EDITOR} target. Re-reports on reconnect like every other in-daemon reporter.
+   */
+  private volatile EditorSupervisor editor;
+
+  /**
    * Keeps the checkout and its origin ref in sync both ways: auto-pushes committed work as the
    * {@link GitStatusMonitor} observes it, and applies host-triggered incoming {@link PullBranch}
    * pulls (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
@@ -478,10 +499,24 @@ public class ControlSocket {
     // up.
     hooks = new HookWebhook(vertx, hooksPort, this::send);
     hooks.start();
+    // The web editor, on the same footing: independent of provisioning (it is a process, not a view
+    // of the checkout) and silent when there is nothing to supervise. start() answering false is
+    // what keeps a plain workspace unchanged — no EditorState is ever sent, and the tunnel below is
+    // handed no editor port, so the EDITOR target is refused rather than dialled into nothing.
+    EditorSupervisor supervisor =
+        new EditorSupervisor(
+            EditorSupervisor.DEFAULT_INSTALL_DIR,
+            WORKSPACE_DIR,
+            editorPort,
+            editorEnabled,
+            this::send);
+    editor = supervisor.start() ? supervisor : null;
     // The reverse tunnel qits reaches WorkspaceApi through. Independent of provisioning for the
     // same reason the hook webhook is: it only needs the url and the port, and a stream requested
     // before the API is up simply fails to connect to loopback and answers nothing.
-    tunnel = new DaemonStreamTunnel(vertx, url.get(), workspaceApi.apiPort());
+    tunnel =
+        new DaemonStreamTunnel(
+            vertx, url.get(), workspaceApi.apiPort(), editor == null ? 0 : editor.port());
     tunnel.start();
     client = vertx.createWebSocketClient();
     if (heartbeatIntervalMs > 0) {
@@ -923,6 +958,12 @@ public class ControlSocket {
     if (h != null) {
       workers.execute(h::reportCurrent);
     }
+    // And the editor's state, which on a first connect is also the announcement that this container
+    // has one at all — the host has no other way to learn it, deliberately (see EditorState).
+    EditorSupervisor e = editor;
+    if (e != null) {
+      workers.execute(e::reportCurrent);
+    }
     LOG.infof("workspace-daemon control socket established for workspace %s", workspaceId);
   }
 
@@ -989,7 +1030,7 @@ public class ControlSocket {
         // handler-driven, so there is nothing here worth a worker thread.
         DaemonStreamTunnel t = tunnel;
         if (t != null) {
-          t.open(request.nonce(), request.path());
+          t.open(request.nonce(), request.path(), request.target());
         }
       }
       case PullBranch request -> {
@@ -1079,6 +1120,10 @@ public class ControlSocket {
     DaemonStreamTunnel tun = tunnel;
     if (tun != null) {
       tun.close();
+    }
+    EditorSupervisor e = editor;
+    if (e != null) {
+      e.close();
     }
     AgentTranscriptTailService t = transcriptTail;
     if (t != null) {

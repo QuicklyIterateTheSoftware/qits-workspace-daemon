@@ -173,6 +173,13 @@ that wrote it runs from an untrusted checkout.
 **`KimiCodeAgent.start()` does not `exec`.** The symlink-farm prelude installs an `EXIT` trap to clean
 up its temp home; `exec` would replace the shell and the trap would never fire.
 
+**The web editor runs `--without-connection-token`.** It looks like the auth was left off. The token
+would be defending `127.0.0.1:13339`, a port no peer container can reach — the same bind, and the
+same reasoning, as `WorkspaceApi`'s — and to be of any use it would have to be handed to the host,
+which is the shared-secret arrangement `DaemonStreamTunnel` exists to have replaced. The boundary is
+the bind and the tunnel's nonce; a token here would be a second copy of a secret and no second
+boundary. `EditorSupervisor`'s javadoc has it in full.
+
 **`Json.parse` never throws.** That is what lets the ported transcript readers drop their try/catch —
 a truncated tail line or a stray write in a JSONL file just reads as absent. See the class javadoc for
 the one deliberate divergence from Jackson.

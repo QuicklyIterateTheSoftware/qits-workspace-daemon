@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -26,6 +27,11 @@ import org.junit.jupiter.api.Test;
  * server plays {@link WorkspaceApi} on loopback, and the tunnel is driven exactly as {@code
  * ControlSocket} drives it — the same kind of test as {@link CommandSocketsTest}, and for the same
  * reason: the thing under test <em>is</em> the integration.
+ *
+ * <p>Since the tunnel grew a second target, the servers here are two: the API and the web editor,
+ * on separate ephemeral ports. What the target tests prove is that the <em>name</em> picks the port
+ * — the host never states one — and that a name this container has no listener for is refused
+ * rather than quietly served by the other one.
  *
  * <p>The two cases worth naming are the ones a seam would never have caught. A ≥1 MB body pins the
  * frame-splitting: a WebSocket's {@code write(Buffer)} emits one binary frame of whatever length it
@@ -78,6 +84,9 @@ class DaemonStreamTunnelTest {
     if (api != null) {
       api.close();
     }
+    if (editor != null) {
+      editor.close();
+    }
     if (qits != null) {
       qits.close();
     }
@@ -86,11 +95,22 @@ class DaemonStreamTunnelTest {
     }
   }
 
+  /** Plays the supervised web editor on its own loopback port. */
+  private HttpServer editor;
+
   /** Start the tunnel pointed at {@code qits} and at an API server on {@code apiPort}. */
   private void startTunnel(int apiPort) {
+    startTunnel(apiPort, 0);
+  }
+
+  /** As above, with an editor to serve {@link StreamTarget#EDITOR} on — {@code 0} for none. */
+  private void startTunnel(int apiPort, int editorPort) {
     tunnel =
         new DaemonStreamTunnel(
-            vertx, "ws://127.0.0.1:" + qits.actualPort() + "/workspaces/daemon/7", apiPort);
+            vertx,
+            "ws://127.0.0.1:" + qits.actualPort() + "/workspaces/daemon/7",
+            apiPort,
+            editorPort);
     tunnel.start();
   }
 
@@ -174,6 +194,92 @@ class DaemonStreamTunnelTest {
     Thread.sleep(300);
 
     assertTrue(dialled.isEmpty(), "refused paths must not produce a dial: " + dialled);
+    assertFalse(dialBackArrived.isDone());
+  }
+
+  @Test
+  void aStreamWithNoTargetIsServedByTheApi() throws Exception {
+    // The compatibility case, at the tunnel rather than at the codec: an OpenStream from a host
+    // that predates targets carries none, and must reach the API exactly as it always did. Both
+    // spellings of "none" are exercised — the two-argument call and an explicit null.
+    api = vertx.createHttpServer();
+    api.requestHandler(req -> req.response().end("api:" + req.uri()));
+    await(api.listen(0, "127.0.0.1"));
+    editor = vertx.createHttpServer();
+    editor.requestHandler(req -> req.response().end("editor:" + req.uri()));
+    await(editor.listen(0, "127.0.0.1"));
+    startTunnel(api.actualPort(), editor.actualPort());
+
+    tunnel.open("test-nonce", STREAM_PATH, null);
+    dialBackArrived.get(15, TimeUnit.SECONDS);
+
+    assertEquals("api:/files", requestThroughTunnel("/files"));
+  }
+
+  @Test
+  void aStreamTargetedAtTheEditorReachesTheEditorPort() throws Exception {
+    // Two listeners, one tunnel: the target is what picks, and it picks by name — the host never
+    // said 13339 and could not have.
+    api = vertx.createHttpServer();
+    api.requestHandler(req -> req.response().end("api:" + req.uri()));
+    await(api.listen(0, "127.0.0.1"));
+    editor = vertx.createHttpServer();
+    editor.requestHandler(req -> req.response().end("editor:" + req.uri()));
+    await(editor.listen(0, "127.0.0.1"));
+    startTunnel(api.actualPort(), editor.actualPort());
+
+    tunnel.open("test-nonce", STREAM_PATH, StreamTarget.EDITOR);
+    dialBackArrived.get(15, TimeUnit.SECONDS);
+    assertEquals(STREAM_PATH, dialled.getFirst(), "the dial-back path is the target's business");
+
+    assertEquals("editor:/?folder=/workspace", requestThroughTunnel("/?folder=/workspace"));
+  }
+
+  @Test
+  void aWebSocketUpgradeTraversesTheTunnelToTheEditor() throws Exception {
+    // openvscode-server's whole session — the file tree, the terminals, the extension host — rides
+    // one upgrade. If the second target could carry a GET but not an upgrade it would be useless,
+    // and the byte pipe is what makes the two indistinguishable.
+    editor = vertx.createHttpServer();
+    editor.webSocketHandler(
+        (ServerWebSocket socket) ->
+            socket.textMessageHandler(text -> socket.writeTextMessage("editor-echo:" + text)));
+    await(editor.listen(0, "127.0.0.1"));
+    startTunnel(freePort(), editor.actualPort());
+
+    tunnel.open("test-nonce", STREAM_PATH, StreamTarget.EDITOR);
+    dialBackArrived.get(15, TimeUnit.SECONDS);
+
+    NetServer bridge = hostSideBridge();
+    try {
+      CompletableFuture<String> reply = new CompletableFuture<>();
+      io.vertx.core.http.WebSocketClient client = vertx.createWebSocketClient();
+      io.vertx.core.http.WebSocket socket =
+          await(client.connect(bridge.actualPort(), "127.0.0.1", "/stable-abc/vscode"));
+      socket.textMessageHandler(reply::complete);
+      socket.writeTextMessage("hello");
+
+      assertEquals("editor-echo:hello", reply.get(15, TimeUnit.SECONDS));
+      client.close();
+    } finally {
+      bridge.close();
+    }
+  }
+
+  @Test
+  void anEditorStreamIsRefusedWhereNoEditorIsSupervised() throws Exception {
+    // The plain-workspace case. The allow-list holds one port here, so EDITOR resolves to nothing
+    // and is refused before anything is dialled — it must never fall back to the API, which would
+    // answer 404s that read to the browser as a broken editor rather than an absent one.
+    api = vertx.createHttpServer();
+    api.requestHandler(req -> req.response().end("api:" + req.uri()));
+    await(api.listen(0, "127.0.0.1"));
+    startTunnel(api.actualPort(), 0);
+
+    tunnel.open("test-nonce", STREAM_PATH, StreamTarget.EDITOR);
+    Thread.sleep(500);
+
+    assertTrue(dialled.isEmpty(), "a target with no listener must not produce a dial: " + dialled);
     assertFalse(dialBackArrived.isDone());
   }
 
