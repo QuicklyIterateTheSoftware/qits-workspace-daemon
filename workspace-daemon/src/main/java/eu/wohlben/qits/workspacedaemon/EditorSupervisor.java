@@ -247,22 +247,35 @@ final class EditorSupervisor {
         return;
       }
     }
-    // No shell: the argv is fixed and the only interpolated value is a configured int, so there is
-    // nothing here to quote and nothing from the untrusted checkout to quote it against. setsid is
-    // for the same reason ServiceSupervisor uses it — the editor forks helpers (extension host,
-    // terminals) that reparent to PID 1, and only a kill by SESSION reaches them.
-    ProcessBuilder builder =
-        new ProcessBuilder(
-            "setsid",
-            launcher().getAbsolutePath(),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            Integer.toString(port),
-            "--without-connection-token");
+    // No shell: the argv is fixed and the only interpolated values are a configured int and the
+    // checkout directory this process was handed at construction, so there is nothing here to
+    // quote and nothing from the untrusted checkout to quote it against. setsid is for the same
+    // reason ServiceSupervisor uses it — the editor forks helpers (extension host, terminals) that
+    // reparent to PID 1, and only a kill by SESSION reaches them.
+    java.util.List<String> argv =
+        new java.util.ArrayList<>(
+            java.util.List.of(
+                "setsid",
+                launcher().getAbsolutePath(),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                Integer.toString(port),
+                "--without-connection-token"));
+    ProcessBuilder builder = new ProcessBuilder();
     if (workingDir != null && workingDir.isDirectory()) {
       builder.directory(workingDir);
+      // The workbench opens ON the checkout rather than on a welcome screen asking for it —
+      // `--default-folder` is the launch's statement of what this editor is for. Launch-side
+      // rather than a `?folder=` query on some hand-off URL, because the editor has three ways in
+      // (the SPA's hand-off, a typed address, the proxy's splash) and only the launch covers all
+      // of them. Guarded by the same isDirectory check as the cwd: a folder that is not there
+      // would put the workbench in a "path does not exist" dialog, which is worse than the
+      // welcome screen.
+      argv.add("--default-folder");
+      argv.add(workingDir.getAbsolutePath());
     }
+    builder.command(argv);
     // One merged stream: nothing distinguishes the editor's stderr from its stdout here, because
     // neither is forwarded anywhere — they are read to keep the pipe from filling and scanned for
     // the ready marker.
