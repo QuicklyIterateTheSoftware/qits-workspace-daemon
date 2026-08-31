@@ -153,7 +153,9 @@ class EditorSupervisorTest {
   void theEditorIsLaunchedOnLoopbackWithItsConfiguredPortAndNoConnectionToken() throws Exception {
     // The security-relevant half of the spawn, asserted as literal argv: --host 127.0.0.1 is the
     // reason --without-connection-token is safe, and the port is what the tunnel's EDITOR target
-    // resolves to. A change to any of the three has to come here first.
+    // resolves to. --default-folder is what puts the workbench ON the checkout instead of a
+    // welcome screen asking for it, launch-side so a typed address and the proxy's splash get it
+    // too. A change to any of them has to come here first.
     fakeEditor("printf '%s\\n' \"$@\" > " + workspace.getAbsolutePath() + "/argv; sleep 30");
     supervisor = supervisor(true, 60_000);
     assertTrue(supervisor.start());
@@ -164,15 +166,22 @@ class EditorSupervisorTest {
     awaitCondition(
         () -> {
           try {
-            return Files.readAllLines(workspace.toPath().resolve("argv")).size() == 5;
+            return Files.readAllLines(workspace.toPath().resolve("argv")).size() == 7;
           } catch (Exception e) {
             return false;
           }
         },
         8000,
-        () -> "five recorded arguments");
+        () -> "seven recorded arguments");
     assertLinesMatch(
-        List.of("--host", "127.0.0.1", "--port", "13339", "--without-connection-token"),
+        List.of(
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "13339",
+            "--without-connection-token",
+            "--default-folder",
+            workspace.getAbsolutePath()),
         Files.readAllLines(workspace.toPath().resolve("argv")));
   }
 
