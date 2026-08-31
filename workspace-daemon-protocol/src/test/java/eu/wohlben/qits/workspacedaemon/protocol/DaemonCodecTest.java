@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspacedaemon.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -312,6 +313,75 @@ class DaemonCodecTest {
   }
 
   @Test
+  void openStreamWithoutATargetIsTheApiAndPutsNothingOnTheWire() {
+    // Both halves of the backward compatibility, in one place. The two-arg form is what every
+    // caller wrote before targets existed and must still mean the API; and the API target must not
+    // appear as a key, so the frame a newer host sends for an ordinary stream is byte-identical to
+    // the one an older host sends — a daemon image that never learned the field cannot mis-read it.
+    OpenStream open = new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy");
+    assertEquals(StreamTarget.API, open.target());
+    assertFalse(
+        DaemonCodec.encode(open).containsKey(DaemonProtocol.Field.TARGET),
+        "the default target is an absence on the wire");
+  }
+
+  @Test
+  void openStreamCarriesANonDefaultTarget() {
+    OpenStream editor =
+        new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.EDITOR);
+    assertEquals(editor, roundTrip(editor));
+    assertEquals("EDITOR", DaemonCodec.encode(editor).get(DaemonProtocol.Field.TARGET));
+  }
+
+  @Test
+  void openStreamFromAnOlderHostDecodesAnAbsentTargetAsTheApi() {
+    // The frame an old qits sends a new daemon: nonce and path, no target key at all.
+    Map<String, Object> map =
+        Map.of(
+            DaemonProtocol.Field.TYPE,
+            DaemonProtocol.Type.OPEN_STREAM,
+            DaemonProtocol.Field.NONCE,
+            "Zm9vYmFy",
+            DaemonProtocol.Field.PATH,
+            "/workspaces/daemon/stream/Zm9vYmFy");
+    OpenStream decoded = (OpenStream) DaemonCodec.decode(map);
+    assertEquals(StreamTarget.API, decoded.target());
+    assertEquals("/workspaces/daemon/stream/Zm9vYmFy", decoded.path());
+  }
+
+  @Test
+  void openStreamRefusesATargetItCannotName() {
+    // Fail closed, not fall back: an unknown target must not resolve to the API. The frame is
+    // undecodable and ControlSocket drops it, so a stream meant for a listener this daemon does not
+    // have is never served by the one it does.
+    Map<String, Object> map =
+        Map.of(
+            DaemonProtocol.Field.TYPE,
+            DaemonProtocol.Type.OPEN_STREAM,
+            DaemonProtocol.Field.NONCE,
+            "n",
+            DaemonProtocol.Field.PATH,
+            "/x",
+            DaemonProtocol.Field.TARGET,
+            "DEBUGGER");
+    assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(map));
+  }
+
+  @Test
+  void editorStateRoundTripsEveryState() {
+    for (String state :
+        List.of(
+            EditorState.State.STARTING, EditorState.State.RUNNING, EditorState.State.ENDED)) {
+      EditorState message = new EditorState(state);
+      assertEquals(message, roundTrip(message));
+    }
+    assertEquals(
+        DaemonProtocol.Type.EDITOR_STATE,
+        DaemonCodec.encode(new EditorState(EditorState.State.RUNNING))
+            .get(DaemonProtocol.Field.TYPE));
+  }
+
+  @Test
   void theTunnelCapabilityIsTheVersionThatIntroducedIt() {
     // The compatibility branch is keyed on this pair agreeing: a daemon at TUNNEL_CAPABILITY_VERSION
     // binds loopback and serves OpenStream, one below binds qits-net and does not. If the current
@@ -319,6 +389,14 @@ class DaemonCodecTest {
     // is not listening.
     assertEquals(4, DaemonProtocol.TUNNEL_CAPABILITY_VERSION);
     assertTrue(DaemonProtocol.CAPABILITY_VERSION >= DaemonProtocol.TUNNEL_CAPABILITY_VERSION);
+  }
+
+  @Test
+  void theWebEditorLandedAtCapabilityFive() {
+    // Spelled as a literal because this file is also the drift detector between this module and the
+    // copy qits-workspaces vendors: two copies at two versions is exactly the disagreement that
+    // shows up as a workspace whose editor never appears, and nowhere else.
+    assertEquals(5, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test

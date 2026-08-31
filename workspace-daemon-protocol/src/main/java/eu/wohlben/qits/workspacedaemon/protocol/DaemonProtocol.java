@@ -35,8 +35,18 @@ public final class DaemonProtocol {
    * also the asymmetry that makes the direction of a change matter — a daemon→qits addition
    * degrades safely, but {@code OpenStream} travels qits→daemon and an older image simply never
    * handles it.
+   *
+   * <p><b>5 added the web editor: {@link EditorState}, and {@link OpenStream#target()}.</b> Both
+   * halves are backward compatible in both directions, so nothing gates on this number — it is a
+   * fact the host records. The daemon→qits half degrades as {@link WorkspaceChanged} did: a backend
+   * still on 4 drops the unknown {@code editorState} tag and simply has no editor to show. The
+   * qits→daemon half degrades the other way, which the {@code OPEN_STREAM} note above says is
+   * ordinarily impossible — it works here only because the new field is <em>optional</em>: an old
+   * host omits it and a new daemon decodes {@link StreamTarget#API}, the one behaviour that existed
+   * before; a new host asking a 4 daemon for the editor is asking an image that has no editor in it,
+   * and the old decoder ignores the field rather than mis-serving it.
    */
-  public static final int CAPABILITY_VERSION = 4;
+  public static final int CAPABILITY_VERSION = 5;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -111,6 +121,7 @@ public final class DaemonProtocol {
     public static final String GIT_STATUS = "gitStatus";
     public static final String AGENT_ACTIVITY = "agentActivity";
     public static final String WORKSPACE_CHANGED = "workspaceChanged";
+    public static final String EDITOR_STATE = "editorState";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
@@ -167,6 +178,10 @@ public final class DaemonProtocol {
     public static final String TOPIC = "topic";
     public static final String NONCE = "nonce";
     public static final String PATH = "path";
+    // Optional on OpenStream: written only for a non-default target, so an absent key decodes to
+    // StreamTarget.API and the frame an older host sends is byte-identical to the one it always
+    // sent. See DaemonCodec's OpenStream arms.
+    public static final String TARGET = "target";
 
     private Field() {}
   }

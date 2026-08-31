@@ -113,6 +113,10 @@ public final class DaemonCodec {
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.TOPIC, m.topic());
       }
+      case EditorState m -> {
+        map.put(Field.TYPE, Type.EDITOR_STATE);
+        map.put(Field.STATE, m.state());
+      }
       case GitStatus m -> {
         map.put(Field.TYPE, Type.GIT_STATUS);
         map.put(Field.WORKSPACE_ID, m.workspaceId());
@@ -172,6 +176,13 @@ public final class DaemonCodec {
         map.put(Field.TYPE, Type.OPEN_STREAM);
         map.put(Field.NONCE, m.nonce());
         map.put(Field.PATH, m.path());
+        // The default target is written as an ABSENCE, not as "API": that keeps every stream the
+        // host already opens byte-identical on the wire, so a daemon image that predates targets
+        // reads a new host's ordinary API stream exactly as it always did. Only the new thing costs
+        // a new key.
+        if (m.target() != StreamTarget.API) {
+          map.put(Field.TARGET, m.target().name());
+        }
       }
     }
     return map;
@@ -273,10 +284,34 @@ public final class DaemonCodec {
               str(map, Field.CORRELATION_ID), str(map, Field.ID), str(map, Field.SIGNAL));
       case Type.PULL_BRANCH ->
           new PullBranch(str(map, Field.CORRELATION_ID), str(map, Field.BRANCH));
-      case Type.OPEN_STREAM -> new OpenStream(str(map, Field.NONCE), str(map, Field.PATH));
+      case Type.EDITOR_STATE -> new EditorState(str(map, Field.STATE));
+      case Type.OPEN_STREAM ->
+          new OpenStream(
+              str(map, Field.NONCE), str(map, Field.PATH), streamTarget(map, Field.TARGET));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };
+  }
+
+  /**
+   * The stream target, defaulting to {@link StreamTarget#API} when the key is absent — which is
+   * every {@code OpenStream} an older host sends, and every one a newer host sends for the API.
+   *
+   * <p>A name that is <b>not</b> in the enum throws, and {@code ControlSocket} then drops the frame
+   * (it catches an undecodable one and logs). That is the fail-closed half of the target being a
+   * name rather than a port: an unknown target resolves to no listener at all, rather than to the
+   * default one — a stream meant for something else must never be served by the API.
+   */
+  private static StreamTarget streamTarget(Map<String, Object> map, String key) {
+    String name = str(map, key);
+    if (name == null || name.isBlank()) {
+      return StreamTarget.API;
+    }
+    try {
+      return StreamTarget.valueOf(name);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("unknown workspace-daemon stream target: " + name);
+    }
   }
 
   private static String str(Map<String, Object> map, String key) {
