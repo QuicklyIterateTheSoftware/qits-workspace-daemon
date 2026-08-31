@@ -1,5 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.WebSocket;
@@ -13,7 +14,8 @@ import org.jboss.logging.Logger;
 
 /**
  * The daemon's half of the reverse tunnel: on an {@code OpenStream}, dial back to qits and pipe
- * that WebSocket to a fresh TCP connection to {@link WorkspaceApi} on loopback.
+ * that WebSocket to a fresh TCP connection to one of this container's loopback listeners — {@link
+ * WorkspaceApi} by default, the supervised web editor when the message names it.
  *
  * <p><b>What this replaces.</b> {@code WorkspaceApi} used to bind {@code 0.0.0.0} and be reachable
  * by DNS name from every other container on {@code qits-net} — every one of which runs a coding
@@ -57,13 +59,25 @@ final class DaemonStreamTunnel {
   /** The loopback port {@link WorkspaceApi} binds. */
   private final int apiPort;
 
+  /**
+   * The loopback port the supervised web editor binds, or {@code 0} when this container has no
+   * editor — which is what makes {@link StreamTarget#EDITOR} a <em>refusal</em> rather than a dial
+   * into a closed port on a plain workspace. See {@link #portFor}.
+   */
+  private final int editorPort;
+
   private volatile WebSocketClient client;
   private volatile NetClient netClient;
 
   DaemonStreamTunnel(Vertx vertx, String controlSocketUrl, int apiPort) {
+    this(vertx, controlSocketUrl, apiPort, 0);
+  }
+
+  DaemonStreamTunnel(Vertx vertx, String controlSocketUrl, int apiPort, int editorPort) {
     this.vertx = vertx;
     this.controlSocketUrl = controlSocketUrl;
     this.apiPort = apiPort;
+    this.editorPort = editorPort;
   }
 
   void start() {
@@ -72,18 +86,32 @@ final class DaemonStreamTunnel {
     netClient = vertx.createNetClient();
   }
 
+  /** A stream with no target named: the API, the only thing this tunnel ever served. */
+  void open(String nonce, String path) {
+    open(nonce, path, StreamTarget.API);
+  }
+
   /**
-   * Serve one {@code OpenStream}: dial {@code path} back to qits, connect to the loopback API, and
-   * pipe the two until either end goes away.
+   * Serve one {@code OpenStream}: resolve {@code target} to a loopback port, dial {@code path} back
+   * to qits, connect to that port, and pipe the two until either end goes away.
    *
    * <p>Runs on the event loop, deliberately — both connects are non-blocking futures, so there is
    * nothing here worth a worker thread, and the pumps below are handler-driven.
    */
-  void open(String nonce, String path) {
+  void open(String nonce, String path, StreamTarget target) {
     WebSocketClient ws = client;
     NetClient net = netClient;
     if (ws == null || net == null) {
       LOG.debug("stream requested before the tunnel was started — ignored");
+      return;
+    }
+    int localPort = portFor(target);
+    if (localPort <= 0) {
+      // The allow-list's refusal branch. Reached when the host asks for a listener this container
+      // does not have — an EDITOR stream to a plain workspace. Refusing here rather than dialling
+      // and failing to connect keeps the two indistinguishable-from-the-outside cases apart in the
+      // log, and costs the host nothing it did not already have to handle.
+      LOG.warnf("refusing a stream to %s: this daemon serves no such listener", target);
       return;
     }
     URI dial;
@@ -102,8 +130,8 @@ final class DaemonStreamTunnel {
     // The loopback connection first, and the dial-back second. Reversed, the host can start writing
     // the moment the upgrade completes — before this side has anywhere to put the bytes — and losing
     // the request line presents as a request that is simply never answered.
-    net.connect(apiPort, "127.0.0.1")
-        .onFailure(t -> LOG.debugf("stream %s could not reach the local API: %s", nonce, t))
+    net.connect(localPort, "127.0.0.1")
+        .onFailure(t -> LOG.debugf("stream %s could not reach %s on loopback: %s", nonce, target, t))
         .onSuccess(
             local ->
                 ws.connect(
@@ -117,6 +145,27 @@ final class DaemonStreamTunnel {
                           local.close();
                         })
                     .onSuccess(remote -> pipe(remote, local)));
+  }
+
+  /**
+   * The allow-list: a target <em>name</em> resolved to one of this daemon's own loopback ports, or
+   * {@code 0} for "not served here".
+   *
+   * <p><b>The daemon owns the address; the host owns only the name.</b> Putting a port on the wire
+   * would have been the shorter change and would have handed a container-supplied integer straight
+   * to {@code NetClient.connect} — the same SSRF primitive {@link #dialUrl} refuses on the path,
+   * pointed at loopback instead of at the network. Two named ports the daemon configured itself
+   * cannot be talked into being a third.
+   *
+   * <p>A name outside the enum never reaches here at all: {@code DaemonCodec} refuses to decode it
+   * and {@code ControlSocket} drops the frame. So this switch is exhaustive on purpose, and the
+   * only refusal left is the honest one — a target this <em>container</em> has no listener for.
+   */
+  private int portFor(StreamTarget target) {
+    return switch (target == null ? StreamTarget.API : target) {
+      case API -> apiPort;
+      case EDITOR -> editorPort;
+    };
   }
 
   /**
