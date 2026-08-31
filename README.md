@@ -21,7 +21,7 @@ boundary belongs to
 | `workspace-daemon-detection/` | Framework detection and the component map, over `workspace-daemon-files`. |
 | `qits-commands/` | Launching and supervising processes: the PTY, the process registry, chat transports, the in-memory command store and log buffer. |
 | `qits-coding-agents/` | The Claude Code and Kimi harnesses: launch rendering, the ACP chat client, transcript import, plugins, auth. Depends on `qits-commands` — a coding agent *is* a command. |
-| `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, service supervision. Wires every module above by hand. |
+| `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, service and web-editor supervision. Wires every module above by hand. |
 
 The first five are **framework-free**: no Quarkus, no CDI, no JAX-RS, no Jackson. They are plain
 jars with plain constructors that `ControlSocket` news up. That is not stylistic — it is what keeps
@@ -48,10 +48,31 @@ untrusted checkout, so it is never served anonymously.
 
 **The reverse tunnel** — how qits reaches that loopback server at all. On an `OpenStream`, the daemon
 dials a second outbound WebSocket back to qits-workspaces and pipes it to a fresh TCP connection to
-`127.0.0.1:13338`. The tunnel carries bytes, so an HTTP request and a WebSocket upgrade traverse it
-identically and adding a daemon endpoint costs nothing on the wire. It also carries the request line
-verbatim, which is the other half of why nothing rewrites a path: there is no hop in this chain that
-*could* rewrite one without parsing and re-emitting HTTP.
+one of its own loopback listeners — `127.0.0.1:13338` unless the message names another. The tunnel
+carries bytes, so an HTTP request and a WebSocket upgrade traverse it identically and adding a daemon
+endpoint costs nothing on the wire. It also carries the request line verbatim, which is the other half
+of why nothing rewrites a path: there is no hop in this chain that *could* rewrite one without parsing
+and re-emitting HTTP.
+
+`OpenStream.target` is a **name** (`API`, `EDITOR`), never a port. A port on the wire would hand a
+container-supplied integer straight to `connect()` — the same thing the refusal of a non-host-relative
+`path` exists to prevent, pointed at loopback instead of at the network — so the host names what it
+wants and the daemon alone knows where that is. Absent ⇒ `API`, and `API` is not encoded at all, so
+an ordinary stream is byte-identical to the frame that shipped before targets existed. A name the
+daemon has no listener for is refused and logged, never served by the other one.
+
+**The web editor** — a workspace image that carries openvscode-server at `/opt/openvscode-server` has
+it supervised by the daemon, on `127.0.0.1:13339` (`qits.workspace-daemon.editor-port`) and reached
+only through the tunnel's `EDITOR` target. Loopback for the API's reason: on `qits-net` an editor is
+an unauthenticated shell over someone else's untrusted checkout, and that bind is also what makes
+`--without-connection-token` safe — a token would defend a port that does not exist, and sharing it
+with the host is the arrangement the tunnel replaced.
+
+The daemon reports the editor's lifecycle as `EditorState` (`STARTING` / `RUNNING` / `ENDED`), once
+per control-socket connect and once per transition, which is what the host gates its proxy and splash
+on. **A workspace whose image has no editor sends the frame never** — the absence is the capability
+announcement, so there is one signal rather than a flag and a state that can disagree, and a plain
+workspace behaves exactly as it did before an editor existed.
 
 | | |
 |---|---|
@@ -223,6 +244,12 @@ in as constructor arguments. That is load-bearing for `hooks-port` and `qits.wor
 in particular: the hook webhook binds one and the agent launch renders it into every hook `curl`, so
 two independent reads that disagree would leave agents running fine and silently never reporting
 lineage or activity.
+
+`editor-enabled` (default `false`) and `editor-port` (default `13339`) are the web editor's pair, and
+the default is the contract for every image without one: nothing spawned, nothing announced, and the
+tunnel's `EDITOR` target refused. The switch alone does not conjure a binary — supervision also
+requires `/opt/openvscode-server/bin/openvscode-server` to be there — so an image that sets it and
+does not carry the editor is silent on the wire and says so in the container log.
 
 ## The image
 
