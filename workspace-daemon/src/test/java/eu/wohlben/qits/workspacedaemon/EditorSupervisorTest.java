@@ -13,6 +13,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -271,6 +273,70 @@ class EditorSupervisorTest {
         1,
         states().stream().filter(EditorState.State.ENDED::equals).count(),
         "the waiter and close() both settle ENDED; the host must be told once");
+  }
+
+  @Test
+  void closeWhileARelaunchIsInFlightLeavesNoEditorBehindAndNothingAfterEnded() throws Exception {
+    // The shutdown lands on a relaunch the scheduler has already picked up: close() cancels with
+    // cancel(false), so the task runs anyway, and it spawns into a supervisor that has already
+    // reported ENDED. Both halves of that are observable here — an openvscode-server nobody will
+    // ever signal, and a STARTING published after the terminal state.
+    //
+    // The interleaving is NOT deterministic with this rig: the window is the millisecond or two
+    // launch() spends in ProcessBuilder.start(), and nothing short of a seam in the spawn can stop
+    // a thread inside it. So the shutdown is aimed at the relaunch — a known backoff after a kill,
+    // swept in fractions of a millisecond across the attempts — and the assertions are invariants
+    // that hold whether or not a given attempt lands in the window. A miss is silently green; a
+    // hit against the unguarded launch() fails on both counts.
+    fakeEditor("sleep 4244");
+    for (int attempt = 0; attempt < 20; attempt++) {
+      closeOnTheRelaunch(attempt);
+    }
+  }
+
+  /** One aimed shutdown: come up, crash, and close {@code attempt} × 0.5 ms into the relaunch. */
+  private void closeOnTheRelaunch(int attempt) throws Exception {
+    long backoffMs = 300;
+    events.clear();
+    supervisor =
+        new EditorSupervisor(
+            install,
+            workspace,
+            13339,
+            true,
+            events::add,
+            /* readyGrace */ 60_000,
+            backoffMs,
+            backoffMs,
+            /* stopGrace */ 500);
+    assertTrue(supervisor.start());
+    awaitCondition(
+        () -> pgrepCount("sleep 4244") >= 1, 8000, () -> "the editor of attempt " + attempt);
+
+    long killedAt = System.nanoTime();
+    new ProcessBuilder("pkill", "-f", "sleep 4244").start().waitFor();
+    LockSupport.parkNanos(
+        TimeUnit.MILLISECONDS.toNanos(backoffMs)
+            + attempt * 500_000L
+            - (System.nanoTime() - killedAt));
+    supervisor.close();
+
+    // Settle before either assertion: an orphaned spawn needs these milliseconds to reach its
+    // sleep, so a pgrep run the instant close() returns would find nothing and prove nothing, and a
+    // STARTING published after the terminal state arrives in the same window.
+    Thread.sleep(300);
+    awaitCondition(
+        () -> pgrepCount("sleep 4244") == 0,
+        8000,
+        () -> "no editor left running by attempt " + attempt);
+    assertEquals(
+        EditorState.State.ENDED,
+        states().getLast(),
+        "attempt " + attempt + ": ENDED is terminal; saw " + states());
+    assertEquals(
+        1,
+        states().stream().filter(EditorState.State.ENDED::equals).count(),
+        "attempt " + attempt + ": the host must be told once; saw " + states());
   }
 
   @Test

@@ -216,22 +216,14 @@ final class EditorSupervisor {
    */
   void close() {
     Process running;
+    long session;
     synchronized (lock) {
       stopRequested = true;
       cancelPending();
       running = process;
+      session = sid;
     }
-    long session = sid;
-    if (running != null && running.isAlive()) {
-      pkill("TERM", session);
-      try {
-        if (!running.waitFor(stopGraceMs, TimeUnit.MILLISECONDS)) {
-          pkill("KILL", session);
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
+    terminate(running, session);
     transition(EditorState.State.ENDED);
     scheduler.shutdownNow();
   }
@@ -244,6 +236,17 @@ final class EditorSupervisor {
   }
 
   private void launch() {
+    // A relaunch scheduled by handleExit outlives the cancel: close() cancels with cancel(false),
+    // so a task the scheduler has already picked up runs to completion regardless. Checked here and
+    // again after the spawn, because either side of builder.start() is a shutdown this misses —
+    // the second one is the costly half, where a live openvscode-server would be left holding the
+    // loopback port with nothing to signal it and a STARTING would be reported after the terminal
+    // ENDED.
+    synchronized (lock) {
+      if (stopRequested) {
+        return;
+      }
+    }
     // No shell: the argv is fixed and the only interpolated value is a configured int, so there is
     // nothing here to quote and nothing from the untrusted checkout to quote it against. setsid is
     // for the same reason ServiceSupervisor uses it — the editor forks helpers (extension host,
@@ -276,17 +279,47 @@ final class EditorSupervisor {
       transition(EditorState.State.ENDED);
       return;
     }
+    Process stranded = null;
     synchronized (lock) {
-      process = started;
-      sid = started.pid();
-      cancelPending();
-      if (!stopRequested) {
+      if (stopRequested) {
+        // close() ran while this spawn was in flight: it read a null process, signalled nothing and
+        // has already reported ENDED. Nothing may be published after that, so the session is reaped
+        // here instead of being adopted — the supervisor is gone, and an editor nobody supervises
+        // outlives the daemon it belongs to.
+        stranded = started;
+      } else {
+        process = started;
+        sid = started.pid();
+        cancelPending();
         pending = scheduler.schedule(this::markRunning, readyGraceMs, TimeUnit.MILLISECONDS);
       }
+    }
+    if (stranded != null) {
+      // Drained first so the teardown is not waiting on a process blocked writing into a full pipe;
+      // the pump closes the stream at EOF. setsid means the pid is the session id, exactly as it is
+      // for a spawn that was adopted.
+      pump(stranded.getInputStream());
+      terminate(stranded, stranded.pid());
+      return;
     }
     transition(EditorState.State.STARTING);
     pump(started.getInputStream());
     waiter(started);
+  }
+
+  /** {@code TERM} to the whole session, {@code KILL} after the stop grace. */
+  private void terminate(Process running, long session) {
+    if (running == null || !running.isAlive()) {
+      return;
+    }
+    pkill("TERM", session);
+    try {
+      if (!running.waitFor(stopGraceMs, TimeUnit.MILLISECONDS)) {
+        pkill("KILL", session);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   /** Read the editor's merged output, scanning completed lines for the ready marker. */
