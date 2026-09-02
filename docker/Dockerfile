@@ -78,7 +78,36 @@ COPY . .
 # verify` on a clone is the gate for those, and the CI pipeline runs it before this build so a broken
 # test never costs a GraalVM compile.
 RUN ./mvnw -B -ntp -pl workspace-daemon -am package -Dnative -DskipTests \
-      -Dquarkus.native.native-image-xmx=4g
+      -Dquarkus.native.native-image-xmx=4g \
+      org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
+      -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \
+      -Dcyclonedx.skipNotDeployed=false
+# makeBom RIDES ON THE INVOCATION ABOVE rather than getting a second one: a second `./mvnw` would be
+# a second layer on top of a native compile, and a re-resolve of the same reactor to produce a
+# document the first run already had the model for. One RUN, one layer, one truth.
+#
+# cyclonedx.skipNotDeployed=false is LOAD-BEARING, measured in qits-artifacts-service on its first
+# release: `workspace-daemon` is <packaging>quarkus</packaging> and ships as this image rather than
+# as a jar, so it skips maven-deploy — and the plugin SKIPS deploy-skipping modules by default, with
+# a green build and one INFO line. The sbom stage's COPY then fails on a file nothing wrote. The
+# spelling matters too: a bare -DskipNotDeployed=false is silently ignored, and only the
+# cyclonedx.-prefixed property reaches the plugin.
+#
+# WHAT THIS DOCUMENT COVERS, AND WHAT IT CANNOT. It is the daemon's resolved Maven closure — the
+# reactor modules and the jars they pull. The toolchain underneath is a released image with its own
+# release and its own document, published by qits-workspace-oci under its own coordinate; this file
+# names it in one `FROM` and does not restate its contents.
+
+# --- sbom -----------------------------------------------------------------------------------------
+# The daemon module's CycloneDX document, exported so the release step can PUT it to the platform's
+# SBOM store. A stage rather than a layer of the runtime image, and BEFORE the runtime stage on
+# purpose: the last stage is what a plain `docker build` builds, and that must stay the image.
+# `.config/qits/ci-event-release.yml` reaches this one with `--target sbom --output type=local`
+# using the SAME secrets as the image build, so every layer above is a cache hit and the export
+# costs seconds rather than a second native compile. It also never touches `${WORKSPACE_BASE}` —
+# `--target sbom` stops here, so the export does not pull the ~3.4 GB toolchain a second time.
+FROM scratch AS sbom
+COPY --from=build /src/workspace-daemon/target/sbom.json /sbom.json
 
 # --- runtime: the toolchain, with the daemon as its entrypoint ------------------------------------
 # The toolchain is not built here and could not be: reproducing it would put node, maven, a JDK, a
