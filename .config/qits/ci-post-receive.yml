@@ -1,13 +1,11 @@
 # The pipeline qits-ci runs on every push to a tracked branch of this repository.
 #
-# Three steps. The first two run on every branch and their order is the point; the third runs on
-# `maintenance/` alone:
+# Two steps, both on every branch, and their order is the point:
 #
 #   1. `./mvnw verify` — this repo's first rule (CLAUDE.md): a clone of this repo alone builds and
 #      tests green, with no docker and no prior install anywhere. It runs FIRST because it is the
 #      cheap gate. A broken test must not cost a GraalVM native build.
 #   2. the shipping form — the workspace image, whose builder stage is the native compile.
-#   3. release the branch — the bump train's last leg, described at the bottom of this comment.
 #
 # THIS REPO NEEDS NO HAND-ROLLED BUILDER CONTAINER. docker/Dockerfile native-compiles the binary in a
 # Mandrel builder stage and layers it onto the released toolchain in the same build, so a plain
@@ -39,10 +37,12 @@
 # ci-event-release.yml BESIDE THIS FILE IS THE OTHER HALF. This one names a build by its commit;
 # that one names a release by its version. Neither pushes the other's coordinate.
 #
-# THE THIRD STEP IS WHAT CLOSES THE BUMP TRAIN'S LOOP. ci-event-upstream-oci-workspace.yml follows a
-# toolchain release by rewriting the base pin in docker/Dockerfile and pushing
-# `maintenance/qits-workspace-oci`. That push lands here, this step releases the repository, and the
-# release republishes the image on the new toolchain — with nobody in the loop.
+# THE BUMP TRAIN'S LOOP IS CLOSED SOMEWHERE ELSE NOW. ci-event-upstream-oci-workspace.yml still
+# follows a toolchain release by rewriting the base pin in docker/Dockerfile and pushing
+# `maintenance/qits-workspace-oci`, and that push still lands here for its build. The release that
+# used to follow it was a third step here asking the qits-workspaces door; qits-maintenance makes
+# that ask itself now, with its own credential, on the same push. This pipeline builds; it no
+# longer releases.
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
@@ -80,133 +80,3 @@ steps:
       # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
       # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
       # that broke the release of 2026-08-11.
-
-    # node-base, not ci-base: the POST below goes through node because node has `fetch` built in and
-    # ci-base promises no curl-with-json ergonomics worth the difference. No docker socket — this
-    # step builds nothing.
-    #
-    # `branches:` is what keeps it off main. Every push to a tracked branch runs the two steps
-    # above; only a `maintenance/` push runs this one, so an ordinary commit never calls the
-    # release endpoint.
-  - image: qits/build-images/node-base:latest
-    branches:
-      - prefix: maintenance/
-    timeout-seconds: 300
-    script: |
-      # Same reason as the steps above: `bash -c` with no -e would let a failed release call be
-      # swallowed by the next command's exit code.
-      set -eu
-
-      # Belt and braces over `branches:` above. The selector is qits-ci's and this guard is the
-      # step's own, so a selector that ever widens cannot silently release main.
-      case "$QITS_CI_BRANCH" in
-        maintenance/*) ;;
-        *) echo "not a maintenance branch: $QITS_CI_BRANCH"; exit 1 ;;
-      esac
-
-      # The bump commit's subject, reused verbatim as the release summary. It is under the summary
-      # field's 100 characters by construction — the bump pipeline's convention is what keeps it so.
-      summary=$(git log -1 --format=%s)
-
-      # RELEASE, not merge and not integrate. Releasing is the only door onto main: it stamps a
-      # version, writes one two-parent commit and pushes the annotated tag — which is the fact
-      # ci-event-release.yml waits for. It publishes SCMRelease as well, and that is what turns the
-      # green release run into an announcement. Integrating targets the branch's PARENT and would
-      # refuse with RELEASE_REQUIRED when that parent is main.
-      #
-      # The step self-identifies entirely from injected environment, so no deployment address is
-      # spelled here: $QITS_WORKSPACES_URL is qits-workspaces' root (scheme, host and port, no path
-      # — the path is the caller's to spell), and $QITS_CI_PROJECT_ID, $QITS_CI_REPO_NAME and
-      # $QITS_CI_BRANCH are this run's.
-      #
-      # Statuses: 200 is the receipt and prints it, a 409 saying the branch is already released is a
-      # replayed push finding its work done and is a success, and everything else is red with the
-      # body on screen. The body is read defensively — some refusals are a plain 400 with no
-      # `reason`.
-
-      # AUTHORIZATION, and why this step grew one. The release door is machine-authenticated —
-      # qits-workspaces runs with QITS_AUTH_MACHINE_REQUIRED=true — so the POST below with no
-      # Authorization header is answered 401, and the step goes red with `release refused: HTTP
-      # 401`. It did exactly that on every maintenance bump from the day machine auth was switched
-      # on: this step predates the switch, nothing about the bump train changed, and because the
-      # only leg that fails is the last one, each bump landed on its branch and quietly stayed
-      # there — green build, no release, no announcement, nobody told.
-      #
-      # THE CREDENTIAL IS THIS RUN'S OWN, never a secret written down here. qits-ci commissions an
-      # idp client per run and injects it as $QITS_COMMISSIONED_CLIENT_ID and
-      # $QITS_COMMISSIONED_CLIENT_SECRET — the same pair an image step hands buildx as a --secret
-      # mount, and the same pair qits-git-credential exchanges before a push over HTTP. It is
-      # short-lived and revoked at teardown, which is what makes it the only credential a step
-      # authored in a repository is allowed to hold.
-      #
-      # $QITS_GIT_AUTH_TOKEN_URL is the idp's token endpoint. The name says "git" because git's
-      # helper was its first caller; the value is the plain token URL, and it is the only idp
-      # address a step is given.
-      #
-      # THE AUDIENCE IS DERIVED, not spelled. A token is cut FOR one service and qits-workspaces
-      # refuses one cut for anyone else, so the mint below has to name it — and the name is the
-      # host of $QITS_WORKSPACES_URL, which is the service alias, which is what qits-workspaces
-      # checks as QITS_AUTH_MACHINE_AUDIENCE. Deriving keeps this deployment out of this file, the
-      # same rule $QITS_WORKSPACES_URL itself follows. $QITS_WORKSPACES_AUDIENCE is read first, so
-      # a later launcher can state the audience outright without editing every repository carrying
-      # this step.
-      #
-      # NO PAIR, NO HEADER. A deployment that commissions nothing has no pair to exchange and has
-      # machine auth off as well, so there the call goes out unauthenticated exactly as it always
-      # did, rather than the step dying on a mint it was never going to be able to make. A pair
-      # that IS present and cannot be exchanged is the opposite case — a broken platform rather
-      # than an unconfigured one — and that is red.
-      node -e '
-        const [url, branch, summary] = process.argv.slice(1);
-        const env = process.env;
-
-        // The bearer the door now demands. With no commissioned pair this resolves to no header at
-        // all, which is precisely the call this step used to make.
-        const authorize = async () => {
-          const id = env.QITS_COMMISSIONED_CLIENT_ID;
-          const secret = env.QITS_COMMISSIONED_CLIENT_SECRET;
-          const tokenUrl = env.QITS_GIT_AUTH_TOKEN_URL;
-          if (!id || !secret || !tokenUrl) return {};
-          const audience = env.QITS_WORKSPACES_AUDIENCE || new URL(url).hostname;
-          const basic = Buffer.from(id + ":" + secret).toString("base64");
-          const res = await fetch(tokenUrl, {
-            method: "POST",
-            headers: {
-              "content-type": "application/x-www-form-urlencoded",
-              authorization: `Basic ${basic}`,
-            },
-            body: new URLSearchParams({ grant_type: "client_credentials", audience }),
-          });
-          const text = await res.text();
-          if (!res.ok) {
-            throw new Error(`idp refused the commissioned client for ${audience}: HTTP ${res.status} ${text}`);
-          }
-          const token = JSON.parse(text).access_token;
-          if (!token) throw new Error(`idp returned no access_token for ${audience}`);
-          return { authorization: `Bearer ${token}` };
-        };
-
-        authorize().then((auth) => fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...auth },
-          body: JSON.stringify({ branch, summary }),
-        })).then(async (res) => {
-          const text = await res.text();
-          let body = {};
-          try { body = JSON.parse(text); } catch {}
-          if (res.ok) {
-            console.log(`released ${body.version} as ${body.commitSha} from ${body.branch}`);
-            return;
-          }
-          if (res.status === 409 && body.reason === "ALREADY_INTEGRATED") {
-            console.log(`${branch} is already released - nothing to do`);
-            return;
-          }
-          console.error(`release refused: HTTP ${res.status} ${text}`);
-          process.exit(1);
-        }).catch((err) => {
-          console.error(`release call failed: ${err.message}`);
-          process.exit(1);
-        });
-      ' "$QITS_WORKSPACES_URL/workspaces/api/branches/release?projectId=$QITS_CI_PROJECT_ID&repositoryName=$QITS_CI_REPO_NAME" \
-        "$QITS_CI_BRANCH" "$summary"
