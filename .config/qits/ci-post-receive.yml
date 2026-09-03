@@ -23,7 +23,7 @@
 # host daemon's to pull.
 #
 # ONE IMAGE, UNDER THE NAME ITS CONSUMERS ALREADY WRITE. The published name stays `qits/workspace`
-# — qits-workspaces' pin and its follow-bump trigger both spell it — while the repository keeps its
+# — qits-workspaces' pin and qits-workspace-editor-oci's base both spell it — while it keeps its
 # own name, the same split `qits-oci-workspace` publishing `qits/workspace-base` records. It used to
 # be two images (a bare-binary `qits/workspace-daemon`, a layered `qits/workspace` built only on
 # release), and the split meant the image a workspace actually runs had no sha coordinate at all.
@@ -37,12 +37,12 @@
 # ci-event-release.yml BESIDE THIS FILE IS THE OTHER HALF. This one names a build by its commit;
 # that one names a release by its version. Neither pushes the other's coordinate.
 #
-# THE BUMP TRAIN'S LOOP IS CLOSED SOMEWHERE ELSE NOW. ci-event-upstream-oci-workspace.yml still
-# follows a toolchain release by rewriting the base pin in docker/Dockerfile and pushing
-# `maintenance/qits-workspace-oci`, and that push still lands here for its build. The release that
-# used to follow it was a third step here asking the qits-workspaces door; qits-maintenance makes
-# that ask itself now, with its own credential, on the same push. This pipeline builds; it no
-# longer releases.
+# THE BUMP TRAIN IS SOMEBODY ELSE'S ENTIRELY NOW, AND THIS PIPELINE JUST BUILDS WHAT IT PUSHES.
+# There is no hop file in this repository any more: qits-maintenance reads the `ARG WORKSPACE_BASE=`
+# default in docker/Dockerfile as an ordinary docker pin, notices a newer `qits/workspace-base`,
+# rewrites the tag on its own branch, and asks the qits-workspaces door itself with its own
+# credential. That branch still lands here for its build, which is all this pipeline owes the train:
+# it builds; it no longer releases.
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800

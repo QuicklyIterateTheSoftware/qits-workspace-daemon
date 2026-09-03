@@ -13,11 +13,13 @@
 # this replaces had no version, no registry and no pipeline, and every platform unwrap deleted it.
 #
 # --- the base pin ---------------------------------------------------------------------------------
-# ONE LINE, ONE VERSION TOKEN, AND A MACHINE EDITS IT. `.config/qits/ci-event-upstream-oci-workspace.yml`
-# seds this exact line when images/qits-oci-workspace releases a toolchain, so the anchored prefix
-# `ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:` is a contract with that
-# file. Move the registry host or the image name here and the bump silently matches nothing — which
-# is why that file re-reads the line after its sed and fails when it did not take.
+# ONE LINE, ONE VERSION TOKEN, AND A MACHINE EDITS IT. This line is a *pin* in qits-maintenance's
+# inventory — it reads literal `ARG <NAME>=<image>:<tag>` defaults as docker pins, at
+# `arg:WORKSPACE_BASE`, and its bump pipeline rewrites the tag in place. The registry host is dropped
+# when the image is matched, so this pin's name is the internal `qits/workspace-base` that
+# qits-workspace-oci releases. Keep the value LITERAL: a `$`, a `@`, a `://` or a tag with no `/`
+# before it are each enough to stop maintenance seeing a pin here, and the base would then silently
+# stop following the toolchain.
 #
 # PINNED BY VERSION, NEVER FOLLOWED BY A FLOATING TAG. images/qits-oci-workspace publishes only
 # `:<version>` (its own ONE TAG PER PIPELINE rule), so there is no floating tag to follow even if we
