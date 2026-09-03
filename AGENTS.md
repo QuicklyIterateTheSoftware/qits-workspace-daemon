@@ -212,18 +212,20 @@ push fails with "tag does not exist".
 taken deliberately — the alternative is CI proving a half of the image green. Both publish steps get
 `timeout-seconds: 7200`; do not trim them.
 
-**The base pin is a machine-edited line.**
+**The base pin is a machine-edited line, and the machine is qits-maintenance.**
 `ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:<version>`
-is `sed`-ed by `.config/qits/ci-event-upstream-oci-workspace.yml`. Reflow it, rename the image or move
-the registry host, and the sed matches nothing — which produces an *empty diff*, indistinguishable
-from "already up to date". The bump reads the line back for exactly that reason. Move the line, move
-the sed and the read-back in the same commit.
+is a docker pin in the maintenance inventory (`arg:WORKSPACE_BASE`; the registry host is dropped when
+the image is matched, so it joins the internal `qits/workspace-base`), and the wrapper's bump
+pipeline rewrites its tag. What breaks it is not a reflow but a **non-literal value**: `$`, `@`,
+`://`, or a tag with no `/` before it, any one of which makes maintenance stop reading a pin here.
+The failure is silent in the worst direction — nothing errors, the base just stops following the
+toolchain — so if you ever need indirection in this value, move the follow somewhere it can be seen.
 
 **`$QITS_REGISTRY` is not reachable from inside a step container.** It is the host daemon's view
 (`localhost:8081`), correct in a `FROM` and in a `docker build`/`docker push` across a mounted
-socket, and useless to `curl`. The bump step's registry probe therefore takes qits-artifacts' origin
-off `$QITS_MAVEN_REGISTRY_URL` and asks `/v2/…/manifests/<version>` there. Do not "simplify" it to
-`$QITS_REGISTRY`.
+socket, and useless to `curl`. Any step here that wants to *ask* the registry something must take
+qits-artifacts' origin off `$QITS_MAVEN_REGISTRY_URL` and go there instead. (The deleted bump hop
+learned this the hard way; the lesson outlives it.)
 
 **Do not add a `latest` tag anywhere.** Not to a pipeline, not as a convenience in a README, not as a
 default in a consumer. The whole failure this replaced was a floating local tag with nothing behind

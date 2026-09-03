@@ -274,15 +274,23 @@ A consumer pins the CalVer. `ci-event-release.yml` declares
 `artifacts: [{ type: docker, name: qits/qits-workspace-daemon }]`, so a release announces one
 `SoftwareRelease` that a consumer's own bump pipeline follows.
 
-**The toolchain base is pinned, and the pin rides the train.** `docker/Dockerfile`'s first line is
+**The toolchain base is pinned, and qits-maintenance moves the pin.** `docker/Dockerfile`'s first
+line is
 
     ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:<version>
 
-One line, one version token. `.config/qits/ci-event-upstream-oci-workspace.yml` seds it when
-`qits-workspace-oci` publishes a toolchain — it probes the registry that the tag really exists, then
-force-pushes `maintenance/qits-workspace-oci`, whose push releases this repository, whose release
-republishes the image on the new base. Nobody is in that loop. Reflowing or renaming that line
-breaks the sed, which is why the bump reads it back and fails when it did not take.
+One line, one version token, and no pipeline in this repository touches it. Maintenance inventories
+literal `ARG <NAME>=<image>:<tag>` defaults as **docker pins** — this one at `arg:WORKSPACE_BASE`,
+dropping the registry host so its name is the internal `qits/workspace-base` — and when
+`qits-workspace-oci` publishes a newer toolchain it rewrites the tag on a branch of its own and asks
+the release door, whose release republishes this image on the new base. Nobody is in that loop.
+
+Until 2026-09-03 the following was a hop file here,
+`.config/qits/ci-event-upstream-oci-workspace.yml`: a pipeline watching a `SoftwareRelease`, probing
+the registry, `sed`ing the line and force-pushing `maintenance/qits-workspace-oci`. It is deleted —
+the same follow is one row in the maintenance inventory now. What survives it is the shape of the
+line: maintenance sees a pin only in a *literal* value, so a `$`, a `@`, a `://` or a tag with no
+`/` before it turns this line back into an ordinary default that nothing follows.
 
 Local dev overrides the pin rather than editing it:
 
