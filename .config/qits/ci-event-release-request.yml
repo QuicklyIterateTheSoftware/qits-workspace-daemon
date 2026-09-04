@@ -1,6 +1,33 @@
-# The pipeline qits-ci runs on every push to a tracked branch of this repository.
+# THE ONE QA PIPELINE THIS REPOSITORY HAS, and it runs for a release request and nothing else.
 #
-# Two steps, both on every branch, and their order is the point:
+# There is no push pipeline any more, and `ci-post-receive.yml` is what this file replaces.
+# qits-projects keeps a backing branch `release/<id>` per open release request — an octopus merge of
+# that request's sources, refolded whenever the set changes — and publishes `ReleaseRequestChanged`
+# on every successful re-fold. The merge primitive that writes that branch fires no `post-receive`
+# and so publishes no `SCMPublishCommit`: without this file the fold exists and NOTHING BUILDS IT.
+# A fold the git host answered `unchanged`, and one that conflicted, publish nothing — so every
+# arrival here is a new sha worth a build.
+#
+# DECIDED AT MAIN, BUILT AT THE FOLD. This file is discovered, parsed and selected at `main`'s head,
+# always; only the run's branch and sha come from the payload, which is why `checkout:` names them
+# as a pair — a sha with no branch whose history holds it is not something a step container can
+# fetch. A release request therefore cannot alter the CI that gates it by folding in a commit that
+# edits this file. Inside a step, $QITS_CI_BRANCH is `release/<id>` and $QITS_CI_SHA is the merged
+# sha; the fold is already checked out, so nothing below fetches or switches refs.
+#
+# EVERY STEP HERE IS GATING, INCLUDING THE ONE THAT PUSHES AN IMAGE. It stays in the gating half on
+# purpose: whatever a run publishes is published before anything later can fail. The coordinate it
+# pushes is the MERGED SHA, which no `ReleaseRequestChanged` is ever derived from, so this pipeline
+# cannot re-trigger itself; and a redelivered event re-pushes identical content under the same tag,
+# which is why nothing here treats an existing tag as an error. The verdict returns on the ordinary
+# `BuildSuccessful`/`BuildFailed` with `commitSha` = the merged sha, which is what qits-projects'
+# `BuildStatusListener` matches on together with `repoId`.
+#
+# ci-event-release.yml BESIDE THIS FILE IS UNTOUCHED and is still the other half: it reacts to this
+# repository's release TAG and publishes the released coordinate. This file names a build by the
+# merged sha; that one names a release by its version. Neither pushes the other's coordinate.
+#
+# Two steps, and their order is the point:
 #
 #   1. `./mvnw verify` — this repo's first rule (CLAUDE.md): a clone of this repo alone builds and
 #      tests green, with no docker and no prior install anywhere. It runs FIRST because it is the
@@ -23,26 +50,37 @@
 # host daemon's to pull.
 #
 # ONE IMAGE, UNDER THE NAME ITS CONSUMERS ALREADY WRITE. The published name stays `qits/workspace`
-# — qits-workspaces' pin and qits-workspace-editor-oci's base both spell it — while it keeps its
+# — qits-workspaces' pin and its follow-bump trigger both spell it — while the repository keeps its
 # own name, the same split `qits-oci-workspace` publishing `qits/workspace-base` records. It used to
 # be two images (a bare-binary `qits/workspace-daemon`, a layered `qits/workspace` built only on
 # release), and the split meant the image a workspace actually runs had no sha coordinate at all.
 # This pipeline is what keeps a sha coordinate under the one name.
 #
 # THE COST OF THAT IS PAID HERE AND IT IS REAL. This image carries the ~3.4 GB toolchain, so every
-# push pulls and pushes it — where the retired bare-binary build was a few tens of megabytes. It buys
-# the thing the split could not: what CI proves green on a commit is the image that runs, rather than
+# fold pulls and pushes it — where the retired bare-binary build was a few tens of megabytes. It buys
+# the thing the split could not: what CI proves green on a fold is the image that runs, rather than
 # one of its two halves. The timeout matches images/qits-oci-workspace's for the same bytes.
 #
-# ci-event-release.yml BESIDE THIS FILE IS THE OTHER HALF. This one names a build by its commit;
-# that one names a release by its version. Neither pushes the other's coordinate.
-#
-# THE BUMP TRAIN IS SOMEBODY ELSE'S ENTIRELY NOW, AND THIS PIPELINE JUST BUILDS WHAT IT PUSHES.
-# There is no hop file in this repository any more: qits-maintenance reads the `ARG WORKSPACE_BASE=`
-# default in docker/Dockerfile as an ordinary docker pin, notices a newer `qits/workspace-base`,
-# rewrites the tag on its own branch, and asks the qits-workspaces door itself with its own
-# credential. That branch still lands here for its build, which is all this pipeline owes the train:
-# it builds; it no longer releases.
+# THE BUMP TRAIN REACHES THIS FILE THROUGH A RELEASE REQUEST NOW, NOT THROUGH A PUSH.
+# ci-event-upstream-oci-workspace.yml still follows a toolchain release by rewriting the base pin in
+# docker/Dockerfile and pushing `maintenance/qits-workspace-oci`. That push no longer builds anything
+# on its own — there is no push pipeline left to catch it — so the branch is a SOURCE, and it is
+# built here when qits-maintenance folds it into a release request. The release that used to follow
+# the build was a third step here asking the qits-workspaces door; qits-maintenance makes that ask
+# itself, with its own credential. This pipeline builds; it no longer releases.
+
+event: ReleaseRequestChanged
+
+when:
+  # repoName, not repoId: the git host's storage coordinate is an opaque UUID since
+  # the identity cutover, so a name match on repoId is not dependable. The event
+  # echoes the public name; a rename updates this line in the same campaign.
+  - repoName: { exact: qits-workspace-daemon }
+
+checkout:
+  branch: backingBranch
+  sha: mergedSha
+
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
