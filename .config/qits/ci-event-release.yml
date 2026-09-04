@@ -2,9 +2,9 @@
 # under the released VERSION.
 #
 # THE SELECTION NAMES THIS REPOSITORY, WHICH READS LIKE A LOOP AND IS NOT — the same shape every
-# sibling's release pipeline has. `SCMPublishTag` says only "this repository now has this tag", and
-# the git host says it the instant a push lands; nothing here pushes a tag. The event that could
-# loop is `SoftwareRelease`, and this file neither listens for it nor emits it.
+# sibling's release pipeline has. `SCMRelease` says only "this repository released this version",
+# and qits-projects says it the instant the tag is written; nothing here releases anything. The
+# event that could loop is `SoftwareRelease`, and this file neither listens for it nor emits it.
 #
 # THE VERSION TAG IS A NEW COORDINATE BESIDE THE SHA, NOT A REPLACEMENT FOR IT. ci-post-receive.yml
 # keeps pushing `:$QITS_CI_SHA` on every green push; what this adds is a name a human and a
@@ -35,30 +35,25 @@
 # hand-rolled builder container is involved, and why there is no `--network` flag; this one carries
 # the short form and points there rather than keeping a second copy of the reasoning to drift.
 #
-# THE TAG IS THE TRIGGER SO THAT A RESTORE NEEDS NOTHING ELSE. The tag is the durable release stamp
-# — it outlives the event log, the run rows and every image store — so a bootstrap replay
-# re-establishes this release by pushing the tag alone, and this pipeline rebuilds and republishes
-# the image from it. A REAL release pushes the tag and has qits-workspaces publish `SCMRelease`
-# beside it; that second event buys the ANNOUNCEMENT, not the image — qits-ci emits
-# `SoftwareRelease` where a green run and an `SCMRelease` for the version meet. So a replay
-# republishes silently and wakes no train (bootstrap-replay-plan.md in the wrapper).
+# THE VERSION TAG IS STILL THE DURABLE STAMP, BUT IT NO LONGER TRIGGERS. Under the release-request
+# flow the tag is written by qits-githost's tag primitive, which announces nothing — the trigger is
+# qits-projects' `SCMRelease`. A bootstrap replay therefore re-establishes a release by pushing the
+# tag quietly and re-presenting the `SCMRelease` through qits-ci's manual trigger door
+# (`POST /ci/api/events/trigger`), which runs this same pipeline. qits-ci still announces
+# `SoftwareRelease` only where a green run and an `SCMRelease` meet.
 #
 # THE FILE HAS TO BE IN PLACE BEFORE THE TAG IT SELECTS IS PUSHED. The bus is at-most-once with no
 # catch-up and no replay, so a trigger file arriving after its event loses that release and looks
 # like a train that quietly did not roll.
 #
-# THE COORDINATE PROBLEM THE OLD SELECTION HAD IS GONE WITH THE EVENT. `SCMRelease.repository`
-# carries the repository's ROW ID, and this repository was registered by the projects self-seed
-# reconcile, so its row id could be a UUID minted per platform instance — nothing a committed config
-# can name. The selection matched nothing, silently, because CI logs matches and never non-matches;
-# `repositoryName` was the answer. `SCMPublishTag` carries TWO identifiers rather than one, and only
-# the second is addressable — the condition below says which and why.
-event: SCMPublishTag
+event: SCMRelease
 when:
-  # repoName, not repoId: since the identity cutover the git host's own coordinate is an opaque
-  # UUID, so a name match on repoId never fires. The tag event echoes the public name the push
-  # was addressed with; a rename updates this line in the same campaign.
-  - repoName: { exact: qits-workspace-daemon }
+  # SCMRelease, not SCMPublishTag: under the release-request flow the version tag is written by
+  # qits-githost's tag primitive, which fires no post-receive and so publishes no SCMPublishTag —
+  # a recipe listening for the tag event never runs again. qits-projects' Auto Release publishes
+  # SCMRelease carrying the repository's public name, and a bootstrap replay arrives as this same
+  # event through qits-ci's manual trigger door. A rename updates this line in the same campaign.
+  - repository: { exact: qits-workspace-daemon }
 artifacts:
   - { type: docker, name: qits/workspace }
 steps:
@@ -82,13 +77,12 @@ steps:
       # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
       # $QITS_EVENT_PAYLOAD; there is no per-field projection. `jq -er` fails the step on an absent
       # field rather than composing a reference out of the word "null".
-      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .tagName)
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
       # THE TAG NAME IS THE VERSION, and release versions are CalVer — digits and dots. Checked
       # before anything is built, because the version becomes a registry TAG: a malformed one would
       # publish under a coordinate nobody can guess, and a value carrying `:` or `/` would land it
-      # under a different name entirely. It carries more weight than it did against SCMRelease: no
-      # release flow vets this string now, since any tag pushed here arrives as one of these events.
-      # qits-ci-daemon and qits-oci refuse the same way for the same reason.
+      # under a different name entirely. qits-ci-daemon and qits-oci refuse the same way for the
+      # same reason.
       case "$version" in
         ''|*[!0-9.]*) echo "not a CalVer tag: $version" >&2; exit 1 ;;
       esac
@@ -109,12 +103,17 @@ steps:
 
       # The two --secret flags are the fleet's shape for a credential inside a build; the launcher
       # injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. This build consumes neither —
-      # its Maven resolve is reactor-only over public repositories, so the Dockerfile mounts no
-      # secret. Inert on both counts: buildx ignores a secret no RUN mounts, and a missing env source
-      # is NOT an error (measured on buildx v0.36.1). ci-post-receive.yml carries the same two flags.
+      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and the Dockerfile's mvnw
+      # RUN mounts them for `.qits-maven-settings.xml`'s `qits-central-proxy` server — never a
+      # --build-arg, which is recorded in a pullable image's history.
+      #
+      # --network host and the QITS_MAVEN_CENTRAL_URL build-arg route the RUN's Maven Central
+      # resolve through the mirror: the injected URL is an edge vhost on 127.0.0.1:8080, which only
+      # the host namespace reaches. Empty — an older qits-ci, or the mirror plane turned off —
+      # deactivates the settings profile and the resolve goes to Central directly, as it always did.
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$version"
-      docker build \
+      docker build --network host \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$ref" -f docker/Dockerfile .
@@ -135,11 +134,12 @@ steps:
       #
       # The second `docker build` reaches the Dockerfile's `sbom` stage — a `FROM scratch` holding
       # only the daemon module's CycloneDX document, exported with `--output` instead of pushed.
-      # Secrets are BYTE-IDENTICAL to the image build above and there is still no `--network` flag,
-      # which is what makes every layer a cache hit and this export seconds rather than a second
-      # native compile. `--target sbom` also stops short of `${WORKSPACE_BASE}`, so the ~3.4 GB
-      # toolchain is not pulled a second time for a document that does not describe it.
-      docker build --target sbom --output type=local,dest=.sbom \
+      # Network, build-arg and secrets are BYTE-IDENTICAL to the image build above, which is what
+      # makes every layer a cache hit and this export seconds rather than a second native compile.
+      # `--target sbom` also stops short of `${WORKSPACE_BASE}`, so the ~3.4 GB toolchain is not
+      # pulled a second time for a document that does not describe it.
+      docker build --network host --target sbom --output type=local,dest=.sbom \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -f docker/Dockerfile .
