@@ -267,7 +267,7 @@ platform unwrap. Two coordinates replace it, each owned by one pipeline:
 
 | Coordinate | Pushed by | Means |
 |---|---|---|
-| `:<sha>` | `.config/qits/ci-post-receive.yml` | this commit built green |
+| `:<sha>` | `.config/qits/ci-event-release-request.yml` | this release request's fold built green |
 | `:<calver>` | `.config/qits/ci-event-release.yml` | this version was released |
 
 A consumer pins the CalVer. `ci-event-release.yml` declares
@@ -282,8 +282,9 @@ line is
 One line, one version token, and no pipeline in this repository touches it. Maintenance inventories
 literal `ARG <NAME>=<image>:<tag>` defaults as **docker pins** — this one at `arg:WORKSPACE_BASE`,
 dropping the registry host so its name is the internal `qits/workspace-base` — and when
-`qits-workspace-oci` publishes a newer toolchain it rewrites the tag on a branch of its own and asks
-the release door, whose release republishes this image on the new base. Nobody is in that loop.
+`qits-workspace-oci` publishes a newer toolchain it rewrites the tag on a branch of its own and opens
+a **release request** for it, whose release republishes this image on the new base. Nobody is in that
+loop.
 
 Until 2026-09-03 the following was a hop file here,
 `.config/qits/ci-event-upstream-oci-workspace.yml`: a pipeline watching a `SoftwareRelease`, probing

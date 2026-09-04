@@ -123,5 +123,7 @@ steps:
       # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
       # cache either way — while under the containerd image store it drops the last reference to
       # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
-      # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
-      # that broke the release of 2026-08-11.
+      # this one Dockerfile do run concurrently — a re-fold landing while the previous one is still
+      # building, or this file and ci-event-release.yml overlapping — which is the shape of the race
+      # that broke the release of 2026-08-11, back when the two were a push and an environment
+      # branch.
