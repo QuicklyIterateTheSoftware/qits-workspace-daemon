@@ -26,9 +26,9 @@
 # wanted one — and following one would make this image unreproducible: rebuilding a released tag
 # would silently pick up a different toolchain.
 #
-# THE DEFAULT IS THE PIN, WHICH IS WHY OVERRIDING IT IS SAFE. CI passes no `--build-arg`, so a
-# release rebuilds on exactly the toolchain its tree was released with. A developer with a
-# hand-built base passes one:
+# THE DEFAULT IS THE PIN, WHICH IS WHY OVERRIDING IT IS SAFE. CI passes no `--build-arg` for it
+# (its only build-arg is QITS_MAVEN_CENTRAL_URL below), so a release rebuilds on exactly the
+# toolchain its tree was released with. A developer with a hand-built base passes one:
 #
 #     docker build -t qits/workspace:native -f docker/Dockerfile \
 #       --build-arg WORKSPACE_BASE=qits/workspace-base:latest .
@@ -72,14 +72,29 @@ RUN ./mvnw --version
 # keeps this cheap — without it this line drags in every target/ dir.
 COPY . .
 
+# Where Maven Central is mirrored, when it is. CI passes the platform's pull-through
+# (qits-platform-mirror's central proxy, the same authority the FROM lines pull through); EMPTY —
+# the default — means direct Maven Central. `.qits-maven-settings.xml` activates its central-proxy
+# profile only on a non-empty value, so a hand build that passes nothing resolves exactly as it
+# always did.
+ARG QITS_MAVEN_CENTRAL_URL=
+ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
+
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
+#
+# The two secret mounts put the CI run's commissioned client into THIS `RUN`'s environment and
+# nowhere else — not a layer, not the image history. `.qits-maven-settings.xml` reads them as the
+# `qits-central-proxy` server; Maven sends them only if the mirror route ever answers 401 (edge
+# reads are anonymous today). Absent secrets leave both unset, which is every hand build's state.
 #
 # Tests are skipped because they are not skippable HERE: CommandRegistryTest spawns real PTYs and
 # the git suites fork real git, both of which want a workspace this stage does not have. `./mvnw
 # verify` on a clone is the gate for those, and the CI pipeline runs it before this build so a broken
 # test never costs a GraalVM compile.
-RUN ./mvnw -B -ntp -pl workspace-daemon -am package -Dnative -DskipTests \
+RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
+    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
       -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \

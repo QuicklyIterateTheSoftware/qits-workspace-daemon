@@ -109,12 +109,17 @@ steps:
 
       # The two --secret flags are the fleet's shape for a credential inside a build; the launcher
       # injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. This build consumes neither —
-      # its Maven resolve is reactor-only over public repositories, so the Dockerfile mounts no
-      # secret. Inert on both counts: buildx ignores a secret no RUN mounts, and a missing env source
-      # is NOT an error (measured on buildx v0.36.1). ci-post-receive.yml carries the same two flags.
+      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and the Dockerfile's mvnw
+      # RUN mounts them for `.qits-maven-settings.xml`'s `qits-central-proxy` server — never a
+      # --build-arg, which is recorded in a pullable image's history.
+      #
+      # --network host and the QITS_MAVEN_CENTRAL_URL build-arg route the RUN's Maven Central
+      # resolve through the mirror: the injected URL is an edge vhost on 127.0.0.1:8080, which only
+      # the host namespace reaches. Empty — an older qits-ci, or the mirror plane turned off —
+      # deactivates the settings profile and the resolve goes to Central directly, as it always did.
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$version"
-      docker build \
+      docker build --network host \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$ref" -f docker/Dockerfile .
@@ -135,11 +140,12 @@ steps:
       #
       # The second `docker build` reaches the Dockerfile's `sbom` stage — a `FROM scratch` holding
       # only the daemon module's CycloneDX document, exported with `--output` instead of pushed.
-      # Secrets are BYTE-IDENTICAL to the image build above and there is still no `--network` flag,
-      # which is what makes every layer a cache hit and this export seconds rather than a second
-      # native compile. `--target sbom` also stops short of `${WORKSPACE_BASE}`, so the ~3.4 GB
-      # toolchain is not pulled a second time for a document that does not describe it.
-      docker build --target sbom --output type=local,dest=.sbom \
+      # Network, build-arg and secrets are BYTE-IDENTICAL to the image build above, which is what
+      # makes every layer a cache hit and this export seconds rather than a second native compile.
+      # `--target sbom` also stops short of `${WORKSPACE_BASE}`, so the ~3.4 GB toolchain is not
+      # pulled a second time for a document that does not describe it.
+      docker build --network host --target sbom --output type=local,dest=.sbom \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -f docker/Dockerfile .

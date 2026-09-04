@@ -88,7 +88,11 @@ steps:
       # The daemon runs this with `bash -c` and no -e, so without this a failed build is swallowed
       # and the run reports SUCCESS.
       set -eu
-      ./mvnw -B -ntp verify
+      # Maven Central through the platform mirror's in-network alias — empty (an older qits-ci that
+      # injects nothing, or a deployment that turned the mirror plane off) deactivates the settings
+      # profile and Central is resolved directly.
+      export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify
 
   - image: qits/build-images/ci-base:latest
     docker: true
@@ -101,14 +105,17 @@ steps:
       set -eu
       # The two --secret flags are the fleet's shape for a credential inside a build: the launcher
       # injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and a Dockerfile that needs it
-      # mounts it on one RUN — never a --build-arg, which is recorded in a pullable image's history.
-      # This build needs none: its Maven resolve is reactor-only over public repositories, so there
-      # is no `.qits-maven-settings.xml` here and no mount to feed. Both halves are free — buildx
-      # ignores a secret no RUN mounts, and a missing env source is NOT an error (measured on buildx
-      # v0.36.1, the build runs green with the variable unset).
+      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and the Dockerfile's mvnw
+      # RUN mounts them for `.qits-maven-settings.xml`'s `qits-central-proxy` server — never a
+      # --build-arg, which is recorded in a pullable image's history.
+      #
+      # --network host and the QITS_MAVEN_CENTRAL_URL build-arg route the RUN's Maven Central
+      # resolve through the mirror: the injected URL is an edge vhost on 127.0.0.1:8080, which only
+      # the host namespace reaches. Empty — an older qits-ci, or the mirror plane turned off —
+      # deactivates the settings profile and the resolve goes to Central directly, as it always did.
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace:$QITS_CI_SHA"
-      docker build \
+      docker build --network host \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$ref" -f docker/Dockerfile .
