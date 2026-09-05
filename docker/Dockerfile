@@ -50,9 +50,11 @@ ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.904.2236
 # disk. The tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when
 # quay moves it.
 #
-# All three base references here are the HOST DAEMON's to resolve, not this build's, which is why
-# the CI step declares `docker: true` and passes no `--network`: nothing inside the build dials the
-# platform. The reactor declares no `<repositories>`, so the compile below resolves from Maven
+# All three base references here are the BUILDER's to resolve, not this file's: under the platform
+# buildkitd the committed edge-vhost spellings are rewritten to the in-network registry aliases by
+# the builder's own registry config (qits-containers' buildkitd.toml), and under a developer's
+# `docker build` the host daemon resolves them as it always did — one committed spelling, two
+# resolvers. The reactor declares no `<repositories>`, so the compile below resolves from Maven
 # Central.
 FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
@@ -84,16 +86,23 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # native-image RAM so the build is deterministic on small machines.
 #
 # The two secret mounts put the CI run's commissioned client into THIS `RUN`'s environment and
-# nowhere else — not a layer, not the image history. `.qits-maven-settings.xml` reads them as the
-# `qits-central-proxy` server; Maven sends them only if the mirror route ever answers 401 (edge
-# reads are anonymous today). Absent secrets leave both unset, which is every hand build's state.
+# nowhere else — not a layer, not the image history. FILE form (`/run/secrets/<id>`, read into the
+# command's own environment), not the `env=` mount form: env= needs a dockerfile frontend the
+# builder chooses, while the bare file mount is served identically by every frontend version — and
+# under the platform builder the frontend is the builder's, not this file's, to pick.
+# `.qits-maven-settings.xml` reads the two variables as the `qits-central-proxy` server; Maven
+# sends them only if the mirror route ever answers 401 (edge reads are anonymous today). Absent
+# secrets leave both empty (`|| true` is every hand build's state), which the settings read exactly
+# as they read unset.
 #
 # Tests are skipped because they are not skippable HERE: CommandRegistryTest spawns real PTYs and
 # the git suites fork real git, both of which want a workspace this stage does not have. `./mvnw
 # verify` on a clone is the gate for those, and the CI pipeline runs it before this build so a broken
 # test never costs a GraalVM compile.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
+    QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
