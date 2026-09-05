@@ -144,9 +144,12 @@ steps:
       # never a --build-arg, which is recorded in a pullable image's history, and never the env=
       # mount form, which couples the recipe to the builder's dockerfile-frontend version. /tmp is
       # outside the clone, so neither file can enter the build context.
+      # `-` rather than bare expansion under set -u: a deployment that commissions nothing sends
+      # no pair at all, and that has to stay a build that resolves anonymously — the property the
+      # env-form secret mounts always had — rather than a step that dies on an unset variable.
       umask 077
-      printf '%s' "$QITS_COMMISSIONED_CLIENT_ID" > /tmp/qits-client-id
-      printf '%s' "$QITS_COMMISSIONED_CLIENT_SECRET" > /tmp/qits-client-secret
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_ID-}" > /tmp/qits-client-id
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_SECRET-}" > /tmp/qits-client-secret
 
       # NO --network host, AND NOTHING REPLACES IT. Every `RUN` executes in the platform builder's
       # own network namespace on qits-net, so the Maven Central mirror is dialled by its in-network

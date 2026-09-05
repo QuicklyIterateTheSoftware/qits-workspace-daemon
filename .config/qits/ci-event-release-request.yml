@@ -119,9 +119,12 @@ steps:
       # pullable image's history. The launcher injects the run's commissioned idp client as
       # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; the Dockerfile's mvnw RUN
       # reads the files for `.qits-maven-settings.xml`'s `qits-central-proxy` server.
+      # `-` rather than bare expansion under set -u: a deployment that commissions nothing sends
+      # no pair at all, and that has to stay a build that resolves anonymously — the property the
+      # env-form secret mounts always had — rather than a step that dies on an unset variable.
       umask 077
-      printf '%s' "$QITS_COMMISSIONED_CLIENT_ID" > /tmp/qits-client-id
-      printf '%s' "$QITS_COMMISSIONED_CLIENT_SECRET" > /tmp/qits-client-secret
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_ID-}" > /tmp/qits-client-id
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_SECRET-}" > /tmp/qits-client-secret
       # The build-arg carries the mirror's IN-NETWORK route ($QITS_MAVEN_PROXY_URL): a RUN executes
       # in the builder's namespace on qits-net now, where the edge vhost the old --network host
       # reached does not resolve. Empty — an older qits-ci, or the mirror plane turned off —
