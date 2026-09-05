@@ -87,18 +87,16 @@ steps:
     # needs maven on ANY side of the builder — the reactor is built inside the image's own builder
     # stage.
     #
-    # `docker: true` IS THE BUILD DECLARATION, kept through the migration on purpose: it is the
-    # per-step, diff-visible opt-in the platform keys everything on — the commissioned credential,
-    # the auth document, and now the platform builder's address, which qits-containers injects as
-    # $BUILDKIT_HOST into exactly these steps. The script below never touches the socket the flag
-    # still mounts; taking the mount itself away is the fleet-wide end state
-    # (qits-buildkit-plan.md), not one recipe's move.
+    # `build: true` IS THE BUILD DECLARATION — the socketless generation of `docker: true`: the
+    # same per-step, diff-visible opt-in, keying the commissioned credential and the build
+    # environment ($QITS_BUILD_REGISTRY here, $BUILDKIT_HOST from qits-containers), and no docker
+    # socket anywhere in this step. The end state qits-buildkit-plan.md promised, arrived.
     #
     # TWO HOURS, NOT ONE. The build pulls the ~3.4 GB toolchain base and pushes a layer on top of
     # it, on top of the daemon's native compile. images/qits-oci-workspace found an hour short of
     # headroom for the same bytes on a cold cache.
   - image: qits/build-images/ci-base:latest
-    docker: true
+    build: true
     timeout-seconds: 7200
     script: |
       # The daemon runs this with `bash -c` and no -e, so without this a failed buildctl call is

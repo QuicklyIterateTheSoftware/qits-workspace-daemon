@@ -41,11 +41,10 @@
 # here.
 #
 # THE BUILD RUNS ON THE PLATFORM'S OWN BUILDKITD, NOT THE HOST DAEMON — qits-buildkit-plan.md in
-# the wrapper is the whole migration; this file is its first converted recipe. `docker: true` stays
-# as the build DECLARATION: it is the per-step, diff-visible opt-in the platform keys everything on
-# (the commissioned credential, the auth document, and the $BUILDKIT_HOST qits-containers injects
-# into exactly these steps). The script never touches the socket the flag still mounts; taking the
-# mount away once no recipe uses it is the fleet-wide end state, not this file's move.
+# the wrapper is the whole migration; this file is its first converted recipe. `build: true` is the
+# converted declaration: the same per-step, diff-visible opt-in `docker: true` was — it keys the
+# commissioned credential and the build environment — and NO socket. The root-equivalence this
+# step used to carry is gone, which is the migration's whole point.
 #
 # THE DOCKERFILE'S REGISTRY REFERENCES STAY COMMITTED AS THEY ARE — the mirror and registry edge
 # vhosts — and the builder's own registry config rewrites them to the platform aliases
@@ -100,7 +99,7 @@ steps:
       ./mvnw -B -ntp -s .qits-maven-settings.xml verify
 
   - image: qits/build-images/ci-base:latest
-    docker: true
+    build: true
     timeout-seconds: 7200
     script: |
       # Same reason as above, and one more: without -e a failed buildctl call would let a later
