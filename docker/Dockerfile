@@ -86,14 +86,17 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # The two secret mounts put the CI run's commissioned client into THIS `RUN`'s environment and
 # nowhere else — not a layer, not the image history. `.qits-maven-settings.xml` reads them as the
 # `qits-central-proxy` server; Maven sends them only if the mirror route ever answers 401 (edge
-# reads are anonymous today). Absent secrets leave both unset, which is every hand build's state.
+# reads are anonymous today). Absent secrets leave both empty, which is every hand build's state.
+# The `RUN` reads the two mounted files itself: docker 26's BuildKit has no `env=` mount option.
 #
 # Tests are skipped because they are not skippable HERE: CommandRegistryTest spawns real PTYs and
 # the git suites fork real git, both of which want a workspace this stage does not have. `./mvnw
 # verify` on a clone is the gate for those, and the CI pipeline runs it before this build so a broken
 # test never costs a GraalVM compile.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
+    QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
