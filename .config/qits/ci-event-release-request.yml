@@ -41,11 +41,10 @@
 # here.
 #
 # THE BUILD RUNS ON THE PLATFORM'S OWN BUILDKITD, NOT THE HOST DAEMON — qits-buildkit-plan.md in
-# the wrapper is the whole migration; this file is its first converted recipe. `docker: true` stays
-# as the build DECLARATION: it is the per-step, diff-visible opt-in the platform keys everything on
-# (the commissioned credential, the auth document, and the $BUILDKIT_HOST qits-containers injects
-# into exactly these steps). The script never touches the socket the flag still mounts; taking the
-# mount away once no recipe uses it is the fleet-wide end state, not this file's move.
+# the wrapper is the whole migration; this file is its first converted recipe. `build: true` is the
+# converted declaration: the same per-step, diff-visible opt-in `docker: true` was — it keys the
+# commissioned credential and the build environment — and NO socket. The root-equivalence this
+# step used to carry is gone, which is the migration's whole point.
 #
 # THE DOCKERFILE'S REGISTRY REFERENCES STAY COMMITTED AS THEY ARE — the mirror and registry edge
 # vhosts — and the builder's own registry config rewrites them to the platform aliases
@@ -100,7 +99,7 @@ steps:
       ./mvnw -B -ntp -s .qits-maven-settings.xml verify
 
   - image: qits/build-images/ci-base:latest
-    docker: true
+    build: true
     timeout-seconds: 7200
     script: |
       # Same reason as above, and one more: without -e a failed buildctl call would let a later
@@ -120,9 +119,12 @@ steps:
       # pullable image's history. The launcher injects the run's commissioned idp client as
       # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; the Dockerfile's mvnw RUN
       # reads the files for `.qits-maven-settings.xml`'s `qits-central-proxy` server.
+      # `-` rather than bare expansion under set -u: a deployment that commissions nothing sends
+      # no pair at all, and that has to stay a build that resolves anonymously — the property the
+      # env-form secret mounts always had — rather than a step that dies on an unset variable.
       umask 077
-      printf '%s' "$QITS_COMMISSIONED_CLIENT_ID" > /tmp/qits-client-id
-      printf '%s' "$QITS_COMMISSIONED_CLIENT_SECRET" > /tmp/qits-client-secret
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_ID-}" > /tmp/qits-client-id
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_SECRET-}" > /tmp/qits-client-secret
       # The build-arg carries the mirror's IN-NETWORK route ($QITS_MAVEN_PROXY_URL): a RUN executes
       # in the builder's namespace on qits-net now, where the edge vhost the old --network host
       # reached does not resolve. Empty — an older qits-ci, or the mirror plane turned off —
