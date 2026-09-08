@@ -647,14 +647,16 @@ class AgentLaunchServiceTest {
     }
 
     @Test
-    void kimiChatsCarryTheAcpProtocolFactoryAndClaudeChatsDoNot() {
+    void everyChatCarriesItsHarnessTransport() {
       defaultType = AgentType.KIMI;
       service().launchChat(chat(AgentMcpScope.REPOSITORY));
       assertNotNull(commands.last().protocolFactory(), "Kimi has no stdin chat mode");
 
       defaultType = AgentType.CLAUDE;
       service().launchChat(chat(AgentMcpScope.REPOSITORY));
-      assertNull(commands.last().protocolFactory(), "null means the default stream-json transport");
+      assertNotNull(
+          commands.last().protocolFactory(),
+          "Claude's stream-json transport is supplied too — it carries the Remote Control enable");
     }
 
     @Test
