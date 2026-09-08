@@ -157,13 +157,26 @@ with it (`mcp__observability__telemetry*`); under the old names they allowlisted
 server declared. If you touch `AgentLaunchService.serversFor`, the tool-name prefix and the server
 key have to move together.
 
-**The pre-approval lists are reads, with one written-down exception.** `READ_ONLY_*` means what it
-says: a mutating tool is left out so Claude still prompts. `TICKET_THREAD_TOOLS`
-(`add_ticket_comment`, `update_ticket_comment`) is the single bucket that breaks that, concatenated
-onto `READ_ONLY_REPOSITORY_TOOLS` wherever the `repository` server is wired; its javadoc carries the
-reasoning and names what stays out (`create_ticket`, `update_ticket`, `transition_ticket` — filing
-and resolving are not a workspace's act). Keep any further exception in its own named bucket for the
-same reason: one smuggled into a `READ_ONLY_` list is one nobody has to read.
+**The pre-approval lists are reads, with two written-down exceptions.** `READ_ONLY_*` means what it
+says: a mutating tool is left out so Claude still prompts. Two named buckets break that, both
+concatenated onto `READ_ONLY_REPOSITORY_TOOLS` wherever the `repository` server is wired, and each
+one's javadoc carries its own reasoning — which is why they are two buckets and not one list:
+
+- `TICKET_THREAD_TOOLS` (`add_ticket_comment`, `update_ticket_comment`) — commenting is additive and
+  a comment stays editable, so the worst case is a wrongly-worded note.
+- `TICKET_RESOLUTION_TOOLS` (`transition_ticket`) — added 2026-09-08 for one caller. qits-projects'
+  "Assign agent" tells the dispatched agent to resolve the ticket once its changes are released, and
+  on the kimi path an unlisted tool does not exist, so without this the instruction is a dead letter
+  rather than a prompt. It is acceptable because resolving is reversible through the same tool and
+  because the dispatch is a person pressing a button on a specific ticket.
+
+What stays out is the filing half — `create_ticket`, `update_ticket`; the projects-daemon front desk
+is the filing surface. Keep any further exception in its own named bucket for the same reason: one
+smuggled into a `READ_ONLY_` list is one nobody has to read.
+
+Neither bucket is the fence that matters. An autonomous run marks its MCP urls `agentReadOnly=true`
+and qits-projects' `ReadOnlyRepositoryToolFilter` hides all five ticket writes behind it; nothing
+here can buy past that, so widening a bucket only ever widens chat and interactive launches.
 
 The asymmetry that makes these lists worth care: for Claude every launch is `--skipPermissions` and
 no `--allowedTools` is ever emitted, so the lists are a *latent* pre-approval story. For the kimi ACP

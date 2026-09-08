@@ -133,17 +133,49 @@ public final class AgentLaunchService {
    * convenience at all — {@code enabledTools} is a hard set there, so a tool left out of it does not
    * exist for the session, and without these two the thread is unreachable rather than prompted.
    *
-   * <p>What is deliberately absent is the rest of the domain: {@code create_ticket}, {@code
-   * update_ticket} and {@code transition_ticket} stay unlisted like every other write on every
-   * server here. Filing a ticket and resolving one are plan-changing acts, and they stay a prompted
-   * act for Claude and out of reach for kimi; the projects-daemon front desk is the filing surface.
+   * <p>What is deliberately absent is the filing half of the domain: {@code create_ticket} and
+   * {@code update_ticket} stay unlisted like every other write on every server here. Filing a ticket
+   * and editing somebody's else's are plan-changing acts, and they stay a prompted act for Claude
+   * and out of reach for kimi; the projects-daemon front desk is the filing surface. {@code
+   * transition_ticket} used to be named here beside them and is now its own bucket below — the
+   * paragraph this one replaces argued the general case and was written before a ticket could be
+   * dispatched onto a workspace at all.
    */
   private static final List<String> TICKET_THREAD_TOOLS =
       List.of("mcp__repository__add_ticket_comment", "mcp__repository__update_ticket_comment");
 
-  /** The repository server's full pre-approval: its reads, plus the ticket-thread exception. */
+  /**
+   * {@code transition_ticket} — the second named exception, and it exists because of one caller.
+   *
+   * <p>qits-projects' "Assign agent" dispatches an agent onto a ticket and its first turn (composed
+   * by {@code TicketDispatchController.instruction}) now ends by telling the agent to resolve that
+   * ticket once its changes are released. Nothing else on this platform asks a workspace agent to
+   * move a ticket's status, and without the tool here that sentence is an instruction the session
+   * cannot carry out: on the kimi path {@code enabledTools} is the session's whole tool surface, so
+   * an unlisted tool does not exist rather than being prompted for.
+   *
+   * <p>Its own bucket, not appended to {@link #TICKET_THREAD_TOOLS}, because the two are exceptions
+   * for different reasons and the reasons are what a reader has to weigh. Commenting is additive and
+   * costs a wrongly-worded note; resolving is a statement about somebody's bug that people act on.
+   * What makes it acceptable is that it is <em>reversible through the same door</em> — reopening is
+   * the same tool — so the worst case is a status a person flips back, and that the dispatch is a
+   * person pressing a button on a specific ticket rather than an agent choosing a ticket to close.
+   *
+   * <p>The fence that matters is unchanged and is not this list. An <b>autonomous</b> run carries
+   * the {@code agentReadOnly=true} marker (see {@link #renderAutonomousChat}), and qits-projects'
+   * {@code ReadOnlyRepositoryToolFilter} hides all five ticket writes behind it — {@code
+   * transition_ticket} first among them, since a run steered by an untrusted commit message must not
+   * declare somebody else's bug resolved. This bucket cannot buy past that filter; it only widens
+   * the chat/interactive launches, which is where the dispatch lives.
+   */
+  private static final List<String> TICKET_RESOLUTION_TOOLS =
+      List.of("mcp__repository__transition_ticket");
+
+  /** The repository server's full pre-approval: its reads, plus the two ticket exceptions. */
   private static final List<String> REPOSITORY_TOOLS =
-      Stream.concat(READ_ONLY_REPOSITORY_TOOLS.stream(), TICKET_THREAD_TOOLS.stream()).toList();
+      Stream.of(READ_ONLY_REPOSITORY_TOOLS, TICKET_THREAD_TOOLS, TICKET_RESOLUTION_TOOLS)
+          .flatMap(List::stream)
+          .toList();
 
   /**
    * The read-only tools of the {@code observability} MCP server — the five telemetry reads, which
@@ -634,8 +666,8 @@ public final class AgentLaunchService {
 
   /**
    * A scoped MCP server: the key it is registered under, its scoped URL, and its pre-approved tools
-   * — its reads, plus (on {@code repository}) the ticket-thread pair {@link #TICKET_THREAD_TOOLS}
-   * documents.
+   * — its reads, plus (on {@code repository}) the two ticket exceptions {@link
+   * #TICKET_THREAD_TOOLS} and {@link #TICKET_RESOLUTION_TOOLS} document.
    */
   public record ScopedMcp(String key, String url, List<String> allowedTools) {}
 
