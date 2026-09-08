@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Launches a coding agent into this workspace as a first-class command: rendered by a {@link
@@ -96,7 +97,14 @@ public final class AgentLaunchService {
           "mcp__actions__listRepositoryActions",
           "mcp__actions__getRepositoryAction");
 
-  /** The read-only tools of the {@code repository} MCP server, pre-approved the same way. */
+  /**
+   * The read-only tools of the {@code repository} MCP server, pre-approved the same way.
+   *
+   * <p>{@code list_tickets} and {@code get_ticket} sit here at the same standing as the navigation
+   * reads: surveying the tickets on a repository is how a session finds out what it was sent to do,
+   * and {@code get_ticket} returns the whole comment thread with the ticket, so one call is the
+   * reading half of the ticket domain. Neither changes anything.
+   */
   private static final List<String> READ_ONLY_REPOSITORY_TOOLS =
       List.of(
           "mcp__repository__listRepositories",
@@ -106,7 +114,35 @@ public final class AgentLaunchService {
           "mcp__repository__listCommitChanges",
           "mcp__repository__getCommitFileDiff",
           "mcp__repository__listActions",
-          "mcp__repository__taskPrompt");
+          "mcp__repository__taskPrompt",
+          "mcp__repository__list_tickets",
+          "mcp__repository__get_ticket");
+
+  /**
+   * The two ticket-thread writes of the {@code repository} MCP server — the one deliberate exception
+   * to "only reads are pre-approved", and kept in its own bucket rather than smuggled into the
+   * read-only list above so the exception has to be read to be taken.
+   *
+   * <p>A workspace agent that investigated or fixed something should be able to say so on the
+   * ticket's thread without a prompt in the way. Commenting is additive — it appends to a thread
+   * rather than changing a ticket's state — and a comment stays editable, so pre-approving the pair
+   * costs at worst a wrongly-worded note, never a changed plan. Autonomous runs lose both anyway:
+   * the {@code agentReadOnly=true} marker puts qits-projects' own tool filter in front of every
+   * mutating tool, and this daemon's list cannot buy past it. For kimi the bucket is not a
+   * convenience at all — {@code enabledTools} is a hard set there, so a tool left out of it does not
+   * exist for the session, and without these two the thread is unreachable rather than prompted.
+   *
+   * <p>What is deliberately absent is the rest of the domain: {@code create_ticket}, {@code
+   * update_ticket} and {@code transition_ticket} stay unlisted like every other write on every
+   * server here. Filing a ticket and resolving one are plan-changing acts, and they stay a prompted
+   * act for Claude and out of reach for kimi; the projects-daemon front desk is the filing surface.
+   */
+  private static final List<String> TICKET_THREAD_TOOLS =
+      List.of("mcp__repository__add_ticket_comment", "mcp__repository__update_ticket_comment");
+
+  /** The repository server's full pre-approval: its reads, plus the ticket-thread exception. */
+  private static final List<String> REPOSITORY_TOOLS =
+      Stream.concat(READ_ONLY_REPOSITORY_TOOLS.stream(), TICKET_THREAD_TOOLS.stream()).toList();
 
   /**
    * The read-only tools of the {@code observability} MCP server — the five telemetry reads, which
@@ -583,11 +619,15 @@ public final class AgentLaunchService {
     return agent;
   }
 
-  /** A scoped MCP server: the key it is registered under, its scoped URL, and its read-only tools. */
+  /**
+   * A scoped MCP server: the key it is registered under, its scoped URL, and its pre-approved tools
+   * — its reads, plus (on {@code repository}) the ticket-thread pair {@link #TICKET_THREAD_TOOLS}
+   * documents.
+   */
   public record ScopedMcp(String key, String url, List<String> allowedTools) {}
 
   /**
-   * The scoped MCP servers for {@code scope}, with their read-only allowlists.
+   * The scoped MCP servers for {@code scope}, with their pre-approval lists.
    *
    * <p>{@code repository} and {@code observability} are two servers on two services (qits-projects
    * and qits-observability), not one server with two halves. They are listed together wherever the
@@ -609,7 +649,7 @@ public final class AgentLaunchService {
                 + repo
                 + "&workspaceId="
                 + workspace.workspaceId(),
-            READ_ONLY_REPOSITORY_TOOLS);
+            REPOSITORY_TOOLS);
     // Telemetry is bucketed per workspace, and qits-observability's tool filter hides the tools
     // outright unless both narrowings are present — so this server is only worth listing where they
     // are, and carries exactly the two scopes that service reads (no projectId: it has no notion of
@@ -645,7 +685,7 @@ public final class AgentLaunchService {
               new ScopedMcp(
                   "repository",
                   endpoints.mcpUrl("repository") + "?projectId=" + projectId,
-                  READ_ONLY_REPOSITORY_TOOLS));
+                  REPOSITORY_TOOLS));
     };
   }
 

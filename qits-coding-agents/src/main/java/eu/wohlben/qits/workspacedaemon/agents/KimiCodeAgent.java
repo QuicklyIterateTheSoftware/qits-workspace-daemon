@@ -239,7 +239,10 @@ public class KimiCodeAgent extends CodingAgent {
    * Strips the Claude-prefixed {@code mcp__<server>__} from the tools that belong to {@code
    * serverKey}, yielding the bare per-server names kimi's {@code enabledTools} takes (both the
    * file-based {@code mcp.json} and the ACP {@code session/new} channel use this form). Shared with
-   * the ACP chat launch, which builds its allowlist from the same {@code READ_ONLY_*} lists.
+   * the ACP chat launch, which builds its allowlist from the same {@code AgentLaunchService} lists.
+   *
+   * <p>Worth remembering on both paths: what Claude reads as a pre-approval kimi reads as its whole
+   * tool surface, so dropping a name here does not add a prompt, it removes the tool.
    */
   public static List<String> stripServerPrefix(String serverKey, List<String> tools) {
     String prefix = "mcp__" + serverKey + "__";

@@ -386,6 +386,46 @@ class AgentLaunchServiceTest {
     }
 
     @Test
+    void theTicketReadsArePreApprovedWithTheOtherRepositoryReads() {
+      List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.REPOSITORY);
+
+      // get_ticket returns the ticket and its whole comment thread, so the survey is two tools.
+      assertTrue(servers.get(0).allowedTools().contains("mcp__repository__list_tickets"));
+      assertTrue(servers.get(0).allowedTools().contains("mcp__repository__get_ticket"));
+    }
+
+    @Test
+    void theTicketThreadWritesArePreApprovedAndTheFilingOnesAreNot() {
+      // The one deliberate exception to "only reads": commenting is additive and editable, so
+      // pre-approving it costs a wrongly-worded note, not a changed plan — and for kimi, whose
+      // enabledTools is a hard set, it is the difference between the thread existing and not.
+      // Filing and resolving stay out: they change the plan, so they remain a prompted act for
+      // Claude and unreachable for kimi.
+      // Every scope that wires the repository server, so a branch added later cannot quietly drop
+      // the pair or quietly widen past it.
+      for (AgentMcpScope scope : AgentMcpScope.values()) {
+        assertTicketPreApproval(repositoryServer(service().serversFor(scope)), scope.name());
+      }
+    }
+
+    private AgentLaunchService.ScopedMcp repositoryServer(
+        List<AgentLaunchService.ScopedMcp> servers) {
+      return servers.stream()
+          .filter(s -> s.key().equals("repository"))
+          .findFirst()
+          .orElseThrow(() -> new AssertionError("every scope wires the repository server"));
+    }
+
+    private void assertTicketPreApproval(AgentLaunchService.ScopedMcp server, String scope) {
+      List<String> tools = server.allowedTools();
+      assertTrue(tools.contains("mcp__repository__add_ticket_comment"), scope);
+      assertTrue(tools.contains("mcp__repository__update_ticket_comment"), scope);
+      assertFalse(tools.contains("mcp__repository__create_ticket"), scope);
+      assertFalse(tools.contains("mcp__repository__update_ticket"), scope);
+      assertFalse(tools.contains("mcp__repository__transition_ticket"), scope);
+    }
+
+    @Test
     void theTelemetryToolsArePreApprovedUnderTheServerThatActuallyDeclaresThem() {
       List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.REPOSITORY);
 
@@ -738,6 +778,28 @@ class AgentLaunchServiceTest {
       assertFalse(server.enabledTools().contains("mcp__repository__taskPrompt"));
       assertEquals("observability", config.mcpServers().get(1).name());
       assertTrue(config.mcpServers().get(1).enabledTools().contains("telemetryErrors"));
+    }
+
+    @Test
+    void theTicketThreadRidesKimisHardEnabledToolsSetButFilingDoesNot() {
+      // enabledTools is not a pre-approval for kimi, it is the session's whole tool surface: a name
+      // left out does not exist. So the thread pair has to be here for a kimi session to answer on
+      // a ticket at all — and create/update/transition_ticket being absent is what keeps filing and
+      // resolving out of reach rather than merely prompted.
+      AgentLaunchService service = service();
+
+      AcpSessionConfig config =
+          service.buildAcpSessionConfig(
+              AgentMcpScope.REPOSITORY, service.pinSession(null, false, AgentType.KIMI));
+
+      List<String> enabled = config.mcpServers().get(0).enabledTools();
+      assertTrue(enabled.contains("list_tickets"), enabled.toString());
+      assertTrue(enabled.contains("get_ticket"), enabled.toString());
+      assertTrue(enabled.contains("add_ticket_comment"), enabled.toString());
+      assertTrue(enabled.contains("update_ticket_comment"), enabled.toString());
+      assertFalse(enabled.contains("create_ticket"), enabled.toString());
+      assertFalse(enabled.contains("update_ticket"), enabled.toString());
+      assertFalse(enabled.contains("transition_ticket"), enabled.toString());
     }
 
     @Test

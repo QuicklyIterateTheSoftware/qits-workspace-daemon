@@ -157,6 +157,19 @@ with it (`mcp__observability__telemetry*`); under the old names they allowlisted
 server declared. If you touch `AgentLaunchService.serversFor`, the tool-name prefix and the server
 key have to move together.
 
+**The pre-approval lists are reads, with one written-down exception.** `READ_ONLY_*` means what it
+says: a mutating tool is left out so Claude still prompts. `TICKET_THREAD_TOOLS`
+(`add_ticket_comment`, `update_ticket_comment`) is the single bucket that breaks that, concatenated
+onto `READ_ONLY_REPOSITORY_TOOLS` wherever the `repository` server is wired; its javadoc carries the
+reasoning and names what stays out (`create_ticket`, `update_ticket`, `transition_ticket` — filing
+and resolving are not a workspace's act). Keep any further exception in its own named bucket for the
+same reason: one smuggled into a `READ_ONLY_` list is one nobody has to read.
+
+The asymmetry that makes these lists worth care: for Claude every launch is `--skipPermissions` and
+no `--allowedTools` is ever emitted, so the lists are a *latent* pre-approval story. For the kimi ACP
+path they are the hard `enabledTools` set — a tool not listed does not exist for that session.
+Dropping an entry costs Claude nothing and costs kimi the tool.
+
 ## Things that look wrong and are not
 
 **`setsid --ctty` for terminals.** On the host this would have failed with EPERM — `docker exec -it`
