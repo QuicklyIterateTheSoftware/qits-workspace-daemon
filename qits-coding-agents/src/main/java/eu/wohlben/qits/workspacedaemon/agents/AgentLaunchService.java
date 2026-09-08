@@ -105,6 +105,15 @@ public final class AgentLaunchService {
    * reads: surveying the tickets on a repository is how a session finds out what it was sent to do,
    * and {@code get_ticket} returns the whole comment thread with the ticket, so one call is the
    * reading half of the ticket domain. Neither changes anything.
+   *
+   * <p>{@code list_epics} and {@code get_epic} sit here for the same reason and at the same
+   * standing. Surveying the project's plan is how a dispatched session finds out what it was sent to
+   * do, and {@code get_epic} returns the whole feature/task tree in one call, so it is the reading
+   * half of the epic domain. Neither changes anything. Leaving them out would not merely cost a
+   * prompt: qits-projects' "Start implementation" dispatch composes a first turn that tells the
+   * agent to read its epic with {@code get_epic}, and on the kimi path {@code enabledTools} is the
+   * session's whole tool surface rather than a pre-approval, so that instruction would be
+   * unreachable rather than prompted.
    */
   private static final List<String> READ_ONLY_REPOSITORY_TOOLS =
       List.of(
@@ -117,7 +126,9 @@ public final class AgentLaunchService {
           "mcp__repository__listActions",
           "mcp__repository__taskPrompt",
           "mcp__repository__list_tickets",
-          "mcp__repository__get_ticket");
+          "mcp__repository__get_ticket",
+          "mcp__repository__list_epics",
+          "mcp__repository__get_epic");
 
   /**
    * The two ticket-thread writes of the {@code repository} MCP server — the one deliberate exception
@@ -171,9 +182,51 @@ public final class AgentLaunchService {
   private static final List<String> TICKET_RESOLUTION_TOOLS =
       List.of("mcp__repository__transition_ticket");
 
-  /** The repository server's full pre-approval: its reads, plus the two ticket exceptions. */
+  /**
+   * {@code mark_task_implemented} — the third named exception, and like the second it exists because
+   * of one caller.
+   *
+   * <p>qits-projects' "Start implementation" stands a workspace on {@code epic/<slug>} and dispatches
+   * an agent into it, and the first turn it composes ({@code EpicDispatchController.instruction})
+   * tells that agent to mark each task implemented as the work lands. Nothing else asks a workspace
+   * agent to touch an epic's tasks, and on the kimi path {@code enabledTools} is the session's whole
+   * tool surface, so an unlisted tool is a dead letter rather than a prompt.
+   *
+   * <p>Its own bucket, not appended to {@link #TICKET_THREAD_TOOLS} or {@link
+   * #TICKET_RESOLUTION_TOOLS}, for the reason those two are already separate: the exceptions are
+   * exceptions for different reasons, and the reason is what a reader has to weigh. What makes
+   * pre-approving a <em>write</em> acceptable here is narrow and worth stating. It records a fact
+   * about work the agent itself just did, so the agent is the authority on it rather than a party
+   * guessing at somebody else's state. qits-projects accepts it only while the owning epic is in
+   * IMPLEMENTATION ({@code EpicLifecycle.requireImplementation}), so it is reachable exactly during
+   * the dispatch it was added for. And it changes a <em>marker</em>, not a plan: by then the epic's
+   * scope is frozen, and this tool cannot add, remove or reword a feature or a task — only say that
+   * one of them landed.
+   *
+   * <p>It is an interim. qits-projects' own note on the tool says merge-derived markers are the
+   * intended answer — the platform should learn a task is implemented from the commits that
+   * implemented it, not from an agent being asked to say so. When they arrive this prompt-driven step
+   * goes, and this bucket goes with it.
+   *
+   * <p>The fence that matters is unchanged and is not this list. An <b>autonomous</b> run carries the
+   * {@code agentReadOnly=true} marker (see {@link #renderAutonomousChat}), and qits-projects' {@code
+   * ReadOnlyRepositoryToolFilter} hides {@code mark_task_implemented} behind it along with the ticket
+   * writes. This bucket cannot buy past that filter; it only widens the chat/interactive launches,
+   * which is where the dispatch lives.
+   */
+  private static final List<String> TASK_IMPLEMENTATION_TOOLS =
+      List.of("mcp__repository__mark_task_implemented");
+
+  /**
+   * The repository server's full pre-approval: its reads, plus the two ticket exceptions and the
+   * epic task-marker one.
+   */
   private static final List<String> REPOSITORY_TOOLS =
-      Stream.of(READ_ONLY_REPOSITORY_TOOLS, TICKET_THREAD_TOOLS, TICKET_RESOLUTION_TOOLS)
+      Stream.of(
+              READ_ONLY_REPOSITORY_TOOLS,
+              TICKET_THREAD_TOOLS,
+              TICKET_RESOLUTION_TOOLS,
+              TASK_IMPLEMENTATION_TOOLS)
           .flatMap(List::stream)
           .toList();
 
@@ -666,8 +719,9 @@ public final class AgentLaunchService {
 
   /**
    * A scoped MCP server: the key it is registered under, its scoped URL, and its pre-approved tools
-   * — its reads, plus (on {@code repository}) the two ticket exceptions {@link
-   * #TICKET_THREAD_TOOLS} and {@link #TICKET_RESOLUTION_TOOLS} document.
+   * — its reads, plus (on {@code repository}) the named write exceptions {@link
+   * #TICKET_THREAD_TOOLS}, {@link #TICKET_RESOLUTION_TOOLS} and {@link #TASK_IMPLEMENTATION_TOOLS}
+   * document.
    */
   public record ScopedMcp(String key, String url, List<String> allowedTools) {}
 

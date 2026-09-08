@@ -395,6 +395,32 @@ class AgentLaunchServiceTest {
     }
 
     @Test
+    void theEpicReadsArePreApprovedWithTheOtherRepositoryReads() {
+      List<AgentLaunchService.ScopedMcp> servers = service().serversFor(AgentMcpScope.REPOSITORY);
+
+      // get_epic returns the whole feature/task tree, so the survey is two tools here too; the epic
+      // dispatch's first turn tells the agent to read its epic with them.
+      assertTrue(servers.get(0).allowedTools().contains("mcp__repository__list_epics"));
+      assertTrue(servers.get(0).allowedTools().contains("mcp__repository__get_epic"));
+    }
+
+    @Test
+    void theTaskMarkerWriteIsPreApprovedButThePlanEditsAreNot() {
+      // mark_task_implemented is a pre-approved write for one caller: the epic dispatch, whose first
+      // turn tells the agent to mark each task implemented as it lands. It records a fact about work
+      // the agent itself did and moves a marker, not a plan — so the tools that would change the
+      // plan stay out and remain a prompted act for Claude, unreachable for kimi.
+      for (AgentMcpScope scope : AgentMcpScope.values()) {
+        List<String> tools = repositoryServer(service().serversFor(scope)).allowedTools();
+        assertTrue(tools.contains("mcp__repository__mark_task_implemented"), scope.name());
+        assertFalse(tools.contains("mcp__repository__add_task"), scope.name());
+        assertFalse(tools.contains("mcp__repository__update_task"), scope.name());
+        assertFalse(tools.contains("mcp__repository__remove_task"), scope.name());
+        assertFalse(tools.contains("mcp__repository__update_epic"), scope.name());
+      }
+    }
+
+    @Test
     void theTicketThreadWritesAndTheResolveArePreApprovedAndTheFilingOnesAreNot() {
       // Two deliberate exceptions to "only reads". Commenting is additive and editable, so
       // pre-approving it costs a wrongly-worded note, not a changed plan; the resolve is there for
@@ -805,6 +831,26 @@ class AgentLaunchServiceTest {
       assertTrue(enabled.contains("transition_ticket"), enabled.toString());
       assertFalse(enabled.contains("create_ticket"), enabled.toString());
       assertFalse(enabled.contains("update_ticket"), enabled.toString());
+    }
+
+    @Test
+    void theEpicReadsAndTheTaskMarkerRideKimisHardEnabledToolsSetButThePlanEditsDoNot() {
+      // Same asymmetry for the epic dispatch: a name left out of enabledTools does not exist, so a
+      // dispatched kimi run told to read its epic and mark tasks implemented needs all three here,
+      // while the plan-changing tools stay absent and so stay out of reach.
+      AgentLaunchService service = service();
+
+      AcpSessionConfig config =
+          service.buildAcpSessionConfig(
+              AgentMcpScope.REPOSITORY, service.pinSession(null, false, AgentType.KIMI));
+
+      List<String> enabled = config.mcpServers().get(0).enabledTools();
+      assertTrue(enabled.contains("list_epics"), enabled.toString());
+      assertTrue(enabled.contains("get_epic"), enabled.toString());
+      assertTrue(enabled.contains("mark_task_implemented"), enabled.toString());
+      assertFalse(enabled.contains("update_epic"), enabled.toString());
+      assertFalse(enabled.contains("add_task"), enabled.toString());
+      assertFalse(enabled.contains("update_task"), enabled.toString());
     }
 
     @Test
