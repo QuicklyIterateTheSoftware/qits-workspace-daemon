@@ -50,8 +50,11 @@
 # vhosts — and the builder's own registry config rewrites them to the platform aliases
 # (qits-containers' buildkitd.toml carries the mapping). No `--network host` and nothing replaces
 # it: a `RUN` executes in the builder's namespace on qits-net, so what a build dials, it dials by
-# in-network address ($QITS_MAVEN_PROXY_URL below). The reactor declares no `<repositories>`, so
-# the builder stage resolves from Maven Central — through that mirror when the platform offers one.
+# in-network address ($QITS_MAVEN_PROXY_URL below). The builder stage resolves from Maven Central —
+# through that mirror when the platform offers one — plus ONE coordinate that is not there: the
+# shared coding-agent harness (eu.wohlben.qits:qits-coding-agents), which lives on the platform's own
+# registry. That is why both steps below pass $QITS_MAVEN_REGISTRY_URL, and why the root pom declares
+# a `<repositories>` block it did not use to need.
 #
 # ONE IMAGE, UNDER THE NAME ITS CONSUMERS ALREADY WRITE. The published name stays `qits/workspace`
 # — qits-workspaces' pin and its follow-bump trigger both spell it — while the repository keeps its
@@ -96,7 +99,13 @@ steps:
       # injects nothing, or a deployment that turned the mirror plane off) deactivates the settings
       # profile and Central is resolved directly.
       export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
-      ./mvnw -B -ntp -s .qits-maven-settings.xml verify
+      # The platform's own registry, which this reactor started needing when the coding-agent
+      # harness became a shared released library: the pom's default names a host-published address
+      # a step container cannot reach, and the exact-id mirror in .qits-maven-settings.xml is what
+      # passes Maven's HTTP blocker.
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL"
 
   - image: qits/build-images/ci-base:latest
     build: true
@@ -137,6 +146,7 @@ steps:
       buildctl build --frontend dockerfile.v0 \
         --local context=. --local dockerfile=docker \
         --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         --secret id=qits-client-id,src=/tmp/qits-client-id \
         --secret id=qits-client-secret,src=/tmp/qits-client-secret \
         --output "type=image,name=$ref,push=true"

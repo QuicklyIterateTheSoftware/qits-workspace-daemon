@@ -168,6 +168,7 @@ steps:
       buildctl build --frontend dockerfile.v0 \
         --local context=. --local dockerfile=docker \
         --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         --secret id=qits-client-id,src=/tmp/qits-client-id \
         --secret id=qits-client-secret,src=/tmp/qits-client-secret \
         --output "type=image,name=$ref,push=true"
@@ -191,6 +192,7 @@ steps:
         --local context=. --local dockerfile=docker \
         --opt target=sbom \
         --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         --secret id=qits-client-id,src=/tmp/qits-client-id \
         --secret id=qits-client-secret,src=/tmp/qits-client-secret \
         --output type=local,dest=.sbom
