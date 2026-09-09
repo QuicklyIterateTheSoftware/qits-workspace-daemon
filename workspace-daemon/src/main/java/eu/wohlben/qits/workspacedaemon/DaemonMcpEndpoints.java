@@ -1,7 +1,7 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.agents.McpEndpoints;
-import eu.wohlben.qits.workspacedaemon.commands.InvalidCommandRequestException;
+import eu.wohlben.qits.agents.McpEndpoints;
+import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import java.net.URI;
 import java.util.Optional;
 import org.jboss.logging.Logger;

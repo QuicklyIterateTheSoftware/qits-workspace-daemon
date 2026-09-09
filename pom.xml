@@ -17,17 +17,32 @@
     <packaging>pom</packaging>
 
     <modules>
-        <!-- Dependency order: workspace-daemon depends on all of them; detection depends on files;
-             qits-coding-agents depends on qits-commands and files. -->
+        <!-- Dependency order: workspace-daemon depends on all of them; detection depends on files.
+             The command and coding-agent modules used to sit here too; they are now the released
+             eu.wohlben.qits:qits-commands / qits-coding-agents, see the property below. -->
         <module>workspace-daemon-protocol</module>
         <module>workspace-daemon-files</module>
         <module>workspace-daemon-detection</module>
-        <module>qits-commands</module>
-        <module>qits-coding-agents</module>
         <module>workspace-daemon</module>
     </modules>
 
     <properties>
+        <!-- The shared harness library (https://github.com/QuicklyIterateTheSoftware/qits-coding-agents).
+             It used to be TWO in-repo modules, `qits-commands` and `qits-coding-agents`, duplicated
+             under this daemon's package root and again under qits-projects-daemon's. Both moved out
+             whole: qits-coding-agents does not compile without qits-commands, and keeping one here
+             would have preserved exactly the split that let the two copies drift.
+
+             THIS IS A RELEASED COORDINATE, and the rhythm it forces is deliberate: a change to
+             shared harness code is released there first and arrives here as a version bump. A
+             daemon runs the library version it was built against, so "the library is fixed" and
+             "this daemon has the fix" are two different moments. -->
+        <qits.coding-agents.version>2026.909.111643</qits.coding-agents.version>
+        <!-- Where that coordinate is resolved from; mirrored by .qits-maven-settings.xml's
+             `qits-maven` entry onto $QITS_MAVEN_REPOSITORY_URL inside a CI step or a build
+             container. Spelled as a property so a deployment can point it elsewhere without
+             editing the repository block. -->
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
@@ -68,22 +83,40 @@
                 <artifactId>workspace-daemon-detection</artifactId>
                 <version>${project.version}</version>
             </dependency>
-            <!-- The command and coding-agent capability jars. Named without the
-                 `workspace-daemon-` prefix their siblings carry because they are the two surfaces
-                 most likely to be re-extracted into repos of their own later; keeping the daemon's
-                 name out of their coordinates means that move would not rename them. -->
+            <!-- The command and coding-agent capability jars — the shared harness library, no
+                 longer built here. The groupId moved with them (`eu.wohlben.qits`, not
+                 `eu.wohlben`), which is the visible half of "these are somebody else's artifact
+                 now"; the packages moved the same way, `…workspacedaemon.commands` →
+                 `eu.wohlben.qits.commands` and `…workspacedaemon.agents` → `eu.wohlben.qits.agents`.
+                 Both are named here because this daemon compiles against both: a launch IS a
+                 command, so the daemon's own routes touch `Command`, `CommandService` and
+                 `CheckoutContext` directly. -->
             <dependency>
-                <groupId>eu.wohlben</groupId>
+                <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-commands</artifactId>
-                <version>${project.version}</version>
+                <version>${qits.coding-agents.version}</version>
             </dependency>
             <dependency>
-                <groupId>eu.wohlben</groupId>
+                <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-coding-agents</artifactId>
-                <version>${project.version}</version>
+                <version>${qits.coding-agents.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <!-- The platform's maven registry, declared because this reactor now resolves ONE dependency
+         that is not on Central: the shared harness library. Until it did, this repository declared
+         no repositories at all, which is what let `./mvnw verify` work on a bare clone with no
+         platform in sight. That property is gone and its replacement is the mirror: inside a CI
+         step or the Dockerfile's builder stage, .qits-maven-settings.xml redirects `qits-maven` to
+         $QITS_MAVEN_REPOSITORY_URL — the in-network route — and the literal below is only the
+         local-development default. -->
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
 
     <build>
         <pluginManagement>

@@ -16,11 +16,12 @@ does the job — `io.vertx.core.json` instead of Jackson, `java.lang.foreign` in
 `ProcessBuilder` instead of a process library.
 
 `java.lang.foreign` is cheaper than JNA but it is not free: **an FFM downcall has to be registered
-by hand**, in the two files under
-`qits-commands/src/main/resources/META-INF/native-image/eu.wohlben/qits-commands/`. Making the
-`FunctionDescriptor` a `static final` constant does *not* register it — the README's "No pty4j"
-paragraph has the whole story, and got it wrong for a while. Add a downcall whose shape is not
-already listed and the build stays green; only the running binary will tell you.
+by hand**, in the two files at `META-INF/native-image/eu.wohlben/qits-commands/` — which now ride
+inside the released `qits-commands` jar rather than sitting in this repo, so **that change is made
+in the harness library and arrives here as a version bump**. Making the `FunctionDescriptor` a
+`static final` constant does *not* register it — the README's "No pty4j" paragraph has the whole
+story, and got it wrong for a while. Add a downcall whose shape is not already listed and the build
+stays green; only the running binary will tell you.
 
 **An empty `defaultValue` is not a default.** SmallRye reads `@ConfigProperty(name = "…",
 defaultValue = "")` as *no value* and then fails to resolve a plain `String`, so the binary dies at
@@ -30,13 +31,42 @@ become one. **The suite cannot see this**: tests construct `WorkspaceApi` and fr
 never resolve config at all. `docker run` on the image with no environment is what catches it, which
 is one reason `docker/Dockerfile` is worth having here.
 
+## The harness is a dependency, not a module
+
+`qits-commands` and `qits-coding-agents` are no longer built here. They are the released
+`eu.wohlben.qits:qits-commands` / `eu.wohlben.qits:qits-coding-agents`, from the shared
+[qits-coding-agents](https://github.com/QuicklyIterateTheSoftware/qits-coding-agents) repository,
+pinned by `qits.coding-agents.version` in the root pom. The packages are `eu.wohlben.qits.commands.*`
+and `eu.wohlben.qits.agents.*` — no `workspacedaemon` segment, because the library must not be able
+to tell which product it is inside.
+
+**Harness behaviour is proven there, not here**, and the two-step is the price of not having two
+copies: change it in the library, release the library, bump this pom, release this daemon. A daemon
+runs the library version it was built against, so a library fix and a daemon that has it are two
+different moments. The library's suite asserts *this* daemon's rendered command lines byte for byte,
+against a fixture copy of `WorkspaceMcpServers` — so if you change that file, change the fixture in
+the same campaign or the assertion is proving the wrong daemon.
+
+What stays here is what is genuinely this daemon's, and each of them is a seam the library declares:
+
+- `WorkspaceContext extends CheckoutContext` — the repository and workspace ids. The library asks
+  only for a branch and a commit.
+- `WorkspaceMcpServers implements AgentMcpServers` — the scope→server mapping, the narrowing, and
+  the pre-approval lists. `serverFor(key, scope, narrowing)` is implemented rather than left on the
+  library's default, so `honoursNarrowing()` is true and a launch does not have to record that its
+  addressing was a guess. Refuse a narrowing you cannot satisfy; never drop it.
+- `DaemonAgentDefaults implements AgentDefaults` — the default harness, activity tracking, the
+  refinement model, the mounted configuration document, and this container's ambient facts.
+- `AgentConfigurationFile` — writing the injected document to disk at boot.
+
 ## Module conventions
 
 `eu.wohlben.qits.workspacedaemon.*`, one sub-package per module, no split packages.
 
-The capability modules (`protocol`, `files`, `detection`, `commands`, `agents`) are **framework-free**:
-plain classes with plain constructors and no annotations. `ControlSocket` news them up and hands them
-to `WorkspaceApi`. Only `ControlSocket`, `WorkspaceApi` and `Main` are CDI beans.
+The capability modules (`protocol`, `files`, `detection`) are **framework-free**: plain classes with
+plain constructors and no annotations. `ControlSocket` news them up and hands them to
+`WorkspaceApi`. Only `ControlSocket`, `WorkspaceApi` and `Main` are CDI beans. The harness library is
+framework-free for the same reason and by the same rule.
 
 That has a consequence worth stating plainly: **a capability module cannot read configuration.** Every
 setting it needs is a `@ConfigProperty` on `ControlSocket` and arrives as a constructor argument. Do
@@ -46,7 +76,7 @@ components from resolving the same key differently.
 Dependencies run one way: `agents` → `commands` → nothing. A coding agent *is* a command. If you find
 yourself wanting `commands` to know about `agents`, you want a seam instead: `commands` declares the
 interface (`ChatProtocol`, `ChatProtocolFactory`, `ChatWire`, `CommandChangeListener`) and `agents`
-implements it.
+implements it. Both of those live in the harness library now, so that rule is enforced there.
 
 ## Testing
 
@@ -154,8 +184,8 @@ derivations become sound. Do not quietly pick one by adding a default.
 is qits-observability, renamed from `repository` for the reason that both services declaring that
 name meant this daemon could only ever address one of them. The telemetry allowlist entries moved
 with it (`mcp__observability__telemetry*`); under the old names they allowlisted tools no reachable
-server declared. If you touch `AgentLaunchService.serversFor`, the tool-name prefix and the server
-key have to move together.
+server declared. If you touch `WorkspaceMcpServers`, the tool-name prefix and the server key have to
+move together — and so does the library's `WorkspaceHostMcpServers` fixture.
 
 **The pre-approval lists are reads, with three written-down exceptions.** `READ_ONLY_*` means what it
 says: a mutating tool is left out so Claude still prompts. Three named buckets break that, all
@@ -178,7 +208,9 @@ one's javadoc carries its own reasoning — which is why they are three buckets 
   from merges, and this bucket goes when they arrive.
 
 The reads for that dispatch — `list_epics`, `get_epic` — are just reads and sit in
-`READ_ONLY_REPOSITORY_TOOLS` beside `list_tickets`/`get_ticket`.
+`READ_ONLY_REPOSITORY_TOOLS` beside `list_tickets`/`get_ticket`. All of it lives in
+`WorkspaceMcpServers` now; the lists travelled with the mapping because they are policy about what
+*this* product's agents may do without asking, not a property of the harness.
 
 What stays out is the filing half — `create_ticket`, `update_ticket` — and the plan-changing half —
 `propose_epic`, `update_epic`, the feature and task edits. The projects-daemon front desk and the
@@ -194,6 +226,46 @@ The asymmetry that makes these lists worth care: for Claude every launch is `--s
 no `--allowedTools` is ever emitted, so the lists are a *latent* pre-approval story. For the kimi ACP
 path they are the hard `enabledTools` set — a tool not listed does not exist for that session.
 Dropping an entry costs Claude nothing and costs kimi the tool.
+
+## The agent configuration a container is born with
+
+qits-workspaces resolves every surface this container may serve into one JSON document and injects
+it at creation, as **two environment variables** —
+`QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION` (the bytes) and
+`QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION_PATH` (`/tmp/qits/agent-configuration.json`). The epic
+asks for a mounted file and the container wire cannot express one: `ContainerSpec` admits named
+volumes and the docker socket and no host path at all. So the daemon writes one to the other at
+boot, before anything else starts, and hands the path to the library.
+
+**Both or neither.** Neither is quiet and supported — a container created before this shipped — and
+every surface then renders the library's shipped constants. Either alone kills the daemon at boot,
+because a path naming a file nothing wrote reads as the supported absent case over a container that
+was meant to have a configuration. A malformed document is loud too, at boot, naming the offending
+key; the library's exception is deliberately not caught on the boot path.
+
+**A container keeps what it was born with.** An edit in qits-projects applies to the next container.
+Nothing here polls, and nothing surfaces staleness. That is what keeps a launch a pure local render
+with no runtime dependency on the store.
+
+## The surface, and the sign-in door
+
+A launch body carries `surface` — where in the product the session was started from. **This is the
+daemon where it earns its keep**: `epic.chat`, `epic.agent`, `workspace.chat` and `workspace.agent`
+send byte-identical requests today, so nothing downstream could tell one from another. A missing
+surface resolves to the shape-implied guess for one release (a dated crutch, so frontends can ship
+after the daemon); an unknown one is a 400. It comes back on the command as `agentSurface`, which is
+what lets a caller stop matching a display string.
+
+An unauthenticated harness used to make `POST /agents` silently answer a login terminal instead of
+the session asked for. The library removed that substitution, so two things live here:
+
+- **`POST /agents/sign-in`** — the login terminal as a deliberate door, answering the ordinary
+  `{command: …}` envelope. Without it the terminal would be unreachable and an unauthenticated
+  estate could never become an authenticated one.
+- **`AgentNotSignedInException` → 409**, body `{"error": "not-signed-in", "agentType", "message"}`.
+  The `error` key is the contract and the sentence is **not**: matching prose is the same mistake as
+  the `" (tickets desk)"` string match this epic exists to delete. Falling into the generic 500 arm
+  would show "Internal error" for a state one click fixes.
 
 ## Things that look wrong and are not
 

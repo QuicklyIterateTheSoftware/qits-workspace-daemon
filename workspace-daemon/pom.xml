@@ -55,17 +55,23 @@
         <dependency>
             <!-- Launching and supervising processes in the workspace, served over WorkspaceApi.
                  Framework-free like files/detection, so it adds nothing the native-image builder
-                 has to be told about — except its own FFM downcalls, which register themselves
-                 from constant descriptors (see ForeignPty). -->
-            <groupId>eu.wohlben</groupId>
+                 has to be told about — except its own FFM downcalls, which the jar's own
+                 META-INF/native-image metadata registers (see ForeignPty).
+
+                 A RELEASED JAR, not a module of this reactor, since the harness library was
+                 unified. Its native-image metadata rides in the jar, so nothing here has to be
+                 told about it. -->
+            <groupId>eu.wohlben.qits</groupId>
             <artifactId>qits-commands</artifactId>
         </dependency>
         <dependency>
             <!-- The Claude Code and Kimi harnesses: launch rendering, the ACP chat transport,
-                 transcript import off the shared /claude-home volume, and the agent surface served
-                 over WorkspaceApi. Depends on qits-commands (a launch becomes a command), never the
-                 other way round. Framework-free for the same native-image reason. -->
-            <groupId>eu.wohlben</groupId>
+                 transcript import off the shared /claude-home volume, the capability probes, and
+                 the agent surface served over WorkspaceApi. Depends on qits-commands (a launch
+                 becomes a command), never the other way round. Framework-free for the same
+                 native-image reason. Declared explicitly beside qits-commands because this module
+                 compiles against both. -->
+            <groupId>eu.wohlben.qits</groupId>
             <artifactId>qits-coding-agents</artifactId>
         </dependency>
         <dependency>

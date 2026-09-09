@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.commands.WorkspaceContext;
 import java.util.function.Supplier;
 
 /**

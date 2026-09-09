@@ -1,6 +1,6 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.commands.ActionResolver;
+import eu.wohlben.qits.commands.ActionResolver;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;

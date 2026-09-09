@@ -54,8 +54,9 @@ ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.905.2354
 # buildkitd the committed edge-vhost spellings are rewritten to the in-network registry aliases by
 # the builder's own registry config (qits-containers' buildkitd.toml), and under a developer's
 # `docker build` the host daemon resolves them as it always did — one committed spelling, two
-# resolvers. The reactor declares no `<repositories>`, so the compile below resolves from Maven
-# Central.
+# resolvers. The compile below resolves from Maven Central, plus the platform's own registry for the
+# one coordinate that is not there — the shared coding-agent harness; see QITS_MAVEN_REPOSITORY_URL
+# further down.
 FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
@@ -82,6 +83,20 @@ COPY . .
 ARG QITS_MAVEN_CENTRAL_URL=
 ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 
+# --- and the PLATFORM's own Maven repository, which this reactor now needs ------------------------
+# It did not, until the coding-agent harness became a shared released library
+# (eu.wohlben.qits:qits-coding-agents). Every other dependency of this build is on Maven Central;
+# that one is on the platform's registry, and `.qits-maven-settings.xml` mirrors the `qits-maven`
+# repository id onto this address — an exact id match, which is what gets past Maven's
+# external:http:* blocker without permitting arbitrary HTTP repositories.
+#
+# The pipeline passes the address a BUILDER container can reach ($QITS_MAVEN_REGISTRY_URL); the ARG
+# default is the developer-host address, so a plain host-side `docker build` still works. Unlike the
+# central mirror above, an empty value here is NOT a valid state — there is nowhere else to get the
+# library — so the build fails on resolution rather than silently producing an image without it.
+ARG QITS_MAVEN_REPOSITORY_URL=http://registry.dev.localhost:8080/artifacts/maven/maven
+ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
+
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
 #
@@ -104,6 +119,7 @@ RUN --mount=type=secret,id=qits-client-id \
     QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
     QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -Dnative -DskipTests \
+      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
       -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \

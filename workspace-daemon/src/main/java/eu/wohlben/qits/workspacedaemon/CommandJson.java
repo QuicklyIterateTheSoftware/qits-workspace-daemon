@@ -1,9 +1,9 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.commands.ActionResolver;
-import eu.wohlben.qits.workspacedaemon.commands.AgentSessionRef;
-import eu.wohlben.qits.workspacedaemon.commands.Command;
-import eu.wohlben.qits.workspacedaemon.commands.CommandLogLine;
+import eu.wohlben.qits.commands.ActionResolver;
+import eu.wohlben.qits.commands.AgentSessionRef;
+import eu.wohlben.qits.commands.Command;
+import eu.wohlben.qits.commands.CommandLogLine;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
@@ -66,6 +66,17 @@ final class CommandJson {
     putIfPresent(body, "commitHash", command.commitHash());
     putIfPresent(body, "shortCommitHash", shortCommitHash(command.commitHash()));
     putIfPresent(body, "actionId", command.actionId());
+    // WHERE IN THE PRODUCT THIS SESSION WAS STARTED FROM, coming back on the answer so a caller
+    // never has to infer it. Absent for a non-agent command, for the sign-in terminal, and for
+    // every agent command launched before the daemon learned to accept the field — which is why it
+    // is omitted rather than emitted as an empty string: a reader can tell "not an agent session"
+    // from "an agent session that predates this".
+    //
+    // It is what lets the frontend stop matching a display string. The surface distinction that
+    // existed before this was carried in CommandDto.actionName — the projects frontend sorted a
+    // project's sessions by looking for "(tickets desk)" in it — which made a label a cross-repo
+    // contract, and renaming the label silently moved every ticket session into the wrong list.
+    putIfPresent(body, "agentSurface", command.agentSurface());
     if (command.exitCode() != null) {
       body.put("exitCode", command.exitCode());
     }

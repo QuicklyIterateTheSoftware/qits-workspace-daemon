@@ -19,13 +19,44 @@ boundary belongs to
 | `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. qits-workspaces-service vendors a byte-identical copy. |
 | `workspace-daemon-files/` | Reading the checkout: file listing, content, lazy directories, gitignore. |
 | `workspace-daemon-detection/` | Framework detection and the component map, over `workspace-daemon-files`. |
-| `qits-commands/` | Launching and supervising processes: the PTY, the process registry, chat transports, the in-memory command store and log buffer. |
-| `qits-coding-agents/` | The Claude Code and Kimi harnesses: launch rendering, the ACP chat client, transcript import, plugins, auth. Depends on `qits-commands` — a coding agent *is* a command. |
 | `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, service and web-editor supervision. Wires every module above by hand. |
 
-The first five are **framework-free**: no Quarkus, no CDI, no JAX-RS, no Jackson. They are plain
+The first three are **framework-free**: no Quarkus, no CDI, no JAX-RS, no Jackson. They are plain
 jars with plain constructors that `ControlSocket` news up. That is not stylistic — it is what keeps
 the GraalVM native image small and free of anything the builder has to be told about by hand.
+
+### The harness, which is no longer here
+
+`qits-commands/` and `qits-coding-agents/` used to be two more modules in this list. They are now
+the released `eu.wohlben.qits:qits-commands` / `eu.wohlben.qits:qits-coding-agents`, built from
+[qits-coding-agents](https://github.com/QuicklyIterateTheSoftware/qits-coding-agents) — because they
+existed **twice**, once here and once inside qits-projects-daemon, under two package roots, and had
+drifted: this copy grew `AgentPluginService`, `PromptRefinementService`, a third MCP scope and four
+named pre-approved writes; the other grew the tickets desk's system prompt. Every harness change had
+to be written twice, and the second copy is the one that kept being forgotten.
+
+Both moved, not one: `qits-coding-agents` does not compile without `qits-commands`, and keeping one
+here would have preserved exactly the split that let them diverge. What stayed is what is genuinely
+*this daemon's*:
+
+| Here | Why |
+|---|---|
+| `WorkspaceContext` | The repository and workspace ids a workspace has beyond a branch and a commit. The library asks only for `CheckoutContext`; a daemon's own identity is its own business. |
+| `WorkspaceMcpServers` | Which MCP servers a scope attaches, narrowed, with their pre-approval lists. This daemon attaches three across three services; qits-projects-daemon attaches one. Neither is a default the other could fall back on. |
+| `DaemonAgentDefaults` | The default harness, activity tracking and refinement model — plus the mounted configuration document and this container's ambient facts. |
+| `AgentConfigurationFile` | Writing the injected document to disk at boot, before anything starts. |
+| The route table | `WorkspaceApi`'s agent surface, `AgentJson`, and the hook webhook. |
+
+**It is a released coordinate, and that changes the rhythm.** A change to shared harness code is
+released there first and arrives here as a version bump in the root pom
+(`qits.coding-agents.version`), so "the library is fixed" and "this daemon has the fix" are two
+different moments. The library's own suite is where harness behaviour is proven — including this
+daemon's rendered command lines, asserted byte for byte there against a fixture copy of
+`WorkspaceMcpServers`.
+
+It is also the one dependency this reactor resolves off Maven Central, which is why the root pom now
+declares a `<repositories>` block. Inside CI and the Dockerfile's builder stage,
+`.qits-maven-settings.xml` mirrors it onto the platform's in-network registry.
 
 ## The two channels
 
@@ -164,15 +195,16 @@ never evicted) and `CommandLogBuffer.DEFAULT_CAPACITY` (50,000 lines per command
 
 **No Jackson.** JSON is `io.vertx.core.json`, which is already in the image via `quarkus-vertx` and
 pulls only the streaming core. A second JSON stack would mean databind reflection to register.
-`qits-coding-agents` ports three Jackson-heavy readers onto it through `agents/json/Json`, a
+`qits-coding-agents` ports three Jackson-heavy readers onto it through its own `json/Json`, a
 read-only view with Jackson's missing-node semantics — see that class's javadoc for why a direct
 translation would not have been safe.
 
 **No pty4j.** It is JNA plus per-platform `.so` files extracted at runtime, which is the worst case
 for a native image. `ForeignPty` calls libc through `java.lang.foreign` instead.
 
-Its downcalls are registered by hand, in two files under
-`qits-commands/src/main/resources/META-INF/native-image/eu.wohlben/qits-commands/`:
+Its downcalls are registered by hand, in two files that ride inside the `qits-commands` jar at
+`META-INF/native-image/eu.wohlben/qits-commands/` (they live in the harness library's repository
+now, beside the class they are about):
 
 | | |
 |---|---|
@@ -300,8 +332,9 @@ Local dev overrides the pin rather than editing it:
 
 ## Where the code came from
 
-Extracted from the qits monolith. `qits-commands` and `qits-coding-agents` were **reimplemented**
-rather than history-replayed: they target a different runtime (in-container, no database), so a
-`git filter-repo` of the originals would have carried a persistence layer and a `docker exec`
-transport that have no meaning here. DTO field names were kept exactly, because they are a wire
-contract the SPA consumes unchanged.
+Extracted from the qits monolith. The command and coding-agent modules were **reimplemented** rather
+than history-replayed: they target a different runtime (in-container, no database), so a `git
+filter-repo` of the originals would have carried a persistence layer and a `docker exec` transport
+that have no meaning here. DTO field names were kept exactly, because they are a wire contract the
+SPA consumes unchanged. Both have since left this repository altogether — see "The harness, which is
+no longer here".

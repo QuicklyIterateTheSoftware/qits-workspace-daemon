@@ -6,28 +6,27 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspacedaemon.agents.AgentCommands;
-import eu.wohlben.qits.workspacedaemon.agents.AgentDefaults;
-import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentPluginService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentSessionQueryService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentSessionStore;
-import eu.wohlben.qits.workspacedaemon.agents.AgentTranscriptService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentTranscriptTailService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentType;
-import eu.wohlben.qits.workspacedaemon.agents.CommandsAgentCommands;
-import eu.wohlben.qits.workspacedaemon.agents.McpEndpoints;
-import eu.wohlben.qits.workspacedaemon.agents.ProcessRunner;
-import eu.wohlben.qits.workspacedaemon.agents.PromptRefinementService;
-import eu.wohlben.qits.workspacedaemon.commands.AgentSessionRef;
-import eu.wohlben.qits.workspacedaemon.commands.AgentSessionSource;
-import eu.wohlben.qits.workspacedaemon.commands.CommandKind;
-import eu.wohlben.qits.workspacedaemon.commands.CommandLifecycleService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandLogService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
-import eu.wohlben.qits.workspacedaemon.commands.CommandService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandStore;
-import eu.wohlben.qits.workspacedaemon.commands.WorkspaceContext;
+import eu.wohlben.qits.agents.AgentCommands;
+import eu.wohlben.qits.agents.AgentDefaults;
+import eu.wohlben.qits.agents.AgentLaunchService;
+import eu.wohlben.qits.agents.AgentPluginService;
+import eu.wohlben.qits.agents.AgentSessionQueryService;
+import eu.wohlben.qits.agents.AgentSessionStore;
+import eu.wohlben.qits.agents.AgentTranscriptService;
+import eu.wohlben.qits.agents.AgentTranscriptTailService;
+import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.CommandsAgentCommands;
+import eu.wohlben.qits.agents.McpEndpoints;
+import eu.wohlben.qits.agents.ProcessRunner;
+import eu.wohlben.qits.agents.PromptRefinementService;
+import eu.wohlben.qits.commands.AgentSessionRef;
+import eu.wohlben.qits.commands.AgentSessionSource;
+import eu.wohlben.qits.commands.CommandKind;
+import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogService;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStore;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -64,6 +63,18 @@ class AgentsApiTest {
   private static final String REPO = "11111111-1111-1111-1111-111111111111";
   private static final String PROJECT = "22222222-2222-2222-2222-222222222222";
   private static final int HOOKS_PORT = 13337;
+  private static final String IMAGE_VERSION = "2026.909.111643";
+
+  /**
+   * A boot-time capability report, as {@link eu.wohlben.qits.agents.HarnessCapabilityService} would
+   * have produced it. Shipped rather than probed, because what is under test here is the wire shape
+   * the host caches, not the probe — the probe's own parsing is proven in the library's suite.
+   */
+  private static final List<eu.wohlben.qits.agents.HarnessCapabilities> CAPABILITIES =
+      List.of(
+          eu.wohlben.qits.agents.HarnessCapabilities.shipped(AgentType.CLAUDE, "not probed here")
+              .withAuth(true, "Signed in on the shared credential volume."),
+          eu.wohlben.qits.agents.HarnessCapabilities.shipped(AgentType.KIMI, "not probed here"));
 
   @TempDir Path root;
   @TempDir Path claudeMount;
@@ -162,12 +173,12 @@ class AgentsApiTest {
     launch =
         new AgentLaunchService(
             agentCommands,
-            new eu.wohlben.qits.workspacedaemon.agents.AgentAuthStatus(
+            new eu.wohlben.qits.agents.AgentAuthStatus(
                 PROCESSES, claudeMount.toString(), root),
             transcripts,
             tail,
             DEFAULTS,
-            ENDPOINTS,
+            new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x"),
             WORKSPACE,
             claudeMount.toString(),
             HOOKS_PORT);
@@ -177,7 +188,9 @@ class AgentsApiTest {
         new AgentSessionQueryService(store, sessionStore),
         new AgentPluginService(PROCESSES, claudeMount.toString(), root, DEFAULTS),
         new PromptRefinementService(PROCESSES, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
-        DEFAULTS);
+        DEFAULTS,
+        IMAGE_VERSION,
+        () -> CAPABILITIES);
     client = vertx.createHttpClient();
   }
 
@@ -192,9 +205,49 @@ class AgentsApiTest {
     }
   }
 
+  /**
+   * A runner on whose volume nobody has signed in: {@code claude auth status} fails and the kimi
+   * credential probe finds nothing.
+   */
+  private static ProcessRunner signedOut() {
+    return (command, cwd, env, timeout) ->
+        new ProcessRunner.Result(1, "", "Not logged in", false);
+  }
+
+  /** Rebuild the agent surface on a different {@link ProcessRunner}, leaving everything else. */
+  private void rewireWith(ProcessRunner processes) {
+    CommandLogService logs = new CommandLogService(store, null);
+    CommandRegistry registry = new CommandRegistry(root, 2_000);
+    CommandService commands =
+        new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
+    AgentTranscriptService transcripts =
+        new AgentTranscriptService(store, logs, sessionStore, claudeMount.toString(), null);
+    AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
+    AgentLaunchService rewired =
+        new AgentLaunchService(
+            new CommandsAgentCommands(commands, registry, store),
+            new eu.wohlben.qits.agents.AgentAuthStatus(processes, claudeMount.toString(), root),
+            transcripts,
+            tail,
+            DEFAULTS,
+            new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x"),
+            WORKSPACE,
+            claudeMount.toString(),
+            HOOKS_PORT);
+    api.wireCommands(commands, registry, WORKSPACE);
+    api.wireAgents(
+        rewired,
+        new AgentSessionQueryService(store, sessionStore),
+        new AgentPluginService(processes, claudeMount.toString(), root, DEFAULTS),
+        new PromptRefinementService(processes, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
+        DEFAULTS,
+        IMAGE_VERSION,
+        () -> CAPABILITIES);
+  }
+
   /** This workspace declares no actions; agents are launched, not resolved from config. */
   private record NoActions()
-      implements eu.wohlben.qits.workspacedaemon.commands.ActionResolver {
+      implements eu.wohlben.qits.commands.ActionResolver {
     @Override
     public Optional<ResolvedAction> resolve(String actionId) {
       return Optional.empty();
@@ -215,6 +268,61 @@ class AgentsApiTest {
     assertEquals(200, answer.status());
     assertEquals(new JsonArray().add("CLAUDE").add("KIMI"), answer.body().getJsonArray("agents"));
     assertEquals("CLAUDE", answer.body().getString("defaultAgent"));
+  }
+
+  @Test
+  void availableCarriesTheBootTimeCapabilityReportAndWhatRanIt() throws Exception {
+    Answer answer = get("/agents/available");
+
+    assertEquals(200, answer.status());
+    // The host caches the report keyed by (harness, imageVersion), so both halves of that key have
+    // to be on the wire; reportedBy is display only, and says which container answered when a
+    // project's agent container and a workspace one disagree.
+    assertEquals(IMAGE_VERSION, answer.body().getString("imageVersion"));
+    assertEquals("qits-workspace-daemon", answer.body().getString("reportedBy"));
+
+    JsonArray capabilities = answer.body().getJsonArray("capabilities");
+    assertEquals(2, capabilities.size(), "one report per harness");
+    JsonObject claude = capabilities.getJsonObject(0);
+    assertEquals("CLAUDE", claude.getString("harness"));
+    // Claude has an effort concept and no way to enumerate models; Kimi is the exact opposite, and
+    // the editor renders no effort control for it rather than a disabled one carrying these values.
+    assertEquals(true, claude.getBoolean("effortSupported"));
+    assertEquals(false, claude.getBoolean("modelsEnumerated"));
+    assertEquals(
+        new JsonArray().add("low").add("medium").add("high").add("xhigh").add("max"),
+        claude.getJsonArray("effortLevels"));
+    assertEquals(true, claude.getBoolean("authenticated"));
+    assertNotNull(claude.getString("authDetail"));
+    assertEquals(true, claude.getBoolean("probeFailed"), "a fallback report says so");
+    assertEquals("not probed here", claude.getString("probeDetail"));
+    assertNotNull(claude.getString("harnessVersion"));
+    assertNotNull(claude.getJsonArray("models"));
+
+    JsonObject kimi = capabilities.getJsonObject(1);
+    assertEquals("KIMI", kimi.getString("harness"));
+    assertEquals(false, kimi.getBoolean("effortSupported"));
+    assertEquals(new JsonArray(), kimi.getJsonArray("effortLevels"));
+    assertEquals(false, kimi.getBoolean("authenticated"), "nobody looked, so nobody is signed in");
+  }
+
+  @Test
+  void aReportThatHasNotLandedYetIsAnEmptyListRatherThanAnAbsentKey() throws Exception {
+    // The probe runs off the boot thread, so a request can beat it. An empty list is a cache miss
+    // to the host — it keeps what it had — where an absent key would be a decode surprise.
+    api.wireAgents(
+        launch,
+        new AgentSessionQueryService(store, sessionStore),
+        new AgentPluginService(PROCESSES, claudeMount.toString(), root, DEFAULTS),
+        new PromptRefinementService(PROCESSES, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
+        DEFAULTS,
+        IMAGE_VERSION,
+        List::of);
+
+    Answer answer = get("/agents/available");
+
+    assertEquals(200, answer.status());
+    assertEquals(new JsonArray(), answer.body().getJsonArray("capabilities"));
   }
 
   @Test
@@ -446,6 +554,138 @@ class AgentsApiTest {
   @Test
   void aMissingScopeIsAFourHundred() throws Exception {
     assertEquals(400, post("/agents", new JsonObject()).status());
+  }
+
+  @Test
+  void anUnauthenticatedLaunchIsRefusedRatherThanSwappedForASignInTerminal() throws Exception {
+    // The substitution this replaced: launchChat used to answer launchLogin's bare REPL, and the
+    // caller redirected you into it. You asked for a chat about an epic and got a login terminal,
+    // and nothing in the answer said so.
+    rewireWith(signedOut());
+
+    Answer answer =
+        post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "CHAT"));
+
+    // 409, not 500 and not 400: the request was well-formed and the caller cannot fix it by asking
+    // differently. A 500 would have shown "Internal error" for a state one click fixes.
+    assertEquals(409, answer.status());
+    // The DISCRIMINATOR is the contract, asserted as a literal — the sentence beside it is not, and
+    // matching prose is the display-string-as-contract mistake this epic exists to delete.
+    assertEquals("not-signed-in", answer.body().getString("error"));
+    assertEquals("CLAUDE", answer.body().getString("agentType"));
+    assertNotNull(answer.body().getString("message"));
+  }
+
+  @Test
+  void anUnattendedDispatchIsRefusedTheSameWayRatherThanOpeningATerminalNobodyWatches()
+      throws Exception {
+    rewireWith(signedOut());
+
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "ticket.dispatch")
+                .put("mode", "INTERACTIVE"));
+
+    assertEquals(409, answer.status());
+    assertEquals("not-signed-in", answer.body().getString("error"));
+  }
+
+  @Test
+  void theSignInTerminalIsADoorOfItsOwnAnsweringTheCommandEnvelope() throws Exception {
+    Answer answer = post("/agents/sign-in", new JsonObject().put("agentType", "KIMI"));
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals("Kimi sign-in", command.getString("actionName"));
+    assertEquals(true, command.getBoolean("interactive"), "a sign-in is a PTY");
+    assertNull(
+        command.getString("agentSurface"),
+        "a sign-in terminal is nobody's surface, so it is keyed to no configuration");
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void signingInWithoutNamingAHarnessTakesTheResolvedDefault() throws Exception {
+    Answer answer = post("/agents/sign-in", new JsonObject());
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals("Claude sign-in", command.getString("actionName"));
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void theSignInDoorRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
+    assertEquals(405, get("/agents/sign-in").status());
+  }
+
+  @Test
+  void theSurfaceComesBackOnTheCommandItLaunched() throws Exception {
+    // The parameter earns its keep here and nowhere else: epic.chat and workspace.chat send
+    // byte-identical requests to two containers, so until this field travelled nothing downstream
+    // could tell one of this daemon's four surfaces from another.
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "epic.chat")
+                .put("mode", "CHAT"));
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals("epic.chat", command.getString("agentSurface"));
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void aMissingSurfaceResolvesToTheShapeTheRequestImplies() throws Exception {
+    // The dated crutch that lets this daemon ship before the frontends. It is lossy exactly where
+    // the field exists to fix: an epic's agent tab reads as workspace.agent.
+    Answer answer =
+        post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "INTERACTIVE"));
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals("workspace.agent", command.getString("agentSurface"));
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void anUnknownSurfaceIsAFourHundredRatherThanASilentDefault() throws Exception {
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject().put("scope", "REPOSITORY").put("surface", "workspace.telepathy"));
+
+    assertEquals(400, answer.status());
+    assertTrue(answer.body().getString("message").contains("surface"), answer.body().encode());
+  }
+
+  @Test
+  void aTicketDispatchNamesItsOwnSurface() throws Exception {
+    // A workspace cut for a ticket: nobody presses a button for it, and it is configured on the
+    // same footing as the four a human starts.
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "ticket.dispatch")
+                .put("mode", "INTERACTIVE"));
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals("ticket.dispatch", command.getString("agentSurface"));
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
   }
 
   @Test
