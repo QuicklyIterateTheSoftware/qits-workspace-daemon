@@ -1229,12 +1229,97 @@ components:
 
             This is what lets a caller stop matching a display string: before it, the only surface
             distinction that existed was carried in `actionName`.
+        agentLaunchRecord:
+          $ref: "#/components/schemas/AgentLaunchRecord"
+          description: |
+            What this session was **actually launched with**. **Omitted** for a non-agent command,
+            for the sign-in terminal, and for every agent command launched before a launch recorded
+            itself — omitted rather than null, so "no record" stays distinguishable from a session
+            that ran with an empty configuration.
         agentSessions:
           type: array
           items: { $ref: "#/components/schemas/AgentSessionRef" }
           description: |
             The ordered session lineage this command drove; empty for a non-agent command. The
             **last** entry is the current session.
+
+    AgentLaunchRecord:
+      type: object
+      description: |
+        What a session was **actually launched with**, recorded on the command at launch rather
+        than inferred afterwards from what the store holds.
+
+        This is what makes "a container keeps the document it was born with, and an edit applies to
+        the next container" a safe rule rather than an opaque one. The store can be edited at any
+        time and the container is gone by the time anyone asks, so a session that behaved oddly
+        last week cannot be read off the store — only off this. It is also the evidence the epic's
+        per-surface rollout verification reads, in place of logs.
+
+        **No credential can appear in it, structurally.** Attached external MCP servers are named
+        by `externalMcpServers` **key** — not by url, not by header name, not by a redacted value —
+        so there is no shape here one could travel in. (The rendered command line beside it is
+        stored already redacted, for the same reason and by a different mechanism.)
+
+        The daemon serves the library's own object unreshaped; the keys below are its.
+      required:
+        [surface, harness, model, effort, permissionMode, remoteControl, remoteControlName,
+         activityTracking, mcpServers, externalMcpServers, configured, notes]
+      properties:
+        surface: { $ref: "#/components/schemas/AgentSurface" }
+        harness: { $ref: "#/components/schemas/AgentType" }
+        model:
+          type: string
+          description: The model passed, or **empty** for the harness's own default.
+        effort:
+          type: string
+          description: |
+            The effort level passed, or empty. Empty on a Kimi session even when one was
+            configured — Kimi has no effort concept, and `notes` says so rather than the record
+            claiming a flag that was never rendered.
+        permissionMode:
+          type: string
+          enum: [SKIP_PERMISSIONS, PROMPT]
+        remoteControl:
+          type: boolean
+          description: Whether the surface's remote-control knob was on.
+        remoteControlName:
+          type: string
+          description: |
+            The session name a bridge was asked for under, or empty when none was. Claude only.
+        activityTracking:
+          type: boolean
+          description: Whether the turn-boundary hooks were wired.
+        mcpServers:
+          type: array
+          description: The platform's own servers this launch attached, in render order.
+          items:
+            type: object
+            required: [server, readOnly]
+            properties:
+              server:
+                type: string
+                description: "`repository`, `observability` or `actions`."
+              readOnly:
+                type: boolean
+                description: Whether the url carried the `agentReadOnly=true` fence.
+        externalMcpServers:
+          type: array
+          items: { type: string }
+          description: |
+            The catalog entries this launch attached, **by key**. Never a url and never a header
+            value — see this schema's note.
+        configured:
+          type: boolean
+          description: |
+            `false` when the launch rendered the library's shipped constants because its container
+            was born without a configuration document — the difference between "configured this
+            way" and "nobody had configured it", which a reader cannot otherwise tell.
+        notes:
+          type: array
+          items: { type: string }
+          description: |
+            What the harness could not render of what it was configured with (a Kimi effort level,
+            a Kimi system prompt), and anything else the launch wants a reader to know.
 
     AgentSessionRef:
       type: object
@@ -1347,9 +1432,9 @@ components:
         vocabulary is the platform's whole set, so the other three are accepted and simply never
         sent here.
 
-        **The four human ones send byte-identical requests without this field**, which is why it
-        exists: `epic.chat` and `workspace.chat` differ only in which container the request reached,
-        and nothing downstream could tell them apart.
+        **The four human ones would send byte-identical requests without this field**, which is why
+        it exists: `epic.chat` and `workspace.chat` differ only in which container the request
+        reached, and nothing downstream could tell them apart.
       enum:
         - project.epics
         - project.tickets
@@ -1362,19 +1447,21 @@ components:
 
     LaunchAgentRequest:
       type: object
-      required: [scope, mode]
+      required: [scope, surface, mode]
       properties:
         scope: { $ref: "#/components/schemas/AgentMcpScope" }
         surface:
           $ref: "#/components/schemas/AgentSurface"
           description: |
-            Omit and the launch resolves the surface its *shape* implies — a chat is
-            `workspace.chat`, an interactive launch is `workspace.agent`. That guess is a dated
-            migration crutch so this daemon could ship ahead of the frontends, and it is lossy in
-            exactly the place the field exists to fix: it collapses `epic.chat` onto
-            `workspace.chat` and `epic.agent` onto `workspace.agent`.
+            **Required.** Omitting it is a **400**, and a surface outside the enum is a 400 too —
+            the two answers differ so a caller can tell which mistake it made.
 
-            A surface outside the enum is a **400**, like an unknown `scope`.
+            It used to be guessed from the request's *shape* when it was missing — a chat read as
+            `workspace.chat`, an interactive launch as `workspace.agent` — a dated migration crutch
+            so this daemon could ship ahead of the frontends. The guess is gone: it was lossy in
+            exactly the place the field exists to fix, collapsing `epic.chat` onto `workspace.chat`
+            and `epic.agent` onto `workspace.agent`, and it made a caller that had forgotten the
+            field look like one that had shipped it.
         mode: { $ref: "#/components/schemas/AgentLaunchMode" }
         agentType:
           $ref: "#/components/schemas/AgentType"

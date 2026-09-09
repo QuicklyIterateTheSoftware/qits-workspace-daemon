@@ -251,10 +251,21 @@ with no runtime dependency on the store.
 
 A launch body carries `surface` — where in the product the session was started from. **This is the
 daemon where it earns its keep**: `epic.chat`, `epic.agent`, `workspace.chat` and `workspace.agent`
-send byte-identical requests today, so nothing downstream could tell one from another. A missing
-surface resolves to the shape-implied guess for one release (a dated crutch, so frontends can ship
-after the daemon); an unknown one is a 400. It comes back on the command as `agentSurface`, which is
-what lets a caller stop matching a display string.
+send byte-identical requests today, so nothing downstream could tell one from another. It is
+**required**: a missing surface is a 400 from the library and an unknown one a 400 from
+`AgentSurface.of`, so the answer says which mistake was made. (It used to be guessed from the
+request's shape when missing — a dated crutch so frontends could ship after the daemon; that guess
+is gone, and it had to be, because it collapsed `epic.chat` onto `workspace.chat`.) It comes back on
+the command as `agentSurface`, which is what lets a caller stop matching a display string.
+
+Beside it comes `agentLaunchRecord` — **what the session actually ran with**: surface, harness,
+model, effort, permission mode, remote control, activity tracking, the platform MCP servers it
+attached and the catalog entries it attached *by key*. A container keeps the document it was born
+with and an edit applies to the next container, so the store cannot answer what a session ran with
+after the fact; this is the only thing that can. Absent — not null — for a non-agent command, the
+sign-in terminal, and any session launched before the record existed. **No credential can travel in
+it**: external servers are recorded by key, never by url or header value, and the rendered command
+line beside it is stored already redacted.
 
 An unauthenticated harness used to make `POST /agents` silently answer a login terminal instead of
 the session asked for. The library removed that substitution, so two things live here:

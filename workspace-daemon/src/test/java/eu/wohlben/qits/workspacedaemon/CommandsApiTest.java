@@ -1,6 +1,7 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -160,6 +161,11 @@ class CommandsApiTest {
     assertEquals("TERMINAL", command.getString("kind"));
     assertNotNull(command.getString("launchedAt"));
     assertEquals(new JsonArray(), command.getJsonArray("agentSessions"));
+    // Absent, not null. A declared action is not an agent session, so it ran from no configuration
+    // and has nothing to record — which must stay tellable from a session that ran with an empty
+    // one, and would not be if the key were emitted as null.
+    assertFalse(command.containsKey("agentSurface"), command.encode());
+    assertFalse(command.containsKey("agentLaunchRecord"), command.encode());
   }
 
   @Test
