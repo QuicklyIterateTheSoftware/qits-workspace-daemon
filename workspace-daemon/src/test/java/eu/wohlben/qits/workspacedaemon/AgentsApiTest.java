@@ -7,11 +7,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.agents.AgentCommands;
+import eu.wohlben.qits.agents.AgentConfigurationDocument;
 import eu.wohlben.qits.agents.AgentDefaults;
 import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.agents.AgentPluginService;
 import eu.wohlben.qits.agents.AgentSessionQueryService;
 import eu.wohlben.qits.agents.AgentSessionStore;
+import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentTranscriptService;
 import eu.wohlben.qits.agents.AgentTranscriptTailService;
 import eu.wohlben.qits.agents.AgentType;
@@ -40,6 +42,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -216,6 +219,16 @@ class AgentsApiTest {
 
   /** Rebuild the agent surface on a different {@link ProcessRunner}, leaving everything else. */
   private void rewireWith(ProcessRunner processes) {
+    rewireWith(processes, DEFAULTS);
+  }
+
+  /**
+   * Rebuild the agent surface on a different {@link ProcessRunner} and a different {@link
+   * AgentDefaults} — which is how a container "born with a configuration document" is expressed
+   * here, since the document reaches a launch through {@code AgentDefaults.surfaceConfigurations()}
+   * and nowhere else.
+   */
+  private void rewireWith(ProcessRunner processes, AgentDefaults defaults) {
     CommandLogService logs = new CommandLogService(store, null);
     CommandRegistry registry = new CommandRegistry(root, 2_000);
     CommandService commands =
@@ -229,7 +242,7 @@ class AgentsApiTest {
             new eu.wohlben.qits.agents.AgentAuthStatus(processes, claudeMount.toString(), root),
             transcripts,
             tail,
-            DEFAULTS,
+            defaults,
             new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x"),
             WORKSPACE,
             claudeMount.toString(),
@@ -238,11 +251,99 @@ class AgentsApiTest {
     api.wireAgents(
         rewired,
         new AgentSessionQueryService(store, sessionStore),
-        new AgentPluginService(processes, claudeMount.toString(), root, DEFAULTS),
-        new PromptRefinementService(processes, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
-        DEFAULTS,
+        new AgentPluginService(processes, claudeMount.toString(), root, defaults),
+        new PromptRefinementService(processes, WORKSPACE, defaults, claudeMount.toString(), root),
+        defaults,
         IMAGE_VERSION,
         () -> CAPABILITIES);
+  }
+
+  /** The one catalog entry these tests attach, and the credential nothing may ever serve. */
+  private static final String EXTERNAL_URL = "https://mcp.stripe.example/v1";
+
+  private static final String EXTERNAL_HEADER_NAME = "Authorization";
+
+  private static final String EXTERNAL_HEADER_VALUE = "Bearer sk-live-nobody-may-see-this";
+
+  private static final JsonObject EXTERNAL_SERVER =
+      new JsonObject()
+          .put("key", "stripe")
+          .put("url", EXTERNAL_URL)
+          .put("headerName", EXTERNAL_HEADER_NAME)
+          .put("headerValue", EXTERNAL_HEADER_VALUE)
+          .put("allowedTools", new JsonArray().add("mcp__stripe__list_charges"));
+
+  /**
+   * The configuration document a container is born with, as qits-projects writes it — parsed the
+   * way a mounted file is rather than built as records, so the field names the service writes are
+   * the ones exercised here.
+   */
+  private static AgentSurfaceConfigurations document(JsonObject... externalServers) {
+    JsonArray attached = new JsonArray();
+    for (JsonObject server : externalServers) {
+      attached.add(server);
+    }
+    JsonObject surface =
+        new JsonObject()
+            .put(
+                "configuration",
+                new JsonObject()
+                    .put("surface", "workspace.chat")
+                    .put("harness", "CLAUDE")
+                    // Deliberately not the defaults: a record that echoed the shipped values would
+                    // pass whether or not it read the configuration at all.
+                    .put("model", "opus")
+                    .put("effort", "high")
+                    .put("remoteControl", false)
+                    .put("permissionMode", "SKIP_PERMISSIONS")
+                    .put("activityTracking", true)
+                    .put("systemPrompt", "")
+                    .put("initialPrompt", "")
+                    .put(
+                        "mcpServers",
+                        new JsonArray()
+                            .add(
+                                new JsonObject()
+                                    .put("server", "repository")
+                                    .put("narrowProject", false)
+                                    .put("narrowRepository", true)
+                                    .put("narrowWorkspace", true)
+                                    .put("readOnly", false)
+                                    .put("allowedTools", new JsonArray()))))
+            .put("externalMcpServers", attached);
+    String raw =
+        new JsonObject()
+            .put("version", AgentConfigurationDocument.CURRENT_VERSION)
+            .put("generatedAt", "2026-09-09T10:00:00Z")
+            .put("surfaces", new JsonArray().add(surface))
+            .encode();
+    return AgentSurfaceConfigurations.of(
+        AgentConfigurationDocument.parse(raw, "agents-api-test-document"));
+  }
+
+  /** {@link #DEFAULTS}, for a container created with {@code configurations} mounted. */
+  private static AgentDefaults bornWith(AgentSurfaceConfigurations configurations) {
+    return new AgentDefaults() {
+      @Override
+      public AgentType defaultAgentType() {
+        return AgentType.CLAUDE;
+      }
+
+      @Override
+      public boolean activityTrackingEnabled() {
+        return true;
+      }
+
+      @Override
+      public Optional<String> refinementModel() {
+        return Optional.empty();
+      }
+
+      @Override
+      public AgentSurfaceConfigurations surfaceConfigurations() {
+        return configurations;
+      }
+    };
   }
 
   /** This workspace declares no actions; agents are launched, not resolved from config. */
@@ -447,6 +548,7 @@ class AgentsApiTest {
             "/agents",
             new JsonObject()
                 .put("scope", "REPOSITORY")
+                .put("surface", "workspace.agent")
                 .put("mode", "INTERACTIVE")
                 .put("agentType", "CLAUDE")
                 .put("initialContext", "look at the README")
@@ -473,7 +575,11 @@ class AgentsApiTest {
     Answer answer =
         post(
             "/agents",
-            new JsonObject().put("scope", "REPOSITORY").put("mode", "CHAT").put("fork", false));
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "workspace.chat")
+                .put("mode", "CHAT")
+                .put("fork", false));
 
     assertEquals(200, answer.status());
     assertEquals(false, answer.body().getJsonObject("command").getBoolean("interactive"));
@@ -502,6 +608,7 @@ class AgentsApiTest {
             "/agents",
             new JsonObject()
                 .put("scope", "REPOSITORY")
+                .put("surface", "workspace.chat")
                 .put("mode", "CHAT")
                 .put("resumeSessionId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
 
@@ -564,7 +671,12 @@ class AgentsApiTest {
     rewireWith(signedOut());
 
     Answer answer =
-        post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "CHAT"));
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "workspace.chat")
+                .put("mode", "CHAT"));
 
     // 409, not 500 and not 400: the request was well-formed and the caller cannot fix it by asking
     // differently. A 500 would have shown "Internal error" for a state one click fixes.
@@ -645,17 +757,15 @@ class AgentsApiTest {
   }
 
   @Test
-  void aMissingSurfaceResolvesToTheShapeTheRequestImplies() throws Exception {
-    // The dated crutch that lets this daemon ship before the frontends. It is lossy exactly where
-    // the field exists to fix: an epic's agent tab reads as workspace.agent.
+  void aMissingSurfaceIsRefusedRatherThanGuessedFromTheRequestShape() throws Exception {
+    // The crutch that let this daemon ship before the frontends, now removed. It was lossy exactly
+    // where the field exists to fix — an epic's agent tab read as workspace.agent — and it made a
+    // caller that had forgotten the field indistinguishable from one that had shipped it.
     Answer answer =
         post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "INTERACTIVE"));
 
-    assertEquals(200, answer.status());
-    JsonObject command = answer.body().getJsonObject("command");
-    assertEquals("workspace.agent", command.getString("agentSurface"));
-
-    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+    assertEquals(400, answer.status());
+    assertTrue(answer.body().getString("message").contains("surface"), answer.body().encode());
   }
 
   @Test
@@ -684,6 +794,131 @@ class AgentsApiTest {
     assertEquals(200, answer.status());
     JsonObject command = answer.body().getJsonObject("command");
     assertEquals("ticket.dispatch", command.getString("agentSurface"));
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void aLaunchRecordsWhatItRanWithAndAnswersItOnEveryReadOfTheCommand() throws Exception {
+    // A container keeps the document it was born with, and an edit in qits-projects applies to the
+    // next one — so the store cannot answer what THIS session ran with. Only the record can, and
+    // until it was on the wire it was written inside the container and readable by nobody.
+    rewireWith(PROCESSES, bornWith(document()));
+
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "workspace.chat")
+                .put("mode", "CHAT"));
+
+    assertEquals(200, answer.status());
+    String commandId = answer.body().getJsonObject("command").getString("id");
+
+    // The keys are asserted as LITERAL STRINGS, like every other field on this wire: a test that
+    // read them off the record would rename itself along with the bug.
+    JsonObject record = answer.body().getJsonObject("command").getJsonObject("agentLaunchRecord");
+    assertNotNull(record, answer.body().encode());
+    assertEquals("workspace.chat", record.getString("surface"));
+    assertEquals("CLAUDE", record.getString("harness"));
+    assertEquals("opus", record.getString("model"));
+    assertEquals("high", record.getString("effort"));
+    assertEquals("SKIP_PERMISSIONS", record.getString("permissionMode"));
+    assertEquals(false, record.getBoolean("remoteControl"));
+    assertEquals("", record.getString("remoteControlName"));
+    assertEquals(true, record.getBoolean("activityTracking"));
+    assertEquals(
+        true,
+        record.getBoolean("configured"),
+        "this container was born with a document, which is what `configured` says — the difference"
+            + " between a surface configured this way and one nobody had configured");
+    assertNotNull(record.getJsonArray("notes"));
+    JsonObject attached = record.getJsonArray("mcpServers").getJsonObject(0);
+    assertEquals("repository", attached.getString("server"));
+    assertEquals(false, attached.getBoolean("readOnly"));
+
+    // The same object on both reads: the list and the single command go through one serializer, and
+    // the epic's per-surface verification reads whichever it has an id for.
+    JsonObject fromRead = get("/commands/" + commandId).body().getJsonObject("agentLaunchRecord");
+    assertEquals(record, fromRead);
+    JsonObject fromList =
+        get("/commands").body().getJsonArray("entries").getJsonObject(0).getJsonObject("command");
+    assertEquals(commandId, fromList.getString("id"));
+    assertEquals(record, fromList.getJsonObject("agentLaunchRecord"));
+
+    post("/commands/" + commandId + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void anAttachedExternalServerIsRecordedByKeyAndItsCredentialAppearsNowhere() throws Exception {
+    // The record was built to have NO SHAPE a credential could travel in — external servers are
+    // named by key, not by url with a header stripped and not by a redacted value. This asserts
+    // that on what the API actually serves, over the whole body rather than field by field, so a
+    // field added later that reintroduced a url or a header value would fail here.
+    rewireWith(PROCESSES, bornWith(document(EXTERNAL_SERVER)));
+
+    Answer answer =
+        post(
+            "/agents",
+            new JsonObject()
+                .put("scope", "REPOSITORY")
+                .put("surface", "workspace.chat")
+                .put("mode", "CHAT"));
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertEquals(
+        new JsonArray().add("stripe"),
+        command.getJsonObject("agentLaunchRecord").getJsonArray("externalMcpServers"));
+
+    String served = get("/commands/" + command.getString("id")).body().encode();
+    assertFalse(served.contains(EXTERNAL_HEADER_VALUE), "a header value must never be served");
+    assertFalse(
+        served.contains(EXTERNAL_HEADER_NAME),
+        "not even the header it would be presented in");
+    assertFalse(served.contains(EXTERNAL_URL), "nor the url, which can itself carry a credential");
+    assertTrue(served.contains("stripe"), served);
+
+    // The key set whole, so a field added upstream that reintroduced a url, a header name or a
+    // header value fails here rather than shipping quietly.
+    assertEquals(
+        Set.of(
+            "surface",
+            "harness",
+            "model",
+            "effort",
+            "permissionMode",
+            "remoteControl",
+            "remoteControlName",
+            "activityTracking",
+            "mcpServers",
+            "externalMcpServers",
+            "configured",
+            "notes"),
+        command.getJsonObject("agentLaunchRecord").fieldNames());
+    assertEquals(
+        Set.of("server", "readOnly"),
+        command
+            .getJsonObject("agentLaunchRecord")
+            .getJsonArray("mcpServers")
+            .getJsonObject(0)
+            .fieldNames(),
+        "an attached platform server is named and fenced, never addressed — no url is served");
+
+    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void aCommandThatIsNotAConfiguredSessionCarriesNoRecordAtAll() throws Exception {
+    // Absent, not null. A sign-in terminal is nobody's surface and runs from no configuration, and
+    // so does an agent command launched before a launch recorded itself — both must stay
+    // distinguishable from a session that ran with an EMPTY configuration, which is an object.
+    Answer answer = post("/agents/sign-in", new JsonObject().put("agentType", "CLAUDE"));
+
+    assertEquals(200, answer.status());
+    JsonObject command = answer.body().getJsonObject("command");
+    assertFalse(command.containsKey("agentLaunchRecord"), command.encode());
 
     post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
   }

@@ -8,6 +8,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
 import java.util.List;
+import org.jboss.logging.Logger;
 
 /**
  * Serializes {@code qits-commands}' result records to the JSON {@link WorkspaceApi} answers with.
@@ -39,6 +40,8 @@ import java.util.List;
  * value for a null.
  */
 final class CommandJson {
+
+  private static final Logger LOG = Logger.getLogger(CommandJson.class);
 
   private CommandJson() {}
 
@@ -77,6 +80,7 @@ final class CommandJson {
     // project's sessions by looking for "(tickets desk)" in it — which made a label a cross-repo
     // contract, and renaming the label silently moved every ticket session into the wrong list.
     putIfPresent(body, "agentSurface", command.agentSurface());
+    putLaunchRecord(body, command);
     if (command.exitCode() != null) {
       body.put("exitCode", command.exitCode());
     }
@@ -146,6 +150,50 @@ final class CommandJson {
               .put("interactive", action.interactive()));
     }
     return new JsonObject().put("actions", entries);
+  }
+
+  /**
+   * {@code agentLaunchRecord} — <b>what the session was actually launched with</b>: its surface,
+   * harness, model, effort, permission mode, remote control, activity tracking, the platform MCP
+   * servers it attached and the catalog entries it attached by key.
+   *
+   * <p>This is the daemon where it is worth the most, for the same reason the surface is. A
+   * container keeps the configuration document it was born with for its whole life and an edit in
+   * qits-projects applies to the next container, so the store cannot answer what a session that
+   * behaved oddly last week ran with — only the record can, and until this key existed the record
+   * was written at launch and readable by nobody: it lives on a command inside the container, and
+   * {@code GET /commands} is the only door out. The epic's per-surface verification reads it rather
+   * than the logs.
+   *
+   * <p>Served as a nested <b>object</b> rather than the string the command stores. The string is
+   * the library's storage form — {@code qits-commands} keeps the record opaque on purpose — and a
+   * caller that had to parse a JSON document out of a JSON string would be paying for that choice.
+   * {@code AgentLaunchRecord.toJson} is the only writer on this path, so the parse cannot fail in
+   * practice; it is guarded anyway, because one unreadable row must not take the whole Commands
+   * list down with it, and the WARN is what stops the omission being silent.
+   *
+   * <p><b>No credential can appear here.</b> The record names attached external servers by key —
+   * never a url, a header name or a header value — and this method reshapes nothing, so what is
+   * served is what the library built. The rendered command line is a different field and is stored
+   * already redacted ({@code AgentLaunchMetadata.redact}); nothing may be added here that
+   * reintroduces a value either of those two deliberately keeps out.
+   */
+  private static void putLaunchRecord(JsonObject body, Command command) {
+    String record = command.agentLaunchRecord();
+    if (record == null || record.isBlank()) {
+      // Absent, not null: a non-agent command has no record, the sign-in terminal has none, and
+      // neither has an agent command launched before a launch recorded itself. All three stay
+      // distinguishable from a session that ran with an empty configuration, which is an object.
+      return;
+    }
+    try {
+      body.put("agentLaunchRecord", new JsonObject(record));
+    } catch (RuntimeException notJson) {
+      LOG.warnf(
+          "Command %s carries a launch record that is not a JSON object; omitting it from the"
+              + " answer rather than failing the read",
+          command.id());
+    }
   }
 
   /** The host computed this in the mapper; reproduced so the DTO component is never null. */

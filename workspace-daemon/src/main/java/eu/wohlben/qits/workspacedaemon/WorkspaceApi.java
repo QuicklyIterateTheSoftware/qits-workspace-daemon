@@ -956,13 +956,17 @@ public class WorkspaceApi {
    * tell them apart. This is the first time the daemon can be told which of them it is serving, and
    * therefore the first time one of them can be configured without configuring the other three.
    *
-   * <p>Two shapes, both the library's rather than reimplemented here: an <b>unknown</b> surface is a
-   * refusal ({@code AgentSurface.of} throws {@link InvalidCommandRequestException}, which this
-   * surface answers as a 400 with the message attached), and a <b>missing</b> one is null, which
-   * {@code AgentLaunchRequest.surfaceOrDefault} resolves to the shape-implied guess for one release
-   * so the frontends can ship after the daemon. That guess is dated: it collapses {@code epic.chat}
-   * onto {@code workspace.chat} and {@code epic.agent} onto {@code workspace.agent}, which is
-   * exactly the collapse this field exists to end.
+   * <p><b>It is required.</b> Two shapes, both the library's rather than reimplemented here: an
+   * <b>unknown</b> surface is a refusal ({@code AgentSurface.of} throws {@link
+   * InvalidCommandRequestException}, which this surface answers as a 400 with the message attached),
+   * and a <b>missing</b> one is null here and a refusal from the launch itself ({@code
+   * AgentLaunchRequest.requiredSurface}), so the 400 says which of the two went wrong.
+   *
+   * <p>It used to be guessed from the request's shape when it was missing — a dated crutch so the
+   * frontends could ship after the daemon. That guess is gone (task 747a0225), and it had to be:
+   * it collapsed {@code epic.chat} onto {@code workspace.chat} and {@code epic.agent} onto {@code
+   * workspace.agent}, which is exactly the collapse this field exists to end, and a caller that
+   * forgot the field looked like one that had shipped it.
    */
   private static AgentSurface surface(String raw) {
     return raw == null || raw.isBlank() ? null : AgentSurface.of(raw);
