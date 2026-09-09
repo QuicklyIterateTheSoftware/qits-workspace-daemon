@@ -464,8 +464,61 @@ paths:
               schema: { $ref: "#/components/schemas/CommandEnvelope" }
         "400":
           description: |
-            A missing or unparseable `scope`/`mode`/`agentType`, `fork` without `resumeSessionId`,
-            a `resumeSessionId` this container does not own, or a fork of a Kimi session.
+            A missing or unparseable `scope`/`mode`/`agentType`, an unknown `surface`, `fork`
+            without `resumeSessionId`, a `resumeSessionId` this container does not own, or a fork
+            of a Kimi session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            **Nobody has signed this harness in** on the shared credential volume, so the session
+            cannot start. Not a 500 and not a 400: the request was well-formed and the caller
+            cannot fix it by asking differently — somebody has to sign in, once.
+
+            Match `error`, never the sentence. The discriminator is the contract precisely so the
+            message can be reworded without breaking a caller; this repo has already paid once for
+            a display string used as one.
+
+            Offer `POST /agents/sign-in` as an explicit next step rather than opening it in place —
+            being dropped into a login terminal you did not ask for is what this replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotSignedIn" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agents/sign-in:
+    post:
+      tags: [coding agents]
+      operationId: openSignInTerminal
+      summary: Open the harness's sign-in terminal.
+      description: |
+        A **door**, opened deliberately, and until this existed there was none.
+
+        The login REPL used to be reachable only by accident: an unauthenticated harness made
+        `POST /agents` quietly answer a login terminal instead of the session that was asked for,
+        and the caller redirected the user into it without saying so. That substitution is gone —
+        a launch against a harness nobody has signed in is a `409` (see `POST /agents`) — so this
+        is how a signed-out platform becomes a signed-in one. Somebody has to complete the OAuth
+        once per credential volume; after that every container on it is signed in.
+
+        It answers the ordinary `{command: …}` envelope, because a sign-in terminal is a command in
+        this container like any other: attach to `WS /terminal/commands/{id}` and drive it.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignInRequest" }
+      responses:
+        "200":
+          description: The sign-in terminal, as a command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandEnvelope" }
+        "400":
+          description: An unparseable `agentType`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -477,12 +530,19 @@ paths:
     get:
       tags: [coding agents]
       operationId: availableAgents
-      summary: The harnesses this daemon can launch, and the resolved default.
+      summary: The harnesses this daemon can launch, the resolved default, and what each reports.
       description: |
         The default is resolved from the checkout's `.qits-config.yml` (`agent.defaultType`)
         falling through to the daemon's. Fetch once per page; it does not change under a container.
 
         A **resumed** session keeps its original harness — only a fresh launch may pick one.
+
+        Beside the list, `capabilities` carries what each harness in this image reported it can be
+        configured with — its models, its effort levels or the fact that it has none, its version,
+        and whether anybody is signed in on the shared credential volume. It is produced by running
+        the binaries **once at container start**, never on this request path: the binaries live in
+        the image and the editor that needs them is a platform-wide route with no container in
+        front of it. qits-projects caches this keyed by harness and `imageVersion`.
       responses:
         "200":
           description: The harnesses.
@@ -1159,6 +1219,16 @@ components:
         shortCommitHash:
           type: string
           description: The first seven characters of `commitHash`; omitted with it.
+        agentSurface:
+          $ref: "#/components/schemas/AgentSurface"
+          description: |
+            Where this session was started from, as the launch resolved it. **Omitted** for a
+            non-agent command, for the sign-in terminal, and for every agent command launched
+            before this daemon learned to accept the field — so a reader can tell "not an agent
+            session" from "an agent session that predates the surface".
+
+            This is what lets a caller stop matching a display string: before it, the only surface
+            distinction that existed was carried in `actionName`.
         agentSessions:
           type: array
           items: { $ref: "#/components/schemas/AgentSessionRef" }
@@ -1265,11 +1335,46 @@ components:
         a PTY. See the table on `POST /agents` for which socket each implies.
       enum: [CHAT, INTERACTIVE]
 
+    AgentSurface:
+      type: string
+      description: |
+        Where in the product this session was started from — what it is steered at and what its
+        configuration is keyed by. Orthogonal to `scope`: the scope *addresses* (how narrow the MCP
+        urls are), the surface *steers* (which prompt, model, permissions and servers it runs with).
+
+        The five a workspace container serves are `epic.chat`, `epic.agent`, `workspace.chat`,
+        `workspace.agent`, and `ticket.dispatch` where a ticket dispatch cut the workspace; the
+        vocabulary is the platform's whole set, so the other three are accepted and simply never
+        sent here.
+
+        **The four human ones send byte-identical requests without this field**, which is why it
+        exists: `epic.chat` and `workspace.chat` differ only in which container the request reached,
+        and nothing downstream could tell them apart.
+      enum:
+        - project.epics
+        - project.tickets
+        - epic.chat
+        - epic.agent
+        - workspace.chat
+        - workspace.agent
+        - epic.autonomous
+        - ticket.dispatch
+
     LaunchAgentRequest:
       type: object
       required: [scope, mode]
       properties:
         scope: { $ref: "#/components/schemas/AgentMcpScope" }
+        surface:
+          $ref: "#/components/schemas/AgentSurface"
+          description: |
+            Omit and the launch resolves the surface its *shape* implies — a chat is
+            `workspace.chat`, an interactive launch is `workspace.agent`. That guess is a dated
+            migration crutch so this daemon could ship ahead of the frontends, and it is lossy in
+            exactly the place the field exists to fix: it collapses `epic.chat` onto
+            `workspace.chat` and `epic.agent` onto `workspace.agent`.
+
+            A surface outside the enum is a **400**, like an unknown `scope`.
         mode: { $ref: "#/components/schemas/AgentLaunchMode" }
         agentType:
           $ref: "#/components/schemas/AgentType"
@@ -1304,14 +1409,116 @@ components:
             implemented anywhere on the platform, so the agent is told to call something that does
             not exist. Deliver the prompt inline until it lands.
 
+    SignInRequest:
+      type: object
+      description: |
+        Optional whole. The usual caller is "the harness I was just refused for", which it knows
+        from the `409`'s `agentType`; an operator opening the door on a fresh estate should not have
+        to name one.
+      properties:
+        agentType:
+          $ref: "#/components/schemas/AgentType"
+          description: Omit to take the resolved default.
+
+    NotSignedIn:
+      type: object
+      description: |
+        The refusal a launch answers when nobody has signed the harness in. The unattended paths
+        (`epic.autonomous`, `ticket.dispatch`) get the same refusal and must **not** be turned into
+        a sign-in terminal: a dispatch that reports "started an agent" over a login prompt nobody
+        will look at is the green-while-dead shape this replaced.
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: |
+            The machine-readable discriminator, and the point of this body. Always `not-signed-in`.
+          enum: [not-signed-in]
+        agentType:
+          $ref: "#/components/schemas/AgentType"
+          description: Which harness has nobody signed in — what the sign-in terminal is opened for.
+        message:
+          type: string
+          description: |
+            Human-readable, and **not** a contract. Reworded freely; match `error` instead.
+
     AvailableAgents:
       type: object
-      required: [agents, defaultAgent]
+      required: [agents, defaultAgent, imageVersion, reportedBy, capabilities]
       properties:
         agents:
           type: array
           items: { $ref: "#/components/schemas/AgentType" }
         defaultAgent: { $ref: "#/components/schemas/AgentType" }
+        imageVersion:
+          type: string
+          description: |
+            The workspace image this container runs — the second half of the host's cache key for
+            `capabilities`, so a rebuilt image refreshes the catalogue rather than merging into it.
+            `unknown` when the container was told nothing and the binary carries no build stamp.
+        reportedBy:
+          type: string
+          description: |
+            Which daemon answered, for display beside a cached report. Free text; nothing matches
+            on it.
+        capabilities:
+          type: array
+          items: { $ref: "#/components/schemas/HarnessCapabilities" }
+          description: |
+            One report per harness, produced by running the binaries **once at container start**.
+            Empty until that probe lands, and empty if it failed outright — a cache miss to the
+            host, which keeps whatever it had rather than emptying the editor's dropdowns.
+
+    HarnessCapabilities:
+      type: object
+      description: |
+        What one harness in this image can be configured with. The two answer very differently,
+        which is the whole reason this is a report rather than a list: Claude has `--effort` with
+        levels its `--help` enumerates and **no command that lists models**, so its models are the
+        shipped aliases and `modelsEnumerated` is always false; Kimi has a machine-readable model
+        catalogue and **no effort concept at all**, so `effortSupported` is false and the editor
+        shows no effort control rather than a disabled one carrying Claude's values.
+
+        The report says which values it **enumerated**, not which are legal — a launch renders
+        whatever string the configuration holds, so a full model id the harness never listed still
+        works.
+      required:
+        [harness, harnessVersion, models, modelsEnumerated, effortSupported, effortLevels,
+         authenticated, authDetail, probeFailed, probeDetail]
+      properties:
+        harness: { $ref: "#/components/schemas/AgentType" }
+        harnessVersion:
+          type: string
+          description: What the binary reported as its version; empty when it could not be read.
+        models:
+          type: array
+          items: { type: string }
+        modelsEnumerated:
+          type: boolean
+          description: Whether `models` came off the binary rather than from the shipped set.
+        effortSupported:
+          type: boolean
+          description: Whether this harness has the concept at all.
+        effortLevels:
+          type: array
+          items: { type: string }
+        authenticated:
+          type: boolean
+          description: |
+            Whether anybody is signed in on the shared credential volume. **A display value, never
+            a gate** — it is asked again at launch, so a sign-in a minute after this was taken is
+            not blocked by it.
+        authDetail:
+          type: string
+          description: Where to sign in, when nobody has.
+        probeFailed:
+          type: boolean
+          description: |
+            Whether this report fell back to the shipped set rather than reading the binary. A
+            failed probe still yields a usable report; an empty dropdown is worse than a stale one.
+        probeDetail:
+          type: string
+          description: Why it fell back; empty when it did not.
 
     AgentSessionTree:
       type: object

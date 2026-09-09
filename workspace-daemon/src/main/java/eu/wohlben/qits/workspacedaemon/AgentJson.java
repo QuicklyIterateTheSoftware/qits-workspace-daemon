@@ -1,9 +1,10 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.agents.AgentSessionNodeDto;
-import eu.wohlben.qits.workspacedaemon.agents.AgentSubagentDto;
-import eu.wohlben.qits.workspacedaemon.agents.AgentType;
-import eu.wohlben.qits.workspacedaemon.agents.InstalledPluginDto;
+import eu.wohlben.qits.agents.AgentSessionNodeDto;
+import eu.wohlben.qits.agents.AgentSubagentDto;
+import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.agents.InstalledPluginDto;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
@@ -29,18 +30,54 @@ final class AgentJson {
 
   /** {@code POST /agents} — the launched command, in the same shape the commands routes use. */
   static JsonObject launched(
-      eu.wohlben.qits.workspacedaemon.commands.Command command, String repoId, String workspaceId) {
+      eu.wohlben.qits.commands.Command command, String repoId, String workspaceId) {
     return new JsonObject().put("command", CommandJson.command(command, repoId, workspaceId));
   }
 
-  /** {@code GET /agents/available} — the harnesses this daemon can launch, and the default. */
-  static JsonObject available(AgentType defaultAgent) {
+  /**
+   * {@code GET /agents/available} — the harnesses this daemon can launch, the default, and what each
+   * harness in this image reported it can be configured with.
+   *
+   * <p><b>The capability half is what fills the editor's model and effort dropdowns.</b> The valid
+   * values belong to the harness binary in the image, not to this platform: they differ per harness
+   * (Claude has {@code --effort} and no way to list models; Kimi has a JSON model catalogue and no
+   * effort concept at all) and they change when the image is rebuilt. So they are read off the
+   * binaries — once, at container start, off this request path — and answered here, where
+   * qits-projects caches them keyed by harness and {@code imageVersion} and the editor reads the
+   * cache. No request path shells out, and a rebuilt image refreshes the catalogue the first time a
+   * container on it starts.
+   *
+   * <p>{@code capabilities} is empty until the boot probe lands, and stays empty if it failed
+   * outright. That is a cache miss to the host, which keeps whatever it had — an honest "nothing
+   * reported" rather than an empty dropdown.
+   *
+   * @param imageVersion the workspace image this container runs, the second half of the host's cache
+   *     key
+   * @param capabilities one report per harness, each {@code HarnessCapabilities.toJson()}
+   */
+  static JsonObject available(
+      AgentType defaultAgent, String imageVersion, List<HarnessCapabilities> capabilities) {
     JsonArray agents = new JsonArray();
     for (AgentType type : AgentType.values()) {
       agents.add(type.name());
     }
-    return new JsonObject().put("agents", agents).put("defaultAgent", defaultAgent.name());
+    JsonArray reports = new JsonArray();
+    for (HarnessCapabilities report : capabilities) {
+      reports.add(report.toJson());
+    }
+    return new JsonObject()
+        .put("agents", agents)
+        .put("defaultAgent", defaultAgent.name())
+        .put("imageVersion", imageVersion == null ? "" : imageVersion)
+        // Free text for display, so a reader of the cached catalogue can see which daemon answered:
+        // a project's agent container and a workspace container may run different image builds, and
+        // "which container said this" is the question a stale-looking dropdown raises first.
+        .put("reportedBy", REPORTED_BY)
+        .put("capabilities", reports);
   }
+
+  /** What this daemon calls itself in a capability report. Display only; nothing matches on it. */
+  private static final String REPORTED_BY = "qits-workspace-daemon";
 
   /** {@code GET /agent-sessions} — the session tree. */
   static JsonObject sessions(List<AgentSessionNodeDto> sessions) {

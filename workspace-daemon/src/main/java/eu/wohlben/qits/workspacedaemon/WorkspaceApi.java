@@ -1,23 +1,25 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
-import eu.wohlben.qits.workspacedaemon.commands.CommandNotFoundException;
-import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
-import eu.wohlben.qits.workspacedaemon.agents.AgentDefaults;
-import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchMode;
-import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchRequest;
-import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentMcpScope;
-import eu.wohlben.qits.workspacedaemon.agents.AgentPluginService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentSessionQueryService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentType;
-import eu.wohlben.qits.workspacedaemon.agents.PromptRefinementService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandStatus;
-import eu.wohlben.qits.workspacedaemon.commands.InvalidCommandRequestException;
-import eu.wohlben.qits.workspacedaemon.commands.LogChannel;
-import eu.wohlben.qits.workspacedaemon.commands.LogSeverity;
-import eu.wohlben.qits.workspacedaemon.commands.WorkspaceContext;
+import eu.wohlben.qits.commands.CommandNotFoundException;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.agents.AgentDefaults;
+import eu.wohlben.qits.agents.AgentLaunchMode;
+import eu.wohlben.qits.agents.AgentLaunchRequest;
+import eu.wohlben.qits.agents.AgentLaunchService;
+import eu.wohlben.qits.agents.AgentMcpScope;
+import eu.wohlben.qits.agents.AgentNotSignedInException;
+import eu.wohlben.qits.agents.AgentPluginService;
+import eu.wohlben.qits.agents.AgentSessionQueryService;
+import eu.wohlben.qits.agents.AgentSurface;
+import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.agents.PromptRefinementService;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStatus;
+import eu.wohlben.qits.commands.InvalidCommandRequestException;
+import eu.wohlben.qits.commands.LogChannel;
+import eu.wohlben.qits.commands.LogSeverity;
 import eu.wohlben.qits.workspacedaemon.detection.ComponentMapService;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.detection.DetectionService;
@@ -172,6 +174,19 @@ public class WorkspaceApi {
 
   static final String AGENTS_AVAILABLE_PATH = "/agents/available";
 
+  /**
+   * The sign-in terminal — <b>a door, and until now there was none</b>.
+   *
+   * <p>The login REPL used to be reachable only by accident: an unauthenticated harness made {@code
+   * POST /agents} quietly answer a login terminal instead of the session that was asked for, and the
+   * caller redirected the user into it without ever saying so. The harness library has removed that
+   * substitution (a launch against a harness nobody has signed in refuses, see the 409 below), which
+   * would have left the terminal unreachable and an unauthenticated platform with no way to become
+   * an authenticated one. So the door is explicit: somebody has to complete the OAuth once per
+   * credential volume, and they do it by asking for it.
+   */
+  static final String AGENTS_SIGN_IN_PATH = "/agents/sign-in";
+
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
 
   static final String AGENT_PLUGINS_PATH = "/agent-plugins";
@@ -295,6 +310,20 @@ public class WorkspaceApi {
   private volatile PromptRefinementService promptRefinement;
   private volatile AgentDefaults agentDefaults;
 
+  /**
+   * The workspace image version this container runs, answered beside the capability reports so the
+   * host can key its cache by it. Told by {@link ControlSocket}; never derived here.
+   */
+  private volatile String imageVersion = "";
+
+  /**
+   * The boot-time harness capability reports, read through a supplier because the probe runs off the
+   * boot thread and lands after this surface is wired. A request that arrives first gets an empty
+   * list — an honest "nothing reported yet", which the host reads as a cache miss.
+   */
+  private volatile java.util.function.Supplier<List<HarnessCapabilities>> harnessCapabilities =
+      List::of;
+
   /** The service supervisor, wired by {@link ControlSocket}; null ⇒ every route answers 503. */
   private volatile ServiceSupervisor services;
 
@@ -334,12 +363,16 @@ public class WorkspaceApi {
       AgentSessionQueryService agentSessions,
       AgentPluginService agentPlugins,
       PromptRefinementService promptRefinement,
-      AgentDefaults agentDefaults) {
+      AgentDefaults agentDefaults,
+      String imageVersion,
+      java.util.function.Supplier<List<HarnessCapabilities>> harnessCapabilities) {
     this.agentLaunch = agentLaunch;
     this.agentSessions = agentSessions;
     this.agentPlugins = agentPlugins;
     this.promptRefinement = promptRefinement;
     this.agentDefaults = agentDefaults;
+    this.imageVersion = imageVersion == null ? "" : imageVersion;
+    this.harnessCapabilities = harnessCapabilities == null ? List::of : harnessCapabilities;
   }
 
   /**
@@ -586,6 +619,7 @@ public class WorkspaceApi {
   private static boolean isAgentPath(String path) {
     return path.equals(AGENTS_PATH)
         || path.equals(AGENTS_AVAILABLE_PATH)
+        || path.equals(AGENTS_SIGN_IN_PATH)
         || path.equals(AGENT_SESSIONS_PATH)
         || path.equals(AGENT_PLUGINS_PATH)
         || path.startsWith(AGENT_PLUGINS_PATH + "/")
@@ -640,13 +674,29 @@ public class WorkspaceApi {
       String workspaceId = workspaceContext.workspaceId();
       if (AGENTS_AVAILABLE_PATH.equals(path)) {
         return method == HttpMethod.GET
-            ? new Reply(200, AgentJson.available(agentDefaults.defaultAgentType()))
+            ? new Reply(
+                200,
+                AgentJson.available(
+                    agentDefaults.defaultAgentType(),
+                    imageVersion,
+                    harnessCapabilities.get()))
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       if (AGENTS_PATH.equals(path)) {
         return method == HttpMethod.POST
             ? new Reply(
                 200, AgentJson.launched(agentLaunch.launch(launchRequest(body)), repoId, workspaceId))
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (AGENTS_SIGN_IN_PATH.equals(path)) {
+        // The same {command: …} envelope every other launch answers, so one client-side decoder
+        // serves it: a sign-in terminal is a command in this container like any other, and opening
+        // one is a normal launch rather than a special case.
+        return method == HttpMethod.POST
+            ? new Reply(
+                200,
+                AgentJson.launched(
+                    agentLaunch.launchLogin(signInHarness(body)), repoId, workspaceId))
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       if (AGENT_SESSIONS_PATH.equals(path)) {
@@ -682,10 +732,38 @@ public class WorkspaceApi {
       return new Reply(404, WorkspaceJson.error(e.getMessage()));
     } catch (InvalidCommandRequestException e) {
       return new Reply(400, WorkspaceJson.error(e.getMessage()));
+    } catch (AgentNotSignedInException e) {
+      // 409, NOT 500, and with a machine-readable discriminator. Without this arm the refusal falls
+      // into the catch below, whose message is deliberately withheld (an arbitrary exception's text
+      // can carry container paths), and a browser cannot tell a signed-out platform from a broken
+      // one — it would show "Internal error" for a state one click fixes.
+      //
+      // `error` is the contract and the sentence is not. Matching the prose is the mistake this
+      // epic exists to delete: the frontend used to sort sessions by looking for " (tickets desk)"
+      // in a display name, and a reworded label silently moved every one of them. A key means the
+      // message can be rewritten freely, and `agentType` means the caller can name the harness
+      // without parsing it out of a sentence.
+      return new Reply(
+          409,
+          new JsonObject()
+              .put("error", "not-signed-in")
+              .put("agentType", e.harness() == null ? null : e.harness().name())
+              .put("message", e.getMessage()));
     } catch (RuntimeException e) {
       LOG.errorf(e, "workspace-daemon agents API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
+  }
+
+  /**
+   * The harness a sign-in terminal is opened for: what the body named, else the resolved default.
+   *
+   * <p>Optional because the common caller is "the harness I was just refused for", which it knows,
+   * and the uncommon one is an operator opening the door on a fresh estate, who should not have to.
+   */
+  private AgentType signInHarness(String body) {
+    AgentType requested = parseEnum(jsonBody(body).getString("agentType"), AgentType::valueOf, "agentType");
+    return agentDefaults.resolve(requested);
   }
 
   /** Whether {@code path} belongs to the services / bootstrap surface. */
@@ -859,12 +937,35 @@ public class WorkspaceApi {
     JsonObject json = jsonBody(body);
     return new AgentLaunchRequest(
         parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
+        surface(json.getString("surface")),
         parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
         json.getString("initialContext"),
         json.getString("resumeSessionId"),
         Boolean.TRUE.equals(json.getBoolean("fork")),
         Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
         parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType"));
+  }
+
+  /**
+   * The {@code surface} field of a launch body: where in the product this session was started from.
+   *
+   * <p><b>This is the daemon where the parameter earns its keep.</b> The four surfaces this
+   * container serves — {@code epic.chat}, {@code epic.agent}, {@code workspace.chat}, {@code
+   * workspace.agent} — send byte-identical launch requests today; {@code epic.chat} and {@code
+   * workspace.chat} differ only in which container the request reached, and nothing downstream could
+   * tell them apart. This is the first time the daemon can be told which of them it is serving, and
+   * therefore the first time one of them can be configured without configuring the other three.
+   *
+   * <p>Two shapes, both the library's rather than reimplemented here: an <b>unknown</b> surface is a
+   * refusal ({@code AgentSurface.of} throws {@link InvalidCommandRequestException}, which this
+   * surface answers as a 400 with the message attached), and a <b>missing</b> one is null, which
+   * {@code AgentLaunchRequest.surfaceOrDefault} resolves to the shape-implied guess for one release
+   * so the frontends can ship after the daemon. That guess is dated: it collapses {@code epic.chat}
+   * onto {@code workspace.chat} and {@code epic.agent} onto {@code workspace.agent}, which is
+   * exactly the collapse this field exists to end.
+   */
+  private static AgentSurface surface(String raw) {
+    return raw == null || raw.isBlank() ? null : AgentSurface.of(raw);
   }
 
   private static JsonObject jsonBody(String body) {

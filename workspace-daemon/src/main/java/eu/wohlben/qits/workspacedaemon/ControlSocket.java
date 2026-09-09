@@ -1,21 +1,24 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.agents.AgentAuthStatus;
-import eu.wohlben.qits.workspacedaemon.agents.AgentLaunchService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentPluginService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentSessionQueryService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentSessionStore;
-import eu.wohlben.qits.workspacedaemon.agents.AgentTranscriptService;
-import eu.wohlben.qits.workspacedaemon.agents.AgentTranscriptTailService;
-import eu.wohlben.qits.workspacedaemon.agents.CommandsAgentCommands;
-import eu.wohlben.qits.workspacedaemon.agents.LocalProcessExecutor;
-import eu.wohlben.qits.workspacedaemon.agents.ProcessRunner;
-import eu.wohlben.qits.workspacedaemon.agents.PromptRefinementService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandLifecycleService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandLogService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandRegistry;
-import eu.wohlben.qits.workspacedaemon.commands.CommandService;
-import eu.wohlben.qits.workspacedaemon.commands.CommandStore;
+import eu.wohlben.qits.agents.AgentAuthStatus;
+import eu.wohlben.qits.agents.AgentLaunchService;
+import eu.wohlben.qits.agents.AgentPluginService;
+import eu.wohlben.qits.agents.AgentSessionQueryService;
+import eu.wohlben.qits.agents.AgentSessionStore;
+import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
+import eu.wohlben.qits.agents.AgentTranscriptService;
+import eu.wohlben.qits.agents.AgentTranscriptTailService;
+import eu.wohlben.qits.agents.CommandsAgentCommands;
+import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.agents.HarnessCapabilityService;
+import eu.wohlben.qits.agents.LocalProcessExecutor;
+import eu.wohlben.qits.agents.ProcessRunner;
+import eu.wohlben.qits.agents.PromptRefinementService;
+import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogService;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
@@ -54,9 +57,11 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -250,6 +255,45 @@ public class ControlSocket {
   /** Model override for prompt refinement; unset means Claude's haiku and Kimi's own default. */
   @ConfigProperty(name = "qits.refinement.model")
   Optional<String> refinementModel;
+
+  /**
+   * The per-surface agent configuration this container was created with, and where to write it.
+   *
+   * <p>Two keys, both or neither — {@link AgentConfigurationFile} has the whole arrangement and why
+   * the bytes travel in the environment rather than as a mount. Read here for the reason every other
+   * capability setting is read here: the harness library is framework-free and cannot read
+   * configuration itself, so {@link ControlSocket} is the single reader.
+   *
+   * <p>{@code Optional<String>} rather than a blank default, for the SmallRye reason the identity
+   * knobs carry: an empty {@code defaultValue} resolves as "no value" and a plain {@code String}
+   * then fails to resolve at startup.
+   */
+  @ConfigProperty(name = "qits.workspace-daemon.agent-configuration")
+  Optional<String> agentConfigurationDocument;
+
+  @ConfigProperty(name = "qits.workspace-daemon.agent-configuration-path")
+  Optional<String> agentConfigurationPath;
+
+  /**
+   * The workspace image version this container runs, for the host's capability cache.
+   *
+   * <p><b>Told when it can be, and otherwise the daemon's own build version.</b> Nothing injects an
+   * image version into a workspace container today — qits-workspaces composes {@code
+   * <repo>:<version>} from its own configuration and sets no environment key for it — so this
+   * optional key exists for the day it does, under the name the host already uses for the value
+   * ({@code QITS_WORKSPACE_IMAGE_VERSION}), and the fallback is {@code
+   * qits.workspace-daemon.build.version}: the calver stamped into this binary at native-image build
+   * time, which <em>is</em> the image's calver, because {@code docker/Dockerfile} compiles the
+   * daemon and layers it into {@code qits/workspace:<version>} in one build from one reactor.
+   *
+   * <p>It is a coarser key than the image reference on a fold-built image, which is sha-tagged while
+   * the reactor version is not — two folds of one release request report the same version. The host
+   * caches a capability report per (harness, image version), so the cost of that is a report from a
+   * rebuilt-but-unreleased image not displacing the previous one, which is the direction to be
+   * wrong in.
+   */
+  @ConfigProperty(name = "qits.workspace.image-version")
+  Optional<String> workspaceImageVersion;
 
   /**
    * Explicit MCP base URLs, one per named server. Two jobs now: pointing an agent at a different
@@ -457,6 +501,27 @@ public class ControlSocket {
     parent = parentConfig.orElse("");
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
+    // THE AGENT CONFIGURATION DOCUMENT, BEFORE ANYTHING ELSE STARTS. The host hands it over as
+    // bytes plus a path; this writes one to the other and parses it, so a malformed document kills
+    // the container here — in the first lines of its log, where an operator is looking — rather
+    // than at the first launch of the one surface that was wrong. Ahead of the url check on
+    // purpose: a daemon with no socket still serves nothing, but a container that was handed a
+    // broken configuration is broken whether or not it ever dials home, and discovering that only
+    // on a connected container would make the failure depend on the backend being up.
+    surfaceConfigurations =
+        AgentConfigurationFile.materialize(agentConfigurationDocument, agentConfigurationPath)
+            .map(
+                path -> {
+                  LOG.infof("Agent configuration document materialized at %s", path);
+                  return AgentSurfaceConfigurations.readFrom(path);
+                })
+            .orElseGet(
+                () -> {
+                  LOG.info(
+                      "No agent configuration document was injected; every surface renders the"
+                          + " harness library's shipped defaults.");
+                  return AgentSurfaceConfigurations.shipped();
+                });
     if (url.isEmpty() || url.get().isBlank()) {
       LOG.warn(
           "No qits.workspace-daemon.url configured — workspace-daemon is idle (container stays"
@@ -675,7 +740,10 @@ public class ControlSocket {
             () -> configState.config(),
             agentDefaultType,
             agentActivityTrackingEnabled,
-            refinementModel);
+            refinementModel,
+            surfaceConfigurations,
+            DaemonAgentDefaults.ambientFactsOf(
+                projectId, repoName, repositoryId, workspaceId, branch));
     DaemonMcpEndpoints endpoints;
     try {
       endpoints =
@@ -693,14 +761,18 @@ public class ControlSocket {
         new AgentTranscriptTailService(transcripts, logs, transcriptTailPollMs);
     tail.start();
     this.transcriptTail = tail;
+    AgentAuthStatus authStatus = new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
     AgentLaunchService launch =
         new AgentLaunchService(
             new CommandsAgentCommands(commandService, commandRegistry, store),
-            new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath()),
+            authStatus,
             transcripts,
             tail,
             defaults,
-            endpoints,
+            // The scope→server mapping is this daemon's, not the library's: the projects daemon
+            // attaches one server and this one attaches three, with different narrowing and
+            // different pre-approval. See WorkspaceMcpServers.
+            new WorkspaceMcpServers(endpoints, repositoryId, workspaceId),
             context,
             claudeMount,
             hooksPort);
@@ -710,8 +782,61 @@ public class ControlSocket {
         new AgentPluginService(processes, claudeMount, WORKSPACE_DIR.toPath(), defaults),
         new PromptRefinementService(
             processes, context, defaults, claudeMount, WORKSPACE_DIR.toPath()),
-        defaults);
+        defaults,
+        imageVersion(),
+        () -> harnessCapabilities);
+    reportHarnessCapabilities(
+        new HarnessCapabilityService(processes, authStatus, claudeMount, WORKSPACE_DIR.toPath()));
     LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
+  }
+
+  /**
+   * Probe every harness once, on the worker pool, and hold the answer for {@code GET
+   * /agents/available}.
+   *
+   * <p><b>Once per container start, and off the request path.</b> Each report spawns one or two
+   * processes; doing it per request would put a process spawn on every editor page load, and the
+   * editor cannot do it itself — the binaries live in this image and the editor is a platform-wide
+   * route with no container in front of it. The host caches what this answers, keyed by harness and
+   * image version, and a rebuilt image refreshes the catalogue the first time a container on it
+   * starts.
+   *
+   * <p><b>Not on the boot thread, and a failure never reaches it.</b> Two process spawns before the
+   * socket is dialled would delay every container's dial-home for the sake of a dropdown, and a
+   * probe that hangs on a broken binary would hold the container in a state the host reads as
+   * dead. So it runs where the rest of this daemon's blocking work runs, and {@code /agents/available}
+   * answers an empty capability list until it lands — an honest "nothing reported yet", which the
+   * host reads as a cache miss rather than as an empty dropdown. {@link
+   * HarnessCapabilityService#report} already never throws per harness; the catch here is for the
+   * pool itself, because a daemon that does not start is a workspace nobody can use.
+   */
+  private void reportHarnessCapabilities(HarnessCapabilityService capabilities) {
+    try {
+      workers.execute(
+          () -> {
+            try {
+              harnessCapabilities = capabilities.reportAll();
+              LOG.infof(
+                  "Harness capabilities reported for %d harnesses on image version %s",
+                  harnessCapabilities.size(), imageVersion());
+            } catch (RuntimeException e) {
+              LOG.warnf(
+                  e,
+                  "Harness capability report failed; GET /agents/available answers no capabilities"
+                      + " and the host keeps whatever it cached");
+            }
+          });
+    } catch (RejectedExecutionException shuttingDown) {
+      LOG.debug("Harness capability report skipped: the daemon is shutting down");
+    }
+  }
+
+  /** The image version reported beside the capabilities; see {@link #workspaceImageVersion}. */
+  private String imageVersion() {
+    return workspaceImageVersion
+        .filter(value -> !value.isBlank())
+        .or(() -> buildVersionConfig.filter(value -> !value.isBlank()))
+        .orElse("unknown");
   }
 
   /**
@@ -739,6 +864,20 @@ public class ControlSocket {
 
   /** Transcript aggregates, held here so the query service and the sweep share one instance. */
   private final AgentSessionStore agentSessionStore = new AgentSessionStore();
+
+  /**
+   * The document this container was born with, parsed once in {@link #start()}. Never null after
+   * that; {@link AgentSurfaceConfigurations#shipped()} is the "created before this shipped" answer.
+   */
+  private volatile AgentSurfaceConfigurations surfaceConfigurations =
+      AgentSurfaceConfigurations.shipped();
+
+  /**
+   * What the harnesses in this image reported, or empty until the boot probe lands (and if it
+   * failed). Volatile rather than guarded: one writer at boot, many readers on the API's worker
+   * threads, and a reader that sees the empty list one request early costs the host a cache miss.
+   */
+  private volatile List<HarnessCapabilities> harnessCapabilities = List.of();
 
   private volatile AgentTranscriptTailService transcriptTail;
 
