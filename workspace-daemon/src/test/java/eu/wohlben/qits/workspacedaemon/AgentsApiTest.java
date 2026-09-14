@@ -23,6 +23,9 @@ import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.AgentSessionRef;
 import eu.wohlben.qits.commands.AgentSessionSource;
+import eu.wohlben.qits.commands.ChatProtocol;
+import eu.wohlben.qits.commands.ChatWire;
+import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandLogService;
@@ -43,10 +46,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
@@ -90,6 +95,14 @@ class AgentsApiTest {
   private CommandLifecycleService lifecycle;
   private AgentSessionStore sessionStore;
   private AgentLaunchService launch;
+
+  /**
+   * The same {@link CommandService} the API is wired with, kept as a field so the turn tests can
+   * stand up a <em>real</em> running command for the route to find. They cannot go through {@code
+   * POST /agents}: the harness binary is absent here, so a launched agent exits immediately and
+   * there is nothing standing for a turn to reach.
+   */
+  private CommandService commands;
 
   private static final WorkspaceContext WORKSPACE =
       new WorkspaceContext() {
@@ -167,8 +180,7 @@ class AgentsApiTest {
     lifecycle = new CommandLifecycleService(store, null);
     sessionStore = new AgentSessionStore();
     CommandRegistry registry = new CommandRegistry(root, 2_000);
-    CommandService commands =
-        new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
+    commands = new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(store, logs, sessionStore, claudeMount.toString(), null);
     AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
@@ -231,8 +243,7 @@ class AgentsApiTest {
   private void rewireWith(ProcessRunner processes, AgentDefaults defaults) {
     CommandLogService logs = new CommandLogService(store, null);
     CommandRegistry registry = new CommandRegistry(root, 2_000);
-    CommandService commands =
-        new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
+    commands = new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(store, logs, sessionStore, claudeMount.toString(), null);
     AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
@@ -921,6 +932,130 @@ class AgentsApiTest {
     assertFalse(command.containsKey("agentLaunchRecord"), command.encode());
 
     post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
+  }
+
+  // --- turns into a session that is already running ---------------------------------------------
+
+  @Test
+  @Timeout(60)
+  void aTurnReachesTheRunningChatSession() throws Exception {
+    List<String> turns = new CopyOnWriteArrayList<>();
+    // `sleep` rather than the harness: what is under test is that the route finds the running chat
+    // and hands the text to the protocol, and the harness binary is not in this image anyway.
+    Command chat = launchChatThatRecords("chat-1", turns);
+
+    Answer answer = post("/agents/turn", new JsonObject().put("text", "keep going"));
+
+    assertEquals(200, answer.status());
+    // Literal keys, like every other field on this wire.
+    assertEquals(true, answer.body().getBoolean("delivered"));
+    assertEquals(chat.id(), answer.body().getString("commandId"), "the host logs what it spoke to");
+    assertEquals("CHAT", answer.body().getString("kind"), "which arm carried it");
+    assertNull(answer.body().getString("reason"), "a delivered turn carries no reason");
+    assertEquals(List.of("keep going"), turns, "verbatim — the daemon templates nothing");
+
+    post("/commands/" + chat.id() + "/terminate", new JsonObject());
+  }
+
+  @Test
+  @Timeout(60)
+  void aTurnIntoARunningTerminalSessionArrivesAsKeystrokes() throws Exception {
+    // `cat` reading the PTY and writing what it is typed to a file is the simplest proof that the
+    // keystrokes crossed into the terminal — the same trick CommandSocketsTest uses for the socket.
+    Path typed = root.resolve("typed.txt");
+    Command terminal =
+        commands.launchAgent(
+            "Agent",
+            "cat > typed.txt",
+            true,
+            Map.of(),
+            "term-1",
+            // An interactive run is an agent run to the RUNNING probe only once it has a session
+            // recorded, so the narrowing this route shares with it needs one here.
+            new AgentSessionRef("s-term", AgentSessionSource.PINNED, null, null, Instant.EPOCH),
+            (id, code, killed) -> {},
+            "CLAUDE");
+
+    Answer answer = post("/agents/turn", new JsonObject().put("text", "carry on"));
+
+    assertEquals(200, answer.status());
+    assertEquals(true, answer.body().getBoolean("delivered"));
+    assertEquals(terminal.id(), answer.body().getString("commandId"));
+    assertEquals("TERMINAL", answer.body().getString("kind"));
+    // The carriage return is what makes it a turn rather than a half-typed line: CR is what a
+    // terminal sends for Enter, and the tty translates it into the newline `cat` needs to flush.
+    awaitContains(typed, "carry on");
+
+    post("/commands/" + terminal.id() + "/terminate", new JsonObject());
+  }
+
+  @Test
+  void withNoAgentRunningATurnIsAnAnsweredAbsenceRatherThanAFourOhFour() throws Exception {
+    // 200, not 404. The caller's next move is to launch, and an absence it can act on is an answer;
+    // a 404 would say the endpoint does not exist, which is the one thing that is not true.
+    Answer answer = post("/agents/turn", new JsonObject().put("text", "anybody there"));
+
+    assertEquals(200, answer.status());
+    assertEquals(false, answer.body().getBoolean("delivered"));
+    assertEquals("no agent is running", answer.body().getString("reason"));
+    assertNull(answer.body().getString("commandId"), "omitted — there is no command to name");
+    assertNull(answer.body().getString("kind"));
+  }
+
+  @Test
+  void aBlankTurnIsAFourHundred() throws Exception {
+    // Not a delivered no-op: an empty chat turn is one the harness will answer, and an empty
+    // terminal turn is a bare Enter into whatever holds the prompt.
+    assertEquals(400, post("/agents/turn", new JsonObject().put("text", "   ")).status());
+    assertEquals(400, post("/agents/turn", new JsonObject()).status());
+  }
+
+  @Test
+  void theTurnRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
+    assertEquals(405, get("/agents/turn").status());
+  }
+
+  /**
+   * A running chat command whose protocol records the turns it is asked to send. A fake rather than
+   * the real {@code StreamJsonChatProtocol}: what is under test is which arm the route takes, and
+   * the protocol's own encoding is proven in the harness library's suite.
+   */
+  private Command launchChatThatRecords(String commandId, List<String> turns) {
+    return commands.launchChat(
+        "Chat",
+        "sleep 60",
+        Map.of(),
+        commandId,
+        null,
+        (id, code, killed) -> {},
+        process ->
+            new ChatProtocol() {
+              @Override
+              public void start(ChatWire wire, Runnable onClose) {}
+
+              @Override
+              public void sendUser(String text) {
+                turns.add(text);
+              }
+
+              @Override
+              public void close() {}
+            },
+        "CLAUDE");
+  }
+
+  /** Polls {@code file} until it holds {@code needle}; a turn crosses a process boundary. */
+  private static void awaitContains(Path file, String needle) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    String seen = "";
+    while (System.nanoTime() < deadline) {
+      seen = Files.exists(file) ? Files.readString(file) : "";
+      if (seen.contains(needle)) {
+        return;
+      }
+      Thread.sleep(25);
+    }
+    throw new AssertionError("timed out waiting for '" + needle + "' in " + file + ": " + seen);
   }
 
   @Test

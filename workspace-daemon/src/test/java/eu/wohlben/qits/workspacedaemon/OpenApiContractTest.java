@@ -57,6 +57,7 @@ class OpenApiContractTest {
               WorkspaceApi.AGENTS_PATH,
               WorkspaceApi.AGENTS_AVAILABLE_PATH,
               WorkspaceApi.AGENTS_SIGN_IN_PATH,
+              WorkspaceApi.AGENTS_TURN_PATH,
               WorkspaceApi.AGENT_SESSIONS_PATH,
               WorkspaceApi.AGENT_PLUGINS_PATH,
               WorkspaceApi.AGENT_PLUGINS_PATH + "/{pluginId}/install",

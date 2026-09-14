@@ -526,6 +526,65 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
+  /agents/turn:
+    post:
+      tags: [coding agents]
+      operationId: deliverAgentTurn
+      summary: Say something to the agent that is already running.
+      description: |
+        The **host-side twin of typing into the command websocket**. Until this existed the platform
+        could launch an agent (`POST /agents`, the instruction as the seed turn) and ask whether one
+        was running (`GET /commands?status=RUNNING`), and could say nothing at all to a standing
+        session — the only path for a user turn was a browser attached to the socket. A launch is
+        not a turn: it starts a session instead of continuing the one holding the context.
+
+        Deliberately general. Nothing here knows what the text is for; it is delivered verbatim to
+        the workspace's **newest running agent command**, narrowed exactly as the `RUNNING` probe
+        narrows it (a `CHAT` command, or any running command that has recorded an agent session).
+        Two probes over one fact have to agree.
+
+        | `command.kind` | how the text is delivered |
+        |---|---|
+        | `CHAT` | a user turn on the harness's stdin, as the chat socket sends |
+        | `TERMINAL` | keystrokes into the PTY, followed by a carriage return |
+
+        **No agent running is a `200`, not a `404`.** The caller's next move is to launch, and an
+        absence it can act on is an answer; a `404` would claim the endpoint does not exist, which
+        is the one thing that is not true.
+
+        **The keystroke caveat is kept rather than papered over.** A TUI that is still starting has
+        no prompt to type into yet, and this route does not buffer for it: holding a turn would mean
+        inventing a readiness signal the harness does not emit, and a buffered turn arriving late is
+        worse than one that visibly missed. `delivered` means the registry accepted the bytes for a
+        live session, never that a prompt consumed them.
+
+        **`/compact` is unestablished.** Whether a Claude Code session treats a delivered
+        `/compact` as a slash command or echoes it as prompt text has not been observed on either
+        arm, so no host-side knob that sends it is defaulted on. Nothing in the daemon parses the
+        text; the answer is the harness's. See `WorkspaceApi.AGENTS_TURN_PATH` for what observation
+        would settle it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentTurnRequest" }
+      responses:
+        "200":
+          description: |
+            The delivery outcome — including `delivered: false` when no agent is running, which is
+            an answer rather than an error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentTurnResult" }
+        "400":
+          description: A missing or blank `text`, or an unparseable body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
   /agents/available:
     get:
       tags: [coding agents]
@@ -1506,6 +1565,53 @@ components:
         agentType:
           $ref: "#/components/schemas/AgentType"
           description: Omit to take the resolved default.
+
+    AgentTurnRequest:
+      type: object
+      description: |
+        One user turn, delivered verbatim. There is nothing else in it on purpose: the daemon does
+        not know what the text is for, does not template it and does not parse it, so a field naming
+        an intent would be a field nothing here could act on.
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: |
+            The turn. Blank is a `400`, not a delivered no-op — an empty chat turn is one the
+            harness will answer, and an empty terminal turn is a bare Enter into whatever holds the
+            prompt. Neither is what an empty string meant.
+
+    AgentTurnResult:
+      type: object
+      description: |
+        What the host logs about a turn it spoke. `delivered: false` with `reason` is an ordinary
+        `200`: no agent was running, or the session went away between the listing and the write —
+        the same absence, because the caller's next move is the same either way.
+      required: [delivered]
+      properties:
+        delivered:
+          type: boolean
+          description: |
+            Whether the registry accepted the bytes for a live session. **Not** whether a prompt
+            consumed them: a TUI that is still starting has no prompt to type into yet.
+        commandId:
+          type: string
+          description: |
+            The command the turn went to. Omitted when none was running. Present so a fire-and-
+            forget turn can be tied to the session that heard it — the reply comes back on that
+            session's own socket, minutes later, to whoever is watching.
+        kind:
+          $ref: "#/components/schemas/CommandKind"
+          description: |
+            Which arm carried it. Omitted when none was running. `CHAT` read the text off stdin;
+            `TERMINAL` had it typed into a prompt, and the two fail differently.
+        reason:
+          type: string
+          description: |
+            Why nothing was delivered, present only when `delivered` is false. **Prose, not a
+            contract** — do not match on it. This route answers one absence, so there is no
+            discriminator yet; a second reason gets an `error` key beside it rather than a second
+            sentence to match.
 
     NotSignedIn:
       type: object

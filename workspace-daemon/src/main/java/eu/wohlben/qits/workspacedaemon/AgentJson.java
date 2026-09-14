@@ -130,6 +130,29 @@ final class AgentJson {
     return new JsonObject().put("installed", array);
   }
 
+  /**
+   * {@code POST /agents/turn} — whether the text reached a running agent, and which one.
+   *
+   * <p>{@code commandId} and {@code kind} are here so <b>the host can log what it spoke to</b>. A
+   * turn is fire-and-forget by nature — the answer comes back on the session's own socket, minutes
+   * later, to whoever is watching — so without the id on the acknowledgement there is nothing
+   * connecting "the host said this" to the session that heard it, and a workspace may hold more
+   * than one running agent. {@code kind} says which arm carried it, which is the difference between
+   * a turn the harness read off its stdin and one that was typed into a TUI's prompt; the two fail
+   * differently and the caller's log should say which it took.
+   *
+   * <p>Both are <b>omitted, not null</b>, when nothing was running — there is no command to name,
+   * in the same house convention every other absent optional here follows. {@code delivered} is
+   * always present, and {@code reason} only when it is false.
+   */
+  static JsonObject turn(boolean delivered, String commandId, String kind, String reason) {
+    JsonObject json = new JsonObject().put("delivered", delivered);
+    putIfPresent(json, "commandId", commandId);
+    putIfPresent(json, "kind", kind);
+    putIfPresent(json, "reason", reason);
+    return json;
+  }
+
   /** {@code POST /prompt-refinements} — the rewritten prompt. */
   static JsonObject refinement(String prompt) {
     return new JsonObject().put("prompt", prompt);

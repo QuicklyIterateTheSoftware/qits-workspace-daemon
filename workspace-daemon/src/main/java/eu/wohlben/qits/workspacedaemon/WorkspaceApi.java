@@ -1,6 +1,8 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
+import eu.wohlben.qits.commands.Command;
+import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandNotFoundException;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.agents.AgentDefaults;
@@ -186,6 +188,64 @@ public class WorkspaceApi {
    * credential volume, and they do it by asking for it.
    */
   static final String AGENTS_SIGN_IN_PATH = "/agents/sign-in";
+
+  /**
+   * <b>A turn into an agent that is already running</b> — the host-side twin of what a browser does
+   * when somebody types into {@code CommandSockets}.
+   *
+   * <p>Until this existed the platform could launch an agent ({@code POST /agents}, the instruction
+   * as the seed turn) and ask whether one was running ({@code GET /commands?status=RUNNING}), and
+   * could say nothing at all to a standing session: the only path for a user turn was a browser
+   * attached to the command websocket. So a host that wanted to drive a session through phases had
+   * exactly one move — launch another agent — and a launch is not a turn. It starts a session
+   * instead of continuing the one that already holds the context.
+   *
+   * <p>It is deliberately general. Nothing here knows what a ticket is, or a phase, or a prompt
+   * template: the body is {@code {"text": …}} and the text is delivered verbatim. The two arms are
+   * {@code CommandSockets.onChatMessage}'s and {@code CommandSockets.onTerminalMessage}'s, through
+   * the same {@link CommandRegistry}, rather than a second mechanism that could drift from what a
+   * person typing gets.
+   *
+   * <h2>No agent running is a 200, not a 404</h2>
+   *
+   * <p>{@code {"delivered": false, "reason": "no agent is running"}}. The caller's next move is to
+   * launch, and an absence it can act on is an answer — a 404 would say "this endpoint does not
+   * exist", which is a different fact and the one thing that is not true here.
+   *
+   * <h2>The keystroke caveat, kept rather than papered over</h2>
+   *
+   * <p>A TERMINAL session has no stdin channel of its own: the REPL owns the terminal, so a turn is
+   * keystrokes and nothing else, and {@code AgentCommands.sendKeystrokes}' documented race comes
+   * with them — <b>a TUI that is still starting has no prompt to type into yet</b>, and the
+   * keystrokes land wherever the terminal happens to be. This route does not buffer for it. Holding
+   * a turn until something looked ready would mean inventing a readiness signal the harness does
+   * not emit, and a buffered turn that arrives late is worse than one that visibly missed: the
+   * caller would have been told it was delivered. {@code delivered} means the registry accepted the
+   * bytes for a live session, never that a prompt consumed them.
+   *
+   * <h2>The {@code /compact} question, and what is actually known</h2>
+   *
+   * <p>The intent this route was built for includes delivering {@code /compact} as a turn ahead of
+   * a phase prompt, so a long session enters the next phase with room to work in. <b>Whether a
+   * Claude Code session treats a delivered {@code /compact} as a slash command or echoes it as
+   * ordinary prompt text is not established</b>, on either arm. Nothing in this daemon parses the
+   * text, so the answer is entirely the harness's; it has not been observed, and it is not guessed
+   * at here. The spike was deliberately not run against a live session, because the only running
+   * chat session available to run it in was the orchestrating agent's own, and compacting that is
+   * not an acceptable cost of finding out.
+   *
+   * <p><b>So the host-side knob is defaulted off.</b> Defaulting "send {@code /compact} first" on
+   * an unestablished behaviour risks prepending a literal line of noise to every phase prompt,
+   * which is the failure that is both silent and permanent; a default of off costs only the
+   * compaction nobody has yet proven happens.
+   *
+   * <p>What would settle it: deliver {@code /compact} into a <em>disposable</em> session on each
+   * arm and read that command's transcript. A real compaction shows as a compact boundary and a
+   * shortened context in the session's own transcript; an echo shows as an ordinary user message
+   * carrying the literal text, with an assistant reply about it. The two are not confusable, and
+   * one throwaway session per arm answers it for good.
+   */
+  static final String AGENTS_TURN_PATH = "/agents/turn";
 
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
 
@@ -620,6 +680,7 @@ public class WorkspaceApi {
     return path.equals(AGENTS_PATH)
         || path.equals(AGENTS_AVAILABLE_PATH)
         || path.equals(AGENTS_SIGN_IN_PATH)
+        || path.equals(AGENTS_TURN_PATH)
         || path.equals(AGENT_SESSIONS_PATH)
         || path.equals(AGENT_PLUGINS_PATH)
         || path.startsWith(AGENT_PLUGINS_PATH + "/")
@@ -699,6 +760,11 @@ public class WorkspaceApi {
                     agentLaunch.launchLogin(signInHarness(body)), repoId, workspaceId))
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
+      if (AGENTS_TURN_PATH.equals(path)) {
+        return method == HttpMethod.POST
+            ? deliverTurn(body)
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
       if (AGENT_SESSIONS_PATH.equals(path)) {
         return method == HttpMethod.GET
             ? new Reply(200, AgentJson.sessions(agentSessions.sessionTree()))
@@ -753,6 +819,89 @@ public class WorkspaceApi {
       LOG.errorf(e, "workspace-daemon agents API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
+  }
+
+  /**
+   * {@code POST /agents/turn} — deliver {@code text} to this workspace's running agent session.
+   *
+   * <p>Blank text is a 400 rather than a delivered no-op: on the chat arm an empty user turn is a
+   * turn the harness will answer, and on the terminal arm it is a bare carriage return into
+   * whatever holds the prompt. Neither is what a caller with an empty string meant.
+   *
+   * <p>The two arms are {@code CommandSockets}', through the same registry: {@link
+   * CommandRegistry#chatSend} for a CHAT command, and for a TERMINAL one the keystrokes {@code
+   * AgentCommands.sendKeystrokes} sends — the text plus a <b>carriage return</b>, not a newline,
+   * because CR is what a terminal sends for Enter and what the attached xterm.js writes on the same
+   * channel.
+   *
+   * <p>A registry that answers false means the live session went away between the listing and the
+   * write. That is reported as the same {@link #NO_AGENT_RUNNING} absence rather than as a failure:
+   * the caller's next move is identical, and a second sentence for a race would be a second state
+   * to handle for no gain.
+   */
+  private Reply deliverTurn(String body) {
+    String text = jsonBody(body).getString("text");
+    if (text == null || text.isBlank()) {
+      return new Reply(400, WorkspaceJson.error("text is required"));
+    }
+    Command target = newestRunningAgentCommand();
+    if (target == null) {
+      return new Reply(200, AgentJson.turn(false, null, null, NO_AGENT_RUNNING));
+    }
+    boolean delivered =
+        target.kind() == CommandKind.CHAT
+            ? registry.chatSend(target.id(), text)
+            : registry.input(target.id(), (text + "\r").getBytes(StandardCharsets.UTF_8));
+    return new Reply(
+        200,
+        AgentJson.turn(
+            delivered, target.id(), target.kind().name(), delivered ? null : NO_AGENT_RUNNING));
+  }
+
+  /**
+   * The sentence an undeliverable turn carries. A key would be better and there is none yet: this
+   * route answers one absence and one only, so a discriminator would have a single value. If a
+   * second reason is ever added, add an {@code error} key beside it rather than a second sentence —
+   * the lesson the 409 on {@code POST /agents} already carries.
+   */
+  private static final String NO_AGENT_RUNNING = "no agent is running";
+
+  /**
+   * The running agent command a turn is delivered to, or null when this workspace has none.
+   *
+   * <p><b>Narrowed exactly the way {@code DaemonAgentClient.anyAgentRunning} narrows the same
+   * listing</b> — a CHAT command, or any running command that has recorded an agent session — and
+   * that identity is the point rather than a convenience. The host asks {@code GET
+   * /commands?status=RUNNING} to decide whether to launch or to speak; if this probe accepted a
+   * command that one rejects, the host would be told no agent is running and then told a turn was
+   * delivered to one. Two probes over one fact have to agree, so they read it the same way.
+   * (Locally {@code Command.agentType()} is the stronger signal and is deliberately not used: it
+   * does not cross the wire the host's probe reads.) SERVICE commands and plain declared actions
+   * fall outside both.
+   *
+   * <p>More than one is possible — a workspace can hold a chat and an interactive run at once — and
+   * the newest wins, by {@code launchedAt}. Sorted here rather than trusted off the listing,
+   * because "which one got the turn" is named in the answer, and a caller that logs it should not
+   * have to know the store's iteration order to read it.
+   */
+  private Command newestRunningAgentCommand() {
+    Command newest = null;
+    for (Command command : commands.list(CommandStatus.RUNNING)) {
+      if (command.kind() != CommandKind.CHAT && command.agentSessions().isEmpty()) {
+        continue;
+      }
+      if (newest == null || isNewer(command, newest)) {
+        newest = command;
+      }
+    }
+    return newest;
+  }
+
+  /** Null-tolerant {@code launchedAt} comparison: a command with no timestamp never wins. */
+  private static boolean isNewer(Command candidate, Command incumbent) {
+    return candidate.launchedAt() != null
+        && (incumbent.launchedAt() == null
+            || candidate.launchedAt().isAfter(incumbent.launchedAt()));
   }
 
   /**
