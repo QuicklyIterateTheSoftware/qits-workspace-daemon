@@ -92,6 +92,37 @@ real Vert.x server on an ephemeral port, `CommandSocketsTest` drives a real webs
 Test names are sentences describing the behaviour, not the method
 (`resumeOfASessionFromAPreviousContainerIsRefused`, `aPartialLineIsHeldUntilItsNewlineArrives`).
 
+### Every client call in an API test runs on one captured `Context`
+
+That preference has a price, and it has taken two release requests red. The API tests drive their
+real server with a Vert.x `HttpClient`, and a call issued from the JUnit thread makes
+`vertx.getOrCreateContext()` mint a **fresh context per call**. Under CPU contention the 4.5.26
+connection pool intermittently never hands that waiter a lease: `client.request(…)` never completes,
+**no bytes are ever written to the socket**, the test's 30-second `await` expires, and the gating
+run goes red on a test whose subject was never involved.
+
+So: **capture one `Context` in `@BeforeEach` and start every client call inside
+`ctx.runOnContext(…)`, completing a `Promise` the test thread awaits.** Every call site, not only
+the class's `send`/`get` helper — a partial patch left one direct call un-pinned and the next
+failure landed exactly on it. Measured on `CommandsApiTest`: 3 failures in 11 runs before, 30 of 30
+green after, under identical load.
+
+Telling this apart from a server-side hang takes under a minute, and is worth doing before you
+suspect the daemon: `jstack` the surefire JVM — every Vert.x event loop sits in `EPoll.wait` and the
+daemon's own `workspace-daemon-api` worker pool is parked — then read `/proc/net/tcp6`, where the
+loopback pair shows `tx_queue = rx_queue = 0`. The request was never sent; the server is innocent.
+To provoke it, load the machine (`for i in 1 2 3 4 5 6; do bash -c 'while :; do :; done' & done`)
+and loop `./mvnw -o -q -pl workspace-daemon surefire:test -Dtest=CommandsApiTest
+-Dsurefire.failIfNoSpecifiedTests=false` a dozen times.
+
+Two other fixes are **rejected, and are not to be re-proposed**. `-Dsurefire.rerunFailingTestsCount`
+or a CI-level step retry: the first rule of this repository is that a clone builds and tests green,
+and a retry makes a real hang indistinguishable from a flake. Raising the 30-second await: the
+request is not slow, it is absent.
+
+Test names are sentences describing the behaviour, not the method
+(`resumeOfASessionFromAPreviousContainerIsRefused`, `aPartialLineIsHeldUntilItsNewlineArrives`).
+
 ### Response field names are a wire contract, not a naming choice
 
 `CommandJson` and `AgentJson` keys deserialize into the host's existing DTO records, which the SPA

@@ -5,13 +5,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspacedaemon.protocol.StreamTarget;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.ServerWebSocket;
+import io.vertx.core.http.WebSocket;
+import io.vertx.core.http.WebSocketClient;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetSocket;
 import java.util.concurrent.CompletableFuture;
@@ -47,6 +52,13 @@ class DaemonStreamTunnelTest {
 
   private Vertx vertx;
 
+  /**
+   * The one context every <em>client</em> call here is issued on; see {@link
+   * #requestThroughTunnel(String)}. The clients themselves are created per call rather than in
+   * {@code setUp}, so the context is the only thing shared — which is the part that matters.
+   */
+  private Context ctx;
+
   /** Plays qits: accepts the dial-back and hands the socket to whoever the test wired up. */
   private HttpServer qits;
 
@@ -66,6 +78,7 @@ class DaemonStreamTunnelTest {
   @BeforeEach
   void setUp() throws Exception {
     vertx = Vertx.vertx();
+    ctx = vertx.getOrCreateContext();
     qits = vertx.createHttpServer();
     qits.webSocketHandler(
         socket -> {
@@ -167,9 +180,9 @@ class DaemonStreamTunnelTest {
     NetServer bridge = hostSideBridge();
     try {
       CompletableFuture<String> reply = new CompletableFuture<>();
-      io.vertx.core.http.WebSocketClient client = vertx.createWebSocketClient();
-      io.vertx.core.http.WebSocket socket =
-          await(client.connect(bridge.actualPort(), "127.0.0.1", "/terminal/commands/abc"));
+      WebSocketClient client = vertx.createWebSocketClient();
+      WebSocket socket =
+          connectThroughBridge(client, bridge.actualPort(), "/terminal/commands/abc");
       socket.textMessageHandler(reply::complete);
       socket.writeTextMessage("{\"type\":\"data\",\"data\":\"k\"}");
 
@@ -253,9 +266,8 @@ class DaemonStreamTunnelTest {
     NetServer bridge = hostSideBridge();
     try {
       CompletableFuture<String> reply = new CompletableFuture<>();
-      io.vertx.core.http.WebSocketClient client = vertx.createWebSocketClient();
-      io.vertx.core.http.WebSocket socket =
-          await(client.connect(bridge.actualPort(), "127.0.0.1", "/stable-abc/vscode"));
+      WebSocketClient client = vertx.createWebSocketClient();
+      WebSocket socket = connectThroughBridge(client, bridge.actualPort(), "/stable-abc/vscode");
       socket.textMessageHandler(reply::complete);
       socket.writeTextMessage("hello");
 
@@ -333,23 +345,44 @@ class DaemonStreamTunnelTest {
     return server;
   }
 
-  /** One GET through a freshly bridged tunnel; returns the body. */
+  /**
+   * One GET through a freshly bridged tunnel; returns the body.
+   *
+   * <p>Issued on {@link #ctx} rather than on the JUnit thread: a {@code client.request} started off
+   * a Vert.x context mints a fresh one per call, and the 4.5.26 pool intermittently never leases
+   * that waiter a connection — nothing is written and the await expires. See {@link
+   * WorkspaceApiTest#get(String, String)}.
+   */
   private String requestThroughTunnel(String uri) throws Exception {
     NetServer bridge = hostSideBridge();
     try {
       HttpClient client = vertx.createHttpClient();
-      String body =
-          await(
+      Promise<Buffer> promise = Promise.promise();
+      ctx.runOnContext(
+          v ->
               client
                   .request(HttpMethod.GET, bridge.actualPort(), "127.0.0.1", uri)
                   .compose(request -> request.send())
-                  .compose(HttpClientResponse::body))
-              .toString();
+                  .compose(HttpClientResponse::body)
+                  .onComplete(promise));
+      String body = await(promise.future()).toString();
       client.close();
       return body;
     } finally {
       bridge.close();
     }
+  }
+
+  /**
+   * One WebSocket handshake through a bridged tunnel, pinned to {@link #ctx} for the same reason
+   * {@link #requestThroughTunnel(String)} is. Only the initiation moves: the caller still installs
+   * the socket's handlers itself, after the await.
+   */
+  private WebSocket connectThroughBridge(WebSocketClient client, int bridgePort, String path)
+      throws Exception {
+    Promise<WebSocket> promise = Promise.promise();
+    ctx.runOnContext(v -> client.connect(bridgePort, "127.0.0.1", path).onComplete(promise));
+    return await(promise.future());
   }
 
   private static int freePort() throws Exception {

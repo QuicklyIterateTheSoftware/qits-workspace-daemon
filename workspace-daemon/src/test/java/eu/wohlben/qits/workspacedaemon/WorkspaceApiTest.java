@@ -7,7 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.files.LocalWorkspaceFiles;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
@@ -51,6 +53,9 @@ class WorkspaceApiTest {
   private WorkspaceApi api;
   private int port;
 
+  /** The one context every client call is issued on; see {@link #get(String, String)}. */
+  private Context ctx;
+
   /** The marker the detection caches key on; mutable so a test could move the tree if it needed. */
   private volatile String marker = "marker-1";
 
@@ -72,6 +77,7 @@ class WorkspaceApiTest {
     await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, () -> declared, () -> marker));
     port = api.actualPort();
     client = vertx.createHttpClient();
+    ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
@@ -108,28 +114,45 @@ class WorkspaceApiTest {
    * is wrong: Vert.x starts delivering the body as soon as the response head is handled, so a body
    * handler registered later from the test thread races the bytes and intermittently sees a
    * truncated buffer or none at all.
+   *
+   * <p>The request must also be <em>issued</em> on a Vert.x context, not merely composed on one,
+   * which is why the whole chain starts inside {@code ctx.runOnContext}. A {@code
+   * client.request(...)} started from the JUnit thread mints a fresh context per call, and under
+   * load the 4.5.26 connection pool intermittently never leases that waiter a connection: no bytes
+   * are ever written, the server never sees the request, the 30-second await expires, and a release
+   * request goes red. Measured on this class: 3 failures in 11 runs under CPU load before, 30/30
+   * green after. One context per test — every call site in this file goes through one of these
+   * helpers or pins itself the same way.
    */
   private Answer get(String uri, String authorization) throws Exception {
-    return await(
-        client
-            .request(HttpMethod.GET, port, "127.0.0.1", uri)
-            .compose(
-                request -> {
-                  if (authorization != null) {
-                    request.putHeader("Authorization", authorization);
-                  }
-                  return request.send();
-                })
-            .compose(WorkspaceApiTest::answerOf));
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .request(HttpMethod.GET, port, "127.0.0.1", uri)
+                .compose(
+                    request -> {
+                      if (authorization != null) {
+                        request.putHeader("Authorization", authorization);
+                      }
+                      return request.send();
+                    })
+                .compose(WorkspaceApiTest::answerOf)
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   /** One POST with the valid bearer and no body — the shape both write routes take. */
   private Answer post(String uri) throws Exception {
-    return await(
-        client
-            .request(HttpMethod.POST, port, "127.0.0.1", uri)
-            .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
-            .compose(WorkspaceApiTest::answerOf));
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .request(HttpMethod.POST, port, "127.0.0.1", uri)
+                .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
+                .compose(WorkspaceApiTest::answerOf)
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   private static Future<Answer> answerOf(HttpClientResponse response) {
@@ -425,15 +448,17 @@ class WorkspaceApiTest {
 
   @Test
   void nonGetMethodIs405() throws Exception {
-    Answer answer =
-        await(
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
             client
                 .request(HttpMethod.POST, port, "127.0.0.1", "/files")
                 .compose(
                     request ->
                         request.putHeader("Authorization", "Bearer " + TOKEN).send("{\"x\":1}"))
-                .compose(WorkspaceApiTest::answerOf));
-    assertEquals(405, answer.status());
+                .compose(WorkspaceApiTest::answerOf)
+                .onComplete(promise));
+    assertEquals(405, await(promise.future()).status());
   }
 
   // --- authentication ------------------------------------------------------------------------

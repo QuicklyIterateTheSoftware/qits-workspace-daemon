@@ -12,7 +12,9 @@ import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.WebViewDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.CommandChunk;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.ServiceTransition;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
@@ -51,6 +53,9 @@ class ServicesApiTest {
 
   private Vertx vertx;
   private HttpClient client;
+
+  /** The one context every client call is issued on; see {@code send}. */
+  private Context ctx;
   private WorkspaceApi api;
   private ServiceSupervisor supervisor;
   private int port;
@@ -131,6 +136,7 @@ class ServicesApiTest {
             "");
     api.wireServices(supervisor);
     client = vertx.createHttpClient();
+    ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
@@ -325,12 +331,16 @@ class ServicesApiTest {
     unwired.vertx = vertx;
     await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
     try {
-      Answer answer =
-          await(
+      // Pinned to the same ctx as every other call: one context per test, not one per server.
+      Promise<Answer> promise = Promise.promise();
+      ctx.runOnContext(
+          v ->
               client
                   .request(HttpMethod.GET, unwired.actualPort(), "127.0.0.1", "/services")
                   .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
-                  .compose(ServicesApiTest::answerOf));
+                  .compose(ServicesApiTest::answerOf)
+                  .onComplete(promise));
+      Answer answer = await(promise.future());
       // Retryable, not a 404 that would read as "this daemon will never supervise services".
       assertEquals(503, answer.status());
       assertNotNull(answer.body().getString("message"));
@@ -384,20 +394,29 @@ class ServicesApiTest {
     return send(HttpMethod.POST, uri, "Bearer " + TOKEN, body);
   }
 
-  /** Composed end to end so every step attaches on the event loop; see {@link CommandsApiTest}. */
+  /**
+   * Composed end to end so every step attaches on the event loop, and issued on {@link #ctx} rather
+   * than on the JUnit thread — a fresh context per call is what leaves the 4.5.26 pool
+   * intermittently never leasing a connection, which took this class red in a release request. See
+   * {@link CommandsApiTest#send} and {@link WorkspaceApiTest#get(String, String)}.
+   */
   private Answer send(HttpMethod method, String uri, String authorization, JsonObject body)
       throws Exception {
-    return await(
-        client
-            .request(method, port, "127.0.0.1", uri)
-            .compose(
-                request -> {
-                  if (authorization != null) {
-                    request.putHeader("Authorization", authorization);
-                  }
-                  return body == null ? request.send() : request.send(body.encode());
-                })
-            .compose(ServicesApiTest::answerOf));
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .request(method, port, "127.0.0.1", uri)
+                .compose(
+                    request -> {
+                      if (authorization != null) {
+                        request.putHeader("Authorization", authorization);
+                      }
+                      return body == null ? request.send() : request.send(body.encode());
+                    })
+                .compose(ServicesApiTest::answerOf)
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   private static Future<Answer> answerOf(HttpClientResponse response) {

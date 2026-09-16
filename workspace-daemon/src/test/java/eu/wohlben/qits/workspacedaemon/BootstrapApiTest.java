@@ -9,7 +9,9 @@ import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.protocol.BootstrapOutcome;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
@@ -49,6 +51,9 @@ class BootstrapApiTest {
 
   private Vertx vertx;
   private HttpClient client;
+
+  /** The one context every client call is issued on; see {@code send}. */
+  private Context ctx;
   private WorkspaceApi api;
   private int port;
 
@@ -69,6 +74,7 @@ class BootstrapApiTest {
             new BootstrapDecl("migrate", "migrate", "run migrations", "touch migrated", null, Map.of()));
     api.wireBootstrap("feature-x", () -> chain, root.toFile(), 30_000, emitted::add);
     client = vertx.createHttpClient();
+    ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
@@ -167,12 +173,16 @@ class BootstrapApiTest {
     unwired.vertx = vertx;
     await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
     try {
-      Answer answer =
-          await(
+      // Pinned to the same ctx as every other call: one context per test, not one per server.
+      Promise<Answer> promise = Promise.promise();
+      ctx.runOnContext(
+          v ->
               client
                   .request(HttpMethod.GET, unwired.actualPort(), "127.0.0.1", "/bootstrap-commands")
                   .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
-                  .compose(BootstrapApiTest::answerOf));
+                  .compose(BootstrapApiTest::answerOf)
+                  .onComplete(promise));
+      Answer answer = await(promise.future());
       assertEquals(503, answer.status());
       assertNotNull(answer.body().getString("message"));
     } finally {
@@ -210,19 +220,27 @@ class BootstrapApiTest {
     return send(HttpMethod.POST, uri, "Bearer " + TOKEN);
   }
 
-  /** Composed end to end so every step attaches on the event loop; see {@link CommandsApiTest}. */
+  /**
+   * Composed end to end so every step attaches on the event loop, and issued on {@link #ctx}: a
+   * request started from the JUnit thread mints a fresh context per call, and the 4.5.26 pool then
+   * intermittently never leases it a connection. See {@link WorkspaceApiTest#get(String, String)}.
+   */
   private Answer send(HttpMethod method, String uri, String authorization) throws Exception {
-    return await(
-        client
-            .request(method, port, "127.0.0.1", uri)
-            .compose(
-                request -> {
-                  if (authorization != null) {
-                    request.putHeader("Authorization", authorization);
-                  }
-                  return request.send();
-                })
-            .compose(BootstrapApiTest::answerOf));
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .request(method, port, "127.0.0.1", uri)
+                .compose(
+                    request -> {
+                      if (authorization != null) {
+                        request.putHeader("Authorization", authorization);
+                      }
+                      return request.send();
+                    })
+                .compose(BootstrapApiTest::answerOf)
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   private static Future<Answer> answerOf(HttpClientResponse response) {

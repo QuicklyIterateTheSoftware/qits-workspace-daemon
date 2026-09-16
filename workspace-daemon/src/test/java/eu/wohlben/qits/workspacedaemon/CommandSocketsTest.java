@@ -12,7 +12,9 @@ import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.WebSocket;
@@ -49,6 +51,9 @@ class CommandSocketsTest {
 
   private Vertx vertx;
   private HttpClient client;
+
+  /** The one context every client call is issued on; see {@link #connect(String, String, List)}. */
+  private Context ctx;
   private WorkspaceApi api;
   private int port;
   private CommandService commands;
@@ -111,6 +116,7 @@ class CommandSocketsTest {
     await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
     port = api.actualPort();
     client = vertx.createHttpClient();
+    ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
@@ -257,6 +263,12 @@ class CommandSocketsTest {
    * Connects and installs {@code frames} as the message collector <em>inside</em> the connect
    * composition — a refusal frame is written the instant the socket opens, so a handler attached
    * after awaiting the connect can miss it.
+   *
+   * <p>The handshake is also <em>issued</em> on {@link #ctx}, for the reason {@link
+   * WorkspaceApiTest#get(String, String)} records: started from the JUnit thread it would mint a
+   * fresh context per call, and the 4.5.26 pool intermittently never leases such a waiter a
+   * connection. {@code onComplete(promise)} propagates failure unchanged, so the tests that assert
+   * a refused upgrade still see their {@code ExecutionException}.
    */
   private WebSocket connect(String path, String authorization, List<String> frames)
       throws Exception {
@@ -265,14 +277,18 @@ class CommandSocketsTest {
     if (authorization != null) {
       options.addHeader("Authorization", authorization);
     }
-    return await(
-        client
-            .webSocket(options)
-            .map(
-                socket -> {
-                  socket.textMessageHandler(frames::add);
-                  return socket;
-                }));
+    Promise<WebSocket> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .webSocket(options)
+                .map(
+                    socket -> {
+                      socket.textMessageHandler(frames::add);
+                      return socket;
+                    })
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   private static <T> T await(Future<T> future) throws Exception {

@@ -12,7 +12,9 @@ import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
@@ -53,6 +55,9 @@ class CommandsApiTest {
 
   private Vertx vertx;
   private HttpClient client;
+
+  /** The one context every client call is issued on; see {@code send}. */
+  private Context ctx;
   private WorkspaceApi api;
   private int port;
 
@@ -127,6 +132,7 @@ class CommandsApiTest {
                         "watch", "Watch", "sleep 60", true, Map.of()))));
     api.wireCommands(commands, registry, WORKSPACE);
     client = vertx.createHttpClient();
+    ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
@@ -344,13 +350,18 @@ class CommandsApiTest {
     unwired.vertx = vertx;
     await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
     try {
-      Answer answer =
-          await(
+      // One context per test, not one per server: this second server's call is pinned to the same
+      // ctx as every other. Left on the JUnit thread it is exactly the call site the pool hang
+      // landed on.
+      Promise<Answer> promise = Promise.promise();
+      ctx.runOnContext(
+          v ->
               client
                   .request(HttpMethod.GET, unwired.actualPort(), "127.0.0.1", "/commands")
                   .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
-                  .compose(CommandsApiTest::answerOf));
-      assertEquals(503, answer.status());
+                  .compose(CommandsApiTest::answerOf)
+                  .onComplete(promise));
+      assertEquals(503, await(promise.future()).status());
     } finally {
       unwired.close();
     }
@@ -397,21 +408,28 @@ class CommandsApiTest {
 
   /**
    * Composed end to end so every step attaches on the event loop — blocking on the response and
-   * only then asking for its body races the bytes, as {@link WorkspaceApiTest} documents.
+   * only then asking for its body races the bytes — and <em>issued</em> on {@link #ctx} rather than
+   * on the JUnit thread, which would mint a fresh context per call and leave the 4.5.26 pool
+   * intermittently never leasing it a connection. {@link WorkspaceApiTest#get(String, String)}
+   * documents both rules; this class is where the second one was measured.
    */
   private Answer send(HttpMethod method, String uri, String authorization, JsonObject body)
       throws Exception {
-    return await(
-        client
-            .request(method, port, "127.0.0.1", uri)
-            .compose(
-                request -> {
-                  if (authorization != null) {
-                    request.putHeader("Authorization", authorization);
-                  }
-                  return body == null ? request.send() : request.send(body.encode());
-                })
-            .compose(CommandsApiTest::answerOf));
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .request(method, port, "127.0.0.1", uri)
+                .compose(
+                    request -> {
+                      if (authorization != null) {
+                        request.putHeader("Authorization", authorization);
+                      }
+                      return body == null ? request.send() : request.send(body.encode());
+                    })
+                .compose(CommandsApiTest::answerOf)
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   private static Future<Answer> answerOf(HttpClientResponse response) {

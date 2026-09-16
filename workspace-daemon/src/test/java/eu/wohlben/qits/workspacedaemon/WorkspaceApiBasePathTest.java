@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspacedaemon.files.LocalWorkspaceFiles;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
@@ -43,6 +45,9 @@ class WorkspaceApiBasePathTest {
   private WorkspaceApi api;
   private int port;
 
+  /** The one context every client call is issued on; see {@link #get(String)}. */
+  private Context ctx;
+
   @BeforeEach
   void startServer() throws Exception {
     LocalWorkspaceFiles files = new LocalWorkspaceFiles(root);
@@ -58,6 +63,7 @@ class WorkspaceApiBasePathTest {
     await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
     port = api.actualPort();
     client = vertx.createHttpClient();
+    ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
@@ -109,12 +115,21 @@ class WorkspaceApiBasePathTest {
     assertEquals(404, get(BASE + "/nope").status());
   }
 
+  /**
+   * Composed end to end so every step attaches on the event loop, and issued on {@link #ctx} rather
+   * than on the JUnit thread, which would mint a fresh context per call and leave the 4.5.26 pool
+   * intermittently never leasing it a connection. See {@link WorkspaceApiTest#get(String, String)}.
+   */
   private Answer get(String uri) throws Exception {
-    return await(
-        client
-            .request(HttpMethod.GET, port, "127.0.0.1", uri)
-            .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
-            .compose(WorkspaceApiBasePathTest::answerOf));
+    Promise<Answer> promise = Promise.promise();
+    ctx.runOnContext(
+        v ->
+            client
+                .request(HttpMethod.GET, port, "127.0.0.1", uri)
+                .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
+                .compose(WorkspaceApiBasePathTest::answerOf)
+                .onComplete(promise));
+    return await(promise.future());
   }
 
   private static Future<Answer> answerOf(HttpClientResponse response) {
