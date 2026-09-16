@@ -310,9 +310,17 @@ steps:
       # A published version is never republished, and re-running a deploy of the same bytes is a
       # no-op rather than a lie — so this one SKIPS where the daemon PUT above fails. That is the
       # maven and npm release steps' rule, not a weakening of the one above.
+      #
+      # BOTH POMS, and the `&&` is the javalib's "skip only when EVERY module is published" rule
+      # arriving here the way it always should have. The jar alone is not a published artifact: a
+      # consumer cannot read its descriptor without the parent, which is exactly how 2026.916.172630
+      # shipped a coordinate that resolved for nobody. Checking one of the two would let a half
+      # publish look complete on a re-run.
       if curl -fsS -o /dev/null \
-        "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-workspace-daemon-protocol/$version/qits-workspace-daemon-protocol-$version.pom"; then
-        echo "qits-workspace-daemon-protocol $version is already published — skipping"
+        "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-workspace-daemon-protocol/$version/qits-workspace-daemon-protocol-$version.pom" \
+        && curl -fsS -o /dev/null \
+          "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/$version/qits-$version.pom"; then
+        echo "qits-workspace-daemon-protocol $version and its parent are already published — skipping"
         exit 0
       fi
 
@@ -325,7 +333,15 @@ steps:
       QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
       QITS_MAVEN_AUTH_USR="${QITS_COMMISSIONED_CLIENT_ID-}" \
       QITS_MAVEN_AUTH_PSW="${QITS_COMMISSIONED_CLIENT_SECRET-}" \
-      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon-protocol deploy -DskipTests \
+      #
+      # `-am` IS LOAD-BEARING AND IT IS THE PARENT POM. The protocol module declares
+      # `<parent>eu.wohlben:qits:<version></parent>`, so a consumer resolving the jar must be able to
+      # read that pom too — `-pl` alone deployed the jar and not its parent, and 2026.916.172630
+      # therefore published an artifact nothing could resolve: "Failed to read artifact descriptor …
+      # Could not find artifact eu.wohlben:qits:pom". The module depends on nothing in-reactor, so
+      # `-am` adds exactly one thing, the aggregator, which is what a parent is for. It is also the
+      # house pattern: qits-integrations-quarkus-javalib deploys from its ROOT for the same reason.
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon-protocol -am deploy -DskipTests \
         -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
         -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"
 
