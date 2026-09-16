@@ -394,10 +394,19 @@ pins this one.** `.config/qits/ci-event-release.yml` declares them and carries t
 short form:
 
 - `qits/workspace` — the image, as before.
-- `qits-workspace-daemon` (a `daemon` artifact) — the bare native binary, exported from the same
-  `build` stage with `--target binary`. Not a second compile and not the retired bare-binary
-  *image*: a plain file, PUT to qits-artifacts' `daemons` store, because qits-workspaces' pin test
-  starts the daemon as a **process** and a CI step container has no docker.
+- `qits-workspace-daemon` (a `daemon` artifact) — the daemon as a **runnable uber-jar**, JVM-packaged
+  on top of the same `build` stage (`--target binary`). Not the retired bare-binary *image*: a plain
+  file, PUT to qits-artifacts' `daemons` store, because qits-workspaces' pin test starts the daemon
+  as a **process** and a CI step container has no docker.
+
+  **A jar and not the native binary, and that is not a shortcut.** Every CI step image on this
+  platform is Alpine — `maven-base` is `maven:3.9-eclipse-temurin-25-alpine`, `ci-base` is
+  `docker:cli` — so **musl**, while the native image is compiled here on UBI9 and linked against
+  **glibc**. A bare native binary would be an artifact the gate could never execute, skipping for
+  ever, which is worse than having no pin test. Same source, same reactor, same version, so what the
+  test exercises is exactly the wire contract the image's daemon speaks; what it does not cover is
+  the native image's own linkage and reflection registration, which is this repository's Dockerfile
+  run and its extended ITs.
 - `eu.wohlben.qits:qits-workspace-daemon-protocol` — the wire contract plus `WorkspaceImage`, which
   carries this release's version. **This is what makes the image version a pom line in
   qits-workspaces instead of a configuration entry rewritten underneath it.** The maintenance train

@@ -226,17 +226,22 @@ steps:
         --data-binary @.sbom/sbom.json \
         "$sbom_base/docker/qits/workspace/-/$version"
 
-      # --- the bare daemon ------------------------------------------------------------------------
-      # A THIRD REACH INTO THE SAME BUILD, not a second compile. `target=binary` is a `FROM scratch`
-      # holding the one file `COPY --from=build` already put into the image, so with byte-identical
-      # build-args and secrets every layer is a cache hit and this export costs seconds. It also
-      # stops short of `${WORKSPACE_BASE}`, so the ~3.4 GB toolchain is not pulled again for a file
-      # that is not in it.
+      # --- the runnable daemon --------------------------------------------------------------------
+      # A THIRD REACH INTO THE SAME BUILD. `target=binary` is a `FROM scratch` holding one file: the
+      # daemon packaged as a runnable uber-jar, JVM-packaged on top of the `build` stage this run has
+      # already produced, so with byte-identical build-args and secrets everything under it is a
+      # cache hit and only the JVM package runs. It stops short of `${WORKSPACE_BASE}`, so the
+      # ~3.4 GB toolchain is not pulled again for 13 MB.
       #
-      # WHY THE BYTES EXIST TWICE AT ALL: qits-workspaces' pin test starts this daemon as a PROCESS,
-      # at exactly the version its pom pins, to prove the protocol before a workspace uses it. A CI
-      # step container has no docker (`--cap-drop=ALL`, no privilege), so it cannot run the image —
-      # and what the service talks to is the daemon inside the image, not the image.
+      # WHY IT EXISTS: qits-workspaces' pin test starts this daemon as a PROCESS, at exactly the
+      # version its pom pins, and round-trips the real control-socket protocol before a workspace
+      # uses the pair. A CI step container has no docker, so it cannot run the image — and what the
+      # service talks to is the daemon inside the image, not the image.
+      #
+      # WHY A JAR AND NOT THE NATIVE BINARY: every step image on this platform is Alpine (musl) and
+      # the native image is built on UBI9 (glibc), so the bare binary is an artifact the gate could
+      # never execute. docker/Dockerfile's `runnable` stage carries the whole reasoning and what the
+      # pin test does and does not therefore prove.
       buildctl build --frontend dockerfile.v0 \
         --local context=. --local dockerfile=docker \
         --opt target=binary \
@@ -259,7 +264,7 @@ steps:
       # this one would be a lie. qits-ci-daemon's pipeline refuses the same way.
       status=$(curl -sS -o /tmp/daemon-publish.json -w '%{http_code}' -X PUT \
         -H 'Content-Type: application/octet-stream' \
-        --data-binary @.binary/qits-workspace-daemon \
+        --data-binary @.binary/qits-workspace-daemon.jar \
         "$artifacts_base/daemons/qits-workspace-daemon/$version")
       case "$status" in
         201) ;;

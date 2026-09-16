@@ -151,25 +151,48 @@ RUN --mount=type=secret,id=qits-client-id \
 FROM scratch AS sbom
 COPY --from=build /src/workspace-daemon/target/sbom.json /sbom.json
 
-# --- binary ---------------------------------------------------------------------------------------
-# The bare daemon, exported the same way and for the same kind of reason: the release step reaches
-# this stage with `--target binary --output type=local` and PUTs the file to qits-artifacts under
-# `daemons/qits-workspace-daemon/<version>`, beside the image the release also pushes.
+# --- runnable ------------------------------------------------------------------------------------
+# The daemon as a RUNNABLE JAR, for qits-workspaces' pin test to download and execute.
 #
-# THIS IS NOT THE RETURN OF THE SECOND IMAGE. What used to sit here was a second `docker build` of a
-# runnable `qits/workspace-daemon` image, layered into `qits/workspace` afterwards — two builds, two
-# declarations, and a partial release possible between them. This is one build, one native compile,
-# and a plain file: the same bytes that are already in the image, taken out of the same `build`
-# stage, so the two coordinates cannot name different binaries.
+# WHAT IT IS FOR. qits-workspaces pins the workspace image through this repository's released
+# `qits-workspace-daemon-protocol` jar, and `WorkspaceDaemonPinIT` starts THIS daemon — at exactly
+# the version that dependency names — against localhost and round-trips the real control-socket
+# protocol before any workspace uses the pair. A container is out: CI step containers have no docker
+# (`--cap-drop=ALL`, no privilege), and what the service talks to is the daemon inside the image, not
+# the image.
 #
-# WHAT IT IS FOR: qits-workspaces pins the workspace image through this repository's released
-# `qits-workspace-daemon-protocol` jar, and its pin test starts THIS binary at exactly that version
-# against localhost to prove the two still speak the same protocol before any workspace does. The
-# test needs a process, not a container — CI step containers have no docker — so what it downloads
-# has to be the daemon itself. `--target binary` stops before `${WORKSPACE_BASE}`, so the export
-# does not pull the ~3.4 GB toolchain for a file that is not in it.
+# WHY A JAR AND NOT THE BARE NATIVE BINARY, which is what the ticket first decided. The binary is
+# compiled here on `ubi9-quarkus-mandrel-builder-image` and is dynamically linked against **glibc**;
+# every one of this platform's CI step images is Alpine (`maven-base` is
+# maven:3.9-eclipse-temurin-25-alpine, `ci-base` is docker:cli), so **musl**. A native bare binary is
+# therefore an artifact the gate could never execute — it would `assumeTrue`-skip in CI for ever,
+# which is the one outcome worse than not having the test. The ticket's own note allowed either
+# spelling ("native, or a runnable jar"); this is the one that runs where the gate runs.
+#
+# WHAT THE PIN TEST THEREFORE PROVES, AND WHAT IT DOES NOT. Same source, same reactor, same version,
+# so the wire contract it exercises is exactly the one the image's daemon speaks — and the protocol
+# is what a daemon bump breaks. It does not prove the native image's own linkage or its reflection
+# registration; that is this repository's `docker/Dockerfile` run and its extended ITs, which is
+# where it belongs.
+#
+# A SECOND `./mvnw`, AND THE ONLY ONE IN THIS FILE. It cannot ride the native RUN above — one Maven
+# invocation produces one packaging — but it is a JVM package of a reactor already resolved into this
+# layer's cache, so it costs seconds against a native compile's minutes. `--target runnable` stops
+# before `${WORKSPACE_BASE}`, so the ~3.4 GB toolchain is not pulled for a 13 MB jar.
+FROM build AS runnable
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
+    QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -DskipTests \
+      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dquarkus.package.jar.enabled=true \
+      -Dquarkus.package.jar.type=uber-jar
+
+# The export stage proper: `FROM scratch` holding the one file, so `--output type=local` writes a
+# directory with the jar in it and nothing else.
 FROM scratch AS binary
-COPY --from=build /src/workspace-daemon/target/qits-workspace-daemon /qits-workspace-daemon
+COPY --from=runnable /src/workspace-daemon/target/qits-workspace-daemon.jar /qits-workspace-daemon.jar
 
 # --- runtime: the toolchain, with the daemon as its entrypoint ------------------------------------
 # The toolchain is not built here and could not be: reproducing it would put node, maven, a JDK, a
