@@ -9,13 +9,27 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>workspace-daemon-protocol</artifactId>
+    <!-- PUBLISHED COORDINATES, and they do not inherit the parent's. `eu.wohlben.qits:qits-*` is
+         what every artifact this platform releases is called (qits-auth-core, qits-db-core,
+         qits-eventstream), and this module joined them the day qits-workspaces started taking the
+         workspace image version from a released dependency instead of a configuration entry — see
+         WorkspaceImage. The rename is also what keeps the coordinate unambiguous while the old
+         vendored copies still exist: a consumer's in-reactor module is `eu.wohlben:
+         workspace-daemon-protocol`, and a released jar under the same two strings would be the
+         same artifact under two owners. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>qits-workspace-daemon-protocol</artifactId>
 
     <!-- The workspace-daemon control-plane wire contract (docs/epics/qits-workspace-daemon/): plain records +
          enums + the shared type/field-name constants, framework-free and dependency-free. Both the
          backend (`service`, serializing with Jackson) and the native binary (`workspace-daemon`, mapping via
          Vert.x JsonObject) depend on it so neither owns the protocol. No JSON library here on
-         purpose — serialization lives on each side against whatever it already carries. -->
+         purpose — serialization lives on each side against whatever it already carries.
+
+         IT CARRIES THE RELEASE'S OWN VERSION TOO ({@code WorkspaceImage}), which is why it is the
+         module that gets deployed rather than a second "pin" jar beside it: the thing a consumer
+         must pin and the thing it must speak are the same release, and one artifact cannot ship
+         half of that pair. -->
 
     <dependencies>
         <dependency>
@@ -26,6 +40,28 @@
     </dependencies>
 
     <build>
+        <!-- FILTERING IS ON FOR THIS MODULE'S ONE RESOURCE AND NOTHING ELSE. The include/exclude
+             pair is not belt-and-braces: filtering every resource would rewrite any future binary
+             fixture that happens to contain `${`, and this module is the wire contract — a corrupt
+             fixture here is a wrong assertion, not a build error. WorkspaceImage refuses an
+             unfiltered value, so switching this block off fails loudly rather than shipping the
+             literal `${project.version}` as an image tag. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>eu/wohlben/qits/workspacedaemon/protocol/workspace-image.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>eu/wohlben/qits/workspacedaemon/protocol/workspace-image.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>

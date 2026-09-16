@@ -14,10 +14,13 @@
 # a property of the local image store, and under `push=true` there is no local store in the path at
 # all — but a second name would still be a second declaration, so it stays one.
 #
-# ONE ARTIFACT, WHERE THERE USED TO BE TWO. Until 2026-08-10 this pipeline pushed a bare-binary
-# `qits/workspace-daemon` and then layered it into `qits/workspace` — two builds, two declarations,
-# and a partial release possible between them. docker/Dockerfile does both halves in one build now,
-# so there is one image and one thing to declare.
+# ONE BUILD, THREE ARTIFACTS — and the number is not a regression to what was retired. Until
+# 2026-08-10 this pipeline pushed a bare-binary IMAGE `qits/workspace-daemon` and then layered it
+# into `qits/workspace`: two builds, two declarations, and a partial release possible between them.
+# docker/Dockerfile does both halves in one build now. What the `artifacts:` list gained since is
+# two exports OF THAT SAME BUILD — the bare daemon file and the pin-and-protocol jar — neither of
+# which compiles anything a second time, and both of which exist so a CONSUMER can pin this release
+# instead of being handed it. `artifacts:` says which; WorkspaceImage says why.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the
 # `buildctl` push below is this repository's own step — so it cannot see what landed. It announces
@@ -82,6 +85,21 @@ checkout:
   optional: true        # ...and then this run is main's head, exactly as it was before
 artifacts:
   - { type: docker, name: qits/workspace }
+  # THE BARE BINARY, BACK — and not as the second image the note above retired. It is a plain file
+  # taken out of the same `build` stage the image's daemon comes from (`--target binary`), so the
+  # two coordinates cannot name different bytes, and there is still one native compile and one
+  # build. What asks for it is qits-workspaces' pin test: it starts THIS daemon, at exactly the
+  # version its pom pins, against localhost and runs a round-trip over the real control socket
+  # before any workspace does. A container would need docker, and a CI step container has none.
+  - { type: daemon, name: qits-workspace-daemon }
+  # THE PIN AND THE PROTOCOL, IN ONE JAR. qits-workspaces used to read the workspace image version
+  # out of `env.QITS_WORKSPACE_IMAGE_VERSION`, a configuration entry qits-configuration rewrote on
+  # every release of this repository — so a new daemon reached a real workspace without the pair
+  # ever having been built together. Now the version travels as the version of the artifact that
+  # also carries the wire contract: the consumer depends on it, the maintenance train bumps it like
+  # any internal library, and the consumer's own gate is where a daemon that broke the protocol
+  # fails. WorkspaceImage's javadoc has the whole reasoning.
+  - { type: maven, name: "eu.wohlben.qits:qits-workspace-daemon-protocol" }
 steps:
     # ci-base: buildctl for the build, git for the tag checkout, jq for the event payload. Nothing
     # needs maven on ANY side of the builder — the reactor is built inside the image's own builder
@@ -207,3 +225,114 @@ steps:
       curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
         --data-binary @.sbom/sbom.json \
         "$sbom_base/docker/qits/workspace/-/$version"
+
+      # --- the bare daemon ------------------------------------------------------------------------
+      # A THIRD REACH INTO THE SAME BUILD, not a second compile. `target=binary` is a `FROM scratch`
+      # holding the one file `COPY --from=build` already put into the image, so with byte-identical
+      # build-args and secrets every layer is a cache hit and this export costs seconds. It also
+      # stops short of `${WORKSPACE_BASE}`, so the ~3.4 GB toolchain is not pulled again for a file
+      # that is not in it.
+      #
+      # WHY THE BYTES EXIST TWICE AT ALL: qits-workspaces' pin test starts this daemon as a PROCESS,
+      # at exactly the version its pom pins, to prove the protocol before a workspace uses it. A CI
+      # step container has no docker (`--cap-drop=ALL`, no privilege), so it cannot run the image —
+      # and what the service talks to is the daemon inside the image, not the image.
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=binary \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output type=local,dest=.binary
+
+      # The daemon store is a sibling path of the SBOM store, derived from the same origin and for
+      # the same reason ($QITS_REGISTRY is the host daemon's view and answers curl from in here with
+      # an instant refusal). The path names the DECLARED artifact identity verbatim: `artifacts:`
+      # above says `{type: daemon, name: qits-workspace-daemon}`.
+      artifacts_base="${QITS_NPM_REGISTRY_URL%%/artifacts/*}/artifacts"
+
+      # 409 IS A HARD FAILURE, NOT A SKIP — the one place this pipeline differs from a maven or npm
+      # publish. Versions are immutable in the daemon store, so a 409 says the release train tried
+      # to ship a coordinate that is already spoken for; letting it pass would announce a
+      # SoftwareRelease for bytes nobody published. Re-running a maven deploy is a no-op; re-running
+      # this one would be a lie. qits-ci-daemon's pipeline refuses the same way.
+      status=$(curl -sS -o /tmp/daemon-publish.json -w '%{http_code}' -X PUT \
+        -H 'Content-Type: application/octet-stream' \
+        --data-binary @.binary/qits-workspace-daemon \
+        "$artifacts_base/daemons/qits-workspace-daemon/$version")
+      case "$status" in
+        201) ;;
+        409)
+          echo "qits-workspace-daemon $version is already published — a version is never republished" >&2
+          cat /tmp/daemon-publish.json >&2
+          exit 1 ;;
+        *)
+          echo "publish answered $status: $(cat /tmp/daemon-publish.json)" >&2
+          exit 1 ;;
+      esac
+
+      # The binary's bill of materials is the daemon module's, which is the document already
+      # exported above — the same reactor closure, published a second time under the coordinate the
+      # `daemon` declaration names. Same bytes, two artifacts, two coordinates: a consumer asking
+      # about either is answered, and neither is told about a version whose document is missing.
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @.sbom/sbom.json \
+        "$sbom_base/daemon/qits-workspace-daemon/-/$version"
+
+    # --- the pin-and-protocol jar -----------------------------------------------------------------
+    # A SECOND STEP, AND A DIFFERENT IMAGE, because this one needs maven and the one above needs
+    # buildctl. It is deliberately AFTER the image push: the jar is what tells qits-workspaces which
+    # image to start, so a jar resolvable before its image is pushed would be a pin pointing at
+    # nothing — briefly, but a release is exactly the moment somebody is watching.
+    #
+    # It compiles the protocol module alone (`-pl`), which is dependency-free apart from junit, so
+    # this step is seconds and shares nothing with the native compile above.
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      set -eu
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      case "$version" in
+        ''|*[!0-9.]*) echo "not a CalVer tag: $version" >&2; exit 1 ;;
+      esac
+      # The tag, for the same reason the step above takes it: main has moved on, the tag has not,
+      # and `${project.version}` of the released tree is what gets filtered into the jar as the
+      # image tag it names.
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+
+      # A published version is never republished, and re-running a deploy of the same bytes is a
+      # no-op rather than a lie — so this one SKIPS where the daemon PUT above fails. That is the
+      # maven and npm release steps' rule, not a weakening of the one above.
+      if curl -fsS -o /dev/null \
+        "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-workspace-daemon-protocol/$version/qits-workspace-daemon-protocol-$version.pom"; then
+        echo "qits-workspace-daemon-protocol $version is already published — skipping"
+        exit 0
+      fi
+
+      # -s and the two QITS_MAVEN_AUTH_* variables are the Dockerfile's arrangement, in a step
+      # instead of a secret mount: the root pom declares `qits-maven` at an edge vhost that is dead
+      # in here, and the settings file mirrors that id onto the in-network $QITS_MAVEN_REPOSITORY_URL
+      # (and Central onto the platform's pull-through while $QITS_MAVEN_PROXY_URL is non-empty).
+      # `-` under set -u: a deployment that commissions nothing sends no pair, and an anonymous
+      # resolve is the state every hand build is in.
+      QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+      QITS_MAVEN_AUTH_USR="${QITS_COMMISSIONED_CLIENT_ID-}" \
+      QITS_MAVEN_AUTH_PSW="${QITS_COMMISSIONED_CLIENT_SECRET-}" \
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon-protocol deploy -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
+        -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"
+
+      # Its own document, under its own coordinate — the closure of THIS jar, which is junit-free at
+      # runtime and therefore nearly empty. That is the point: a consumer auditing what it pulled in
+      # by pinning the workspace image should see that it pulled in nothing.
+      QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon-protocol -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
+        org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
+        -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6
+      sbom_base="${QITS_MAVEN_REGISTRY_URL%%/artifacts/*}/artifacts/sboms"
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @workspace-daemon-protocol/target/sbom.json \
+        "$sbom_base/maven/eu.wohlben.qits:qits-workspace-daemon-protocol/-/$version"

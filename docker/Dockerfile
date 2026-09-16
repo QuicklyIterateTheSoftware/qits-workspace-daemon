@@ -151,6 +151,26 @@ RUN --mount=type=secret,id=qits-client-id \
 FROM scratch AS sbom
 COPY --from=build /src/workspace-daemon/target/sbom.json /sbom.json
 
+# --- binary ---------------------------------------------------------------------------------------
+# The bare daemon, exported the same way and for the same kind of reason: the release step reaches
+# this stage with `--target binary --output type=local` and PUTs the file to qits-artifacts under
+# `daemons/qits-workspace-daemon/<version>`, beside the image the release also pushes.
+#
+# THIS IS NOT THE RETURN OF THE SECOND IMAGE. What used to sit here was a second `docker build` of a
+# runnable `qits/workspace-daemon` image, layered into `qits/workspace` afterwards — two builds, two
+# declarations, and a partial release possible between them. This is one build, one native compile,
+# and a plain file: the same bytes that are already in the image, taken out of the same `build`
+# stage, so the two coordinates cannot name different binaries.
+#
+# WHAT IT IS FOR: qits-workspaces pins the workspace image through this repository's released
+# `qits-workspace-daemon-protocol` jar, and its pin test starts THIS binary at exactly that version
+# against localhost to prove the two still speak the same protocol before any workspace does. The
+# test needs a process, not a container — CI step containers have no docker — so what it downloads
+# has to be the daemon itself. `--target binary` stops before `${WORKSPACE_BASE}`, so the export
+# does not pull the ~3.4 GB toolchain for a file that is not in it.
+FROM scratch AS binary
+COPY --from=build /src/workspace-daemon/target/qits-workspace-daemon /qits-workspace-daemon
+
 # --- runtime: the toolchain, with the daemon as its entrypoint ------------------------------------
 # The toolchain is not built here and could not be: reproducing it would put node, maven, a JDK, a
 # Chromium and a native toolchain in a repo whose first rule is that a clone alone builds green with

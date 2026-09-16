@@ -145,9 +145,15 @@ both socket paths match the prefixes the handshake matches on, and no `$ref` dan
 3. Encode and decode arms in `DaemonCodec`.
 4. A round-trip case in `DaemonCodecTest`.
 5. Bump `DaemonProtocol.CAPABILITY_VERSION`.
-6. **Mirror the whole module into qits-workspaces-service**, byte-identical, and handle the new
-   case in its `WorkspaceDaemonRegistry.onMessage`. `DaemonCodecTest` living in both copies is the drift
-   detector; `diff -r` the two `src/` trees before you push.
+6. Handle the new case in qits-workspaces-service's `WorkspaceDaemonRegistry.onMessage` — **in its
+   own release, after this one**. The module is no longer mirrored there: it is released as
+   `eu.wohlben.qits:qits-workspace-daemon-protocol` and the consumer depends on it, so the new
+   message reaches qits-workspaces as a version bump on its pom and is gated by *its* release
+   request. That is slower than editing a vendored copy and it is the point — the host that must
+   understand a frame is the one whose gate now sees the change.
+
+   qits-projects-service still vendors a copy (`workspace-daemon-protocol/`), and until it takes the
+   dependency too, that copy is the one place `diff -r` is still the drift detector.
 
 Prefer extending an existing message to minting a new one. `WorkspaceChanged` carries a topic name
 rather than being a `commandsChanged` message precisely so the next thing that needs a nudge costs
@@ -382,6 +388,25 @@ learned this the hard way; the lesson outlives it.)
 **Do not add a `latest` tag anywhere.** Not to a pipeline, not as a convenience in a README, not as a
 default in a consumer. The whole failure this replaced was a floating local tag with nothing behind
 it.
+
+**A release publishes three artifacts out of one build, and the two new ones are how a consumer
+pins this one.** `.config/qits/ci-event-release.yml` declares them and carries the reasoning; the
+short form:
+
+- `qits/workspace` — the image, as before.
+- `qits-workspace-daemon` (a `daemon` artifact) — the bare native binary, exported from the same
+  `build` stage with `--target binary`. Not a second compile and not the retired bare-binary
+  *image*: a plain file, PUT to qits-artifacts' `daemons` store, because qits-workspaces' pin test
+  starts the daemon as a **process** and a CI step container has no docker.
+- `eu.wohlben.qits:qits-workspace-daemon-protocol` — the wire contract plus `WorkspaceImage`, which
+  carries this release's version. **This is what makes the image version a pom line in
+  qits-workspaces instead of a configuration entry rewritten underneath it.** The maintenance train
+  bumps it like any internal library; the consumer's own release request is where a daemon that
+  broke the protocol now fails.
+
+The three move as one version by construction — the jar's `${project.version}`, the image tag and
+the binary's coordinate are the same string, filtered in rather than written down. Do not add a way
+to publish one without the others.
 
 ## Formatting
 

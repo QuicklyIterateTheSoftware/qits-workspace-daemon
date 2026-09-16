@@ -67,10 +67,15 @@
                 <scope>import</scope>
             </dependency>
             <!-- The wire-contract module (built from this repo's workspace-daemon-protocol/), so the
-                 child's version-less dependency on it resolves within the reactor. -->
+                 child's version-less dependency on it resolves within the reactor.
+
+                 ITS COORDINATES ARE `eu.wohlben.qits:qits-workspace-daemon-protocol`, not this
+                 reactor's `eu.wohlben` groupId, because it is the one module here that is also
+                 DEPLOYED: qits-workspaces pins the workspace image by depending on it. Its own pom
+                 says why the name changed. -->
             <dependency>
-                <groupId>eu.wohlben</groupId>
-                <artifactId>workspace-daemon-protocol</artifactId>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-workspace-daemon-protocol</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

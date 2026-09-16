@@ -16,7 +16,7 @@ boundary belongs to
 
 | Module | What |
 |---|---|
-| `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. qits-workspaces-service vendors a byte-identical copy. |
+| `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. **Released**, as `eu.wohlben.qits:qits-workspace-daemon-protocol` — it also carries `WorkspaceImage`, the version of the image and daemon binary this release produced, which is how qits-workspaces pins them. |
 | `workspace-daemon-files/` | Reading the checkout: file listing, content, lazy directories, gitignore. |
 | `workspace-daemon-detection/` | Framework detection and the component map, over `workspace-daemon-files`. |
 | `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, service and web-editor supervision. Wires every module above by hand. |
