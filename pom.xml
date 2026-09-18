@@ -13,7 +13,7 @@
          :8080 dev-guard, isolated-test chunking, enforcer, jandex) is intentionally omitted. -->
     <groupId>eu.wohlben</groupId>
     <artifactId>qits</artifactId>
-    <version>2026.918.153515</version>
+    <version>2026.918.163555</version>
     <packaging>pom</packaging>
 
     <modules>
