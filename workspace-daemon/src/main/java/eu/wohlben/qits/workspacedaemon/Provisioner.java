@@ -25,8 +25,8 @@ import java.util.function.Consumer;
  * git} CLI via {@link ProcessBuilder}, mirroring {@link WorkspaceDescriber}, and unit-tests
  * directly against a collecting {@code Consumer}.
  *
- * <p><b>The clone is project-scoped</b>: {@code <gitBase>/<projectId>/<repoName>}, from the git base
- * plus the {@code …_PROJECT_ID} and {@code …_REPO_NAME} env. That is qits-githost's one public
+ * <p><b>The clone is project-scoped</b>: {@code <gitBase>/<projectId>/<repoName>}, from the git
+ * base plus the {@code …_PROJECT_ID} and {@code …_REPO_NAME} env. That is qits-githost's one public
  * repository address. The flat {@code <gitBase>/<repoName>} form this used to build worked only
  * while a repository's storage id was its name, which collides globally the moment a second project
  * holds a repository of the same name — the defect the project segment removes. With either half of
@@ -34,13 +34,21 @@ import java.util.function.Consumer;
  * which is internal storage addressing and exists here only for containers created before the
  * scoped form shipped.
  *
+ * <p><b>A container may carry the estate as well as, or instead of, a workspace.</b> {@code
+ * qits.workspace-daemon.projects} lists {@code <projectId>/<repoName>} wrappers, and {@link
+ * #cloneProjectWrappers} clones each into {@code <root>/<repoName>} as one more step of this same
+ * sequence — the shared editor of epic <i>Remove the platform service concept</i>, which holds
+ * every project side by side instead of having an origin per project. It is the injected clone
+ * coordinates widened, not a second source: the same two halves, the same {@code qits:agent} token,
+ * the same forked {@code git}. An ordinary workspace is handed no list and nothing changes for it.
+ *
  * <p>Committed <b>relative</b> submodule urls resolve natively against the project segment, and an
  * <b>absolute</b> one is redirected to the sibling below the same segment by basename. Submodules
  * are discovered from the checkout's own {@code .gitmodules} in a bounded, depth-capped walk (the
  * daemon has no DB) — a submodule that can't be fetched (e.g. one never imported into the project)
- * is skipped with a warning rather than failing the whole provision. An existing checkout (reconnect
- * after a restart) is never re-cloned: it re-emits {@link Provisioned} from the current {@code
- * HEAD}, after {@link #alignExistingCheckoutOrigin} retargets its origin.
+ * is skipped with a warning rather than failing the whole provision. An existing checkout
+ * (reconnect after a restart) is never re-cloned: it re-emits {@link Provisioned} from the current
+ * {@code HEAD}, after {@link #alignExistingCheckoutOrigin} retargets its origin.
  *
  * <p><b>The git base must be injected.</b> The git host is <b>qits-githost</b>, which serves {@code
  * /git/<projectId>/<repoName>} (the path convention: {@code /<segment>/git/…}, verbatim through the
@@ -88,7 +96,15 @@ public final class Provisioner {
       String branch,
       String projectId,
       String repoName,
-      String gitBaseUrl) {}
+      String gitBaseUrl,
+      String projects) {}
+
+  /**
+   * One entry of {@link Env#projects()}: the two halves the single-wrapper clone url is already
+   * built from ({@code <gitBase>/<projectId>/<repoName>}), for a project this container is to carry
+   * beside its own.
+   */
+  record ProjectTarget(String projectId, String repoName) {}
 
   private Provisioner() {}
 
@@ -101,6 +117,18 @@ public final class Provisioner {
    * startup steps (config read, bootstrap) have a checkout to run against.
    */
   public static boolean provision(Env env, Consumer<DaemonMessage> emit) {
+    return provision(WORKSPACE_DIR, env, emit);
+  }
+
+  /**
+   * The same provision against a stated workspace root, which is what the unit suite drives. Every
+   * git command below addresses its checkout absolutely (a {@code -C <dir>}, an absolute clone
+   * target, an absolute {@code --file}), so the forked process's working directory decides nothing
+   * — that is what makes a root other than {@code /workspace} testable without a container, and it
+   * is why {@link #materializeSubmodules} is entered with the root's own path rather than {@code
+   * "."}.
+   */
+  static boolean provision(File workspaceDir, Env env, Consumer<DaemonMessage> emit) {
     try {
       String gitBase = gitBase(env, emit);
       if (gitBase == null) {
@@ -111,45 +139,18 @@ public final class Provisioner {
                     + " (QITS_WORKSPACE_DAEMON_GIT_BASE_URL) is unset"));
         return false;
       }
-      // Idempotent: an existing checkout (reconnect/restart in a still-provisioned container) is
-      // never re-cloned — it may hold unpushed commits. But still re-run the submodule walk before
-      // reporting done: a prior boot may have died after the root clone but before (or during)
-      // materialization, and `submodule update --init` is a no-op on already-present submodules, so
-      // this completes a partial checkout rather than reporting an incomplete one as Provisioned.
-      if (new File(WORKSPACE_DIR, ".git").exists()) {
-        emit.accept(
-            new DaemonLog(
-                "INFO",
-                "/workspace already checked out — skipping root clone, re-checking submodules."));
-        if (!alignExistingCheckoutOrigin(WORKSPACE_DIR, gitBase, env, emit)) {
-          emit.accept(
-              new ProvisionFailed(
-                  env.workspaceId(),
-                  "could not align the existing checkout with its project-scoped origin"));
-          return false;
-        }
-        materializeSubmodules(gitBase, env, ".", 0, emit);
-        emit.accept(new Provisioned(env.workspaceId(), head()));
-        return true;
-      }
-      String rootUrl = rootUrl(gitBase, env);
-      emit.accept(new DaemonLog("INFO", "self-cloning " + rootUrl + " into /workspace"));
-      List<String> cloneArgv = new ArrayList<>(List.of("git", "clone"));
-      if (env.branch() != null && !env.branch().isBlank()) {
-        cloneArgv.add("--branch");
-        cloneArgv.add(env.branch());
-      }
-      cloneArgv.add(rootUrl);
-      cloneArgv.add(WORKSPACE_DIR.getPath());
-      int cloneExit = runStreaming(cloneArgv, emit);
-      if (cloneExit != 0) {
-        emit.accept(
-            new ProvisionFailed(
-                env.workspaceId(), "git clone exited " + cloneExit + " (" + rootUrl + ")"));
+      List<ProjectTarget> projects = parseProjects(env.projects(), emit);
+      String failure = provisionRoot(workspaceDir, gitBase, env, projects, emit);
+      // One more step in the same sequence, and deliberately after the root: an estate-wide editor
+      // is worth having even when its own checkout could not be made, and a project that fails to
+      // clone must not cost the container every other project. So this never decides the terminal
+      // event — its failures are WARNs and the root's verdict still stands.
+      cloneProjectWrappers(workspaceDir, gitBase, env, projects, emit);
+      if (failure != null) {
+        emit.accept(new ProvisionFailed(env.workspaceId(), failure));
         return false;
       }
-      materializeSubmodules(gitBase, env, ".", 0, emit);
-      emit.accept(new Provisioned(env.workspaceId(), head()));
+      emit.accept(new Provisioned(env.workspaceId(), head(workspaceDir)));
       return true;
     } catch (RuntimeException e) {
       emit.accept(
@@ -159,16 +160,234 @@ public final class Provisioner {
   }
 
   /**
+   * The container's own single-wrapper checkout, unchanged: {@code null} when it stands, else the
+   * sentence the {@link ProvisionFailed} carries.
+   *
+   * <p>The one addition is the no-root case. A shared editor container is created with no
+   * repository, branch or project of its own — it carries the estate, not a workspace — so with a
+   * project list injected and no clone target the root clone is skipped rather than attempted
+   * against {@code <gitBase>/}, which would fail and report a container that is in fact fully
+   * provisioned. Without a project list an unaddressed container still attempts the clone and still
+   * fails: that is a misconfigured ordinary workspace, and it must keep saying so.
+   */
+  private static String provisionRoot(
+      File workspaceDir,
+      String gitBase,
+      Env env,
+      List<ProjectTarget> projects,
+      Consumer<DaemonMessage> emit) {
+    // Idempotent: an existing checkout (reconnect/restart in a still-provisioned container) is
+    // never re-cloned — it may hold unpushed commits. But still re-run the submodule walk before
+    // reporting done: a prior boot may have died after the root clone but before (or during)
+    // materialization, and `submodule update --init` is a no-op on already-present submodules, so
+    // this completes a partial checkout rather than reporting an incomplete one as Provisioned.
+    if (new File(workspaceDir, ".git").exists()) {
+      emit.accept(
+          new DaemonLog(
+              "INFO",
+              workspaceDir.getPath()
+                  + " already checked out — skipping root clone, re-checking submodules."));
+      if (!alignExistingCheckoutOrigin(workspaceDir, gitBase, env, emit)) {
+        return "could not align the existing checkout with its project-scoped origin";
+      }
+      materializeSubmodules(gitBase, env, workspaceDir.getPath(), 0, emit);
+      return null;
+    }
+    if (!rootConfigured(env) && !projects.isEmpty()) {
+      emit.accept(
+          new DaemonLog(
+              "INFO",
+              "no repository of this container's own is configured — provisioning the "
+                  + projects.size()
+                  + " project wrapper(s) only."));
+      return null;
+    }
+    String rootUrl = rootUrl(gitBase, env);
+    emit.accept(
+        new DaemonLog("INFO", "self-cloning " + rootUrl + " into " + workspaceDir.getPath()));
+    List<String> cloneArgv = new ArrayList<>(List.of("git", "clone"));
+    if (env.branch() != null && !env.branch().isBlank()) {
+      cloneArgv.add("--branch");
+      cloneArgv.add(env.branch());
+    }
+    cloneArgv.add(rootUrl);
+    cloneArgv.add(workspaceDir.getPath());
+    int cloneExit = runStreaming(cloneArgv, emit);
+    if (cloneExit != 0) {
+      return "git clone exited " + cloneExit + " (" + rootUrl + ")";
+    }
+    materializeSubmodules(gitBase, env, workspaceDir.getPath(), 0, emit);
+    return null;
+  }
+
+  /** Whether this container was handed a repository of its own to clone at the workspace root. */
+  static boolean rootConfigured(Env env) {
+    return nameAddressed(env) || (env.repoId() != null && !env.repoId().isBlank());
+  }
+
+  /**
+   * <b>The estate, side by side.</b> Clone every project's wrapper named by {@link Env#projects()}
+   * into its own directory under the workspace root — the shared editor's whole content, and a
+   * no-op for every ordinary workspace container, which is handed no list.
+   *
+   * <p><b>The layout is git's own.</b> A wrapper is cloned to {@code <root>/<repoName>}, the
+   * directory {@code git clone <gitBase>/<projectId>/<repoName>} would have made unasked. The
+   * project <em>id</em> is a uuid — a sidebar of uuids is the one naming that helps nobody — and
+   * the wrapper's repository name is how the project is spelled everywhere a person reads it.
+   *
+   * <p><b>A failure is one project's, not the container's.</b> Each clone is independent, a
+   * non-zero exit is a {@code WARN} naming the project and the walk carries on, and the caller's
+   * terminal event is unaffected. One project whose bare is missing or whose history is corrupt
+   * would otherwise cost the editor every other project on the estate.
+   *
+   * <p><b>Idempotent, like the root.</b> A directory already there is left alone: the volume
+   * outlives the container and may hold commits nobody pushed. A project added later is therefore
+   * picked up when the container is recreated onto a fresh volume, which is the existing recreate
+   * verb — nothing here polls and nothing watches.
+   *
+   * <p><b>The cost is accepted and deliberately not fought.</b> First-boot clone time and disk grow
+   * with the estate, and an agent's {@code grep} now crosses every project. There is no shallow
+   * clone and no cache here because the single-wrapper clone beside it has none either; adding one
+   * would make the estate's checkouts a different kind of checkout from the container's own.
+   *
+   * @return how many of the listed projects failed to clone
+   */
+  static int cloneProjectWrappers(
+      File root,
+      String gitBase,
+      Env env,
+      List<ProjectTarget> projects,
+      Consumer<DaemonMessage> emit) {
+    if (projects.isEmpty()) {
+      return 0;
+    }
+    emit.accept(
+        new DaemonLog(
+            "INFO",
+            "cloning "
+                + projects.size()
+                + " project wrapper(s) side by side under "
+                + root.getPath()));
+    int failures = 0;
+    for (ProjectTarget target : projects) {
+      if (isThisContainersOwn(env, target)) {
+        emit.accept(
+            new DaemonLog(
+                "INFO",
+                "project '"
+                    + target.repoName()
+                    + "' is this container's own checkout at "
+                    + root.getPath()
+                    + " — not cloned a second time"));
+        continue;
+      }
+      File directory = new File(root, target.repoName());
+      if (directory.exists()) {
+        emit.accept(
+            new DaemonLog(
+                "INFO",
+                directory.getPath() + " is already there — left as it stands, never re-cloned"));
+        continue;
+      }
+      String url = gitBase + "/" + target.projectId() + "/" + target.repoName();
+      int exit = runStreaming(List.of("git", "clone", url, directory.getPath()), emit);
+      if (exit != 0) {
+        failures++;
+        emit.accept(
+            new DaemonLog(
+                "WARN",
+                "skipping project '"
+                    + target.repoName()
+                    + "' (git clone exited "
+                    + exit
+                    + " for "
+                    + url
+                    + ") — the other projects are unaffected"));
+        continue;
+      }
+      // The same walk the root gets, scoped to that project: its submodules are siblings under its
+      // OWN project segment, and it follows no workspace branch — this container's branch is a fact
+      // about its own repository and means nothing in somebody else's project.
+      materializeSubmodules(
+          gitBase,
+          new Env(env.workspaceId(), "", "", target.projectId(), target.repoName(), gitBase, ""),
+          directory.getPath(),
+          0,
+          emit);
+    }
+    if (failures > 0) {
+      emit.accept(
+          new DaemonLog(
+              "WARN",
+              failures + " of " + projects.size() + " project wrapper(s) could not be cloned"));
+    }
+    return failures;
+  }
+
+  /** The listed project this container already holds at its root, which is not cloned again. */
+  private static boolean isThisContainersOwn(Env env, ProjectTarget target) {
+    return nameAddressed(env)
+        && env.projectId().trim().equals(target.projectId())
+        && env.repoName().trim().equals(target.repoName());
+  }
+
+  /**
+   * Read {@link Env#projects()}: {@code <projectId>/<repoName>} entries separated by commas or
+   * whitespace — the same two halves {@link #rootUrl} already builds one clone target from, which
+   * is why this is the injected clone coordinates widened rather than a second source of truth.
+   *
+   * <p>Both halves reach a URL <em>and</em> a path, so each is validated here at the boundary: a
+   * blank, a separator, a {@code ..} segment or a leading dash is refused with a {@code WARN}
+   * naming the entry, rather than escaping the workspace root or arriving at git as an option. A
+   * malformed entry costs its own project and no other.
+   */
+  static List<ProjectTarget> parseProjects(String raw, Consumer<DaemonMessage> emit) {
+    List<ProjectTarget> out = new ArrayList<>();
+    if (raw == null || raw.isBlank()) {
+      return out;
+    }
+    for (String entry : raw.trim().split("[,\\s]+")) {
+      if (entry.isBlank()) {
+        continue;
+      }
+      int slash = entry.indexOf('/');
+      String projectId = slash < 0 ? "" : entry.substring(0, slash);
+      String repoName = slash < 0 ? "" : entry.substring(slash + 1);
+      if (!isAddressable(projectId) || !isAddressable(repoName)) {
+        emit.accept(
+            new DaemonLog(
+                "WARN",
+                "ignoring project entry '"
+                    + entry
+                    + "': expected <projectId>/<repoName> with neither half blank, a path"
+                    + " traversal or an option"));
+        continue;
+      }
+      out.add(new ProjectTarget(projectId, repoName));
+    }
+    return out;
+  }
+
+  private static boolean isAddressable(String segment) {
+    return !segment.isBlank()
+        && !segment.startsWith("-")
+        && segment.indexOf('/') < 0
+        && segment.indexOf('\\') < 0
+        && !"..".equals(segment)
+        && !".".equals(segment);
+  }
+
+  /**
    * The git base every clone url is built on: the injected {@code
    * qits.workspace-daemon.git-base-url}, or {@code null} when the host supplied none — announced as
    * a {@code WARN} and reported by the caller as {@link ProvisionFailed}.
    *
    * <p>There used to be a fallback here: the dial-home authority plus {@code /artifacts/git}, taken
-   * with a {@code WARN}. It assumed one authority routed every segment, and it named qits-artifacts,
-   * which stopped serving git at the byte-plane split. A guess at a host that cannot answer buys
-   * nothing over saying the configuration is missing, and it costs the operator a connection error
-   * pointing at the wrong service. An address with no derivable form fails loudly — the same rule
-   * {@code qits.actions-mcp.url} already follows.
+   * with a {@code WARN}. It assumed one authority routed every segment, and it named
+   * qits-artifacts, which stopped serving git at the byte-plane split. A guess at a host that
+   * cannot answer buys nothing over saying the configuration is missing, and it costs the operator
+   * a connection error pointing at the wrong service. An address with no derivable form fails
+   * loudly — the same rule {@code qits.actions-mcp.url} already follows.
    */
   static String gitBase(Env env, Consumer<DaemonMessage> emit) {
     String configured = env.gitBaseUrl();
@@ -208,8 +427,8 @@ public final class Provisioner {
   /**
    * Where a submodule's committed url is pointed instead: the sibling repository of the same name,
    * below this checkout's own scheme. A project's repositories are siblings <em>under the project
-   * segment</em> ({@code <gitBase>/<projectId>/<basename>}); an id-addressed checkout keeps the flat
-   * form, which is what the storage-id-equals-name world it was created in serves.
+   * segment</em> ({@code <gitBase>/<projectId>/<basename>}); an id-addressed checkout keeps the
+   * flat form, which is what the storage-id-equals-name world it was created in serves.
    */
   static String siblingUrl(String gitBase, Env env, String submoduleUrl) {
     String sibling = basename(submoduleUrl);
@@ -219,10 +438,10 @@ public final class Provisioner {
   }
 
   /**
-   * Whether the project-scoped route ({@code /git/<projectId>/<repoName>}) exists for this workspace
-   * — the ONE predicate for both the clone url and the preserved-checkout retarget. <b>Both</b> env
-   * vars must be present: a repository name alone addressed a repository only while storage ids were
-   * names, and a project id alone names no servable route.
+   * Whether the project-scoped route ({@code /git/<projectId>/<repoName>}) exists for this
+   * workspace — the ONE predicate for both the clone url and the preserved-checkout retarget.
+   * <b>Both</b> env vars must be present: a repository name alone addressed a repository only while
+   * storage ids were names, and a project id alone names no servable route.
    */
   static boolean nameAddressed(Env env) {
     return env.projectId() != null
@@ -244,8 +463,9 @@ public final class Provisioner {
    *
    * <p>Only a fully scoped checkout is migrated. With either scope value absent the id-addressed
    * origin remains the only route this daemon can prove exists. {@code submodule sync} is part of
-   * the migration: a failed earlier update may already have cached the wrongly resolved sibling urls
-   * in {@code .git/config}, and changing {@code remote.origin.url} alone does not replace them.
+   * the migration: a failed earlier update may already have cached the wrongly resolved sibling
+   * urls in {@code .git/config}, and changing {@code remote.origin.url} alone does not replace
+   * them.
    */
   static boolean alignExistingCheckoutOrigin(
       File workspace, String gitBase, Env env, Consumer<DaemonMessage> emit) {
@@ -255,27 +475,13 @@ public final class Provisioner {
     String scopedOrigin = rootUrl(gitBase, env);
     int remoteUpdate =
         runStreaming(
-            List.of(
-                "git",
-                "-C",
-                workspace.getPath(),
-                "remote",
-                "set-url",
-                "origin",
-                scopedOrigin),
+            List.of("git", "-C", workspace.getPath(), "remote", "set-url", "origin", scopedOrigin),
             emit);
     if (remoteUpdate != 0) {
       return false;
     }
     return runStreaming(
-            List.of(
-                "git",
-                "-C",
-                workspace.getPath(),
-                "submodule",
-                "sync",
-                "--recursive"),
-            emit)
+            List.of("git", "-C", workspace.getPath(), "submodule", "sync", "--recursive"), emit)
         == 0;
   }
 
@@ -316,7 +522,7 @@ public final class Provisioner {
     if (depth >= MAX_SUBMODULE_DEPTH) {
       return;
     }
-    String gitmodules = ".".equals(rel) ? ".gitmodules" : rel + "/.gitmodules";
+    String gitmodules = rel + "/.gitmodules";
     Captured listed =
         capture(
             List.of(
@@ -344,7 +550,8 @@ public final class Provisioner {
                   "submodule." + sub.name() + ".url"));
       String url = committedUrl.exitCode() == 0 ? committedUrl.stdout().trim() : "";
       // Normalize every submodule to the sibling route this checkout's own scheme serves. Committed
-      // relative URLs end in `.git`; native Git resolution preserves that suffix, while qits-githost
+      // relative URLs end in `.git`; native Git resolution preserves that suffix, while
+      // qits-githost
       // deliberately serves the repository without it. basename strips the suffix for relative and
       // absolute URLs alike and also keeps external absolute origins inside this project's imported
       // siblings.
@@ -509,7 +716,7 @@ public final class Provisioner {
   }
 
   private static String childRel(String rel, String path) {
-    return ".".equals(rel) ? path : rel + "/" + path;
+    return rel + "/" + path;
   }
 
   /**
@@ -534,9 +741,12 @@ public final class Provisioner {
     return last;
   }
 
-  /** The current {@code HEAD} of the checkout, or {@code ""} if unreadable. */
-  private static String head() {
-    Captured rev = capture(List.of("git", "rev-parse", "HEAD"));
+  /**
+   * The current {@code HEAD} of the checkout, or {@code ""} if unreadable — which is the ordinary
+   * answer for a shared editor container, whose root holds the projects rather than a checkout.
+   */
+  private static String head(File workspaceDir) {
+    Captured rev = capture(List.of("git", "-C", workspaceDir.getPath(), "rev-parse", "HEAD"));
     return rev.exitCode() == 0 ? rev.stdout().trim() : "";
   }
 

@@ -31,9 +31,9 @@ import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
 import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
+import eu.wohlben.qits.workspacedaemon.protocol.OpenStream;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
-import eu.wohlben.qits.workspacedaemon.protocol.OpenStream;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
@@ -156,6 +156,17 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.repo-name")
   Optional<String> repoNameConfig;
 
+  // The estate this container carries beside (or instead of) its own checkout:
+  // `<projectId>/<repoName>`
+  // wrappers, comma- or whitespace-separated, each cloned into its own directory under /workspace
+  // by
+  // the Provisioner. The shared editor container is what gets a list; every ordinary workspace is
+  // handed none and provisions exactly as before. Same two halves as project-id/repo-name above,
+  // same
+  // git base, same injected qits:agent token — the clone coordinates widened, not a new surface.
+  @ConfigProperty(name = "qits.workspace-daemon.projects")
+  Optional<String> projectsConfig;
+
   // The git host the self-clone reads from: qits-githost, serving /git/<projectId>/<repoName>.
   // Unset ⇒ the Provisioner refuses to clone and says so, because the git host's address is not
   // derivable from this one (see Provisioner's javadoc).
@@ -260,8 +271,8 @@ public class ControlSocket {
    * The per-surface agent configuration this container was created with, and where to write it.
    *
    * <p>Two keys, both or neither — {@link AgentConfigurationFile} has the whole arrangement and why
-   * the bytes travel in the environment rather than as a mount. Read here for the reason every other
-   * capability setting is read here: the harness library is framework-free and cannot read
+   * the bytes travel in the environment rather than as a mount. Read here for the reason every
+   * other capability setting is read here: the harness library is framework-free and cannot read
    * configuration itself, so {@link ControlSocket} is the single reader.
    *
    * <p>{@code Optional<String>} rather than a blank default, for the SmallRye reason the identity
@@ -286,11 +297,11 @@ public class ControlSocket {
    * time, which <em>is</em> the image's calver, because {@code docker/Dockerfile} compiles the
    * daemon and layers it into {@code qits/workspace:<version>} in one build from one reactor.
    *
-   * <p>It is a coarser key than the image reference on a fold-built image, which is sha-tagged while
-   * the reactor version is not — two folds of one release request report the same version. The host
-   * caches a capability report per (harness, image version), so the cost of that is a report from a
-   * rebuilt-but-unreleased image not displacing the previous one, which is the direction to be
-   * wrong in.
+   * <p>It is a coarser key than the image reference on a fold-built image, which is sha-tagged
+   * while the reactor version is not — two folds of one release request report the same version.
+   * The host caches a capability report per (harness, image version), so the cost of that is a
+   * report from a rebuilt-but-unreleased image not displacing the previous one, which is the
+   * direction to be wrong in.
    */
   @ConfigProperty(name = "qits.workspace.image-version")
   Optional<String> workspaceImageVersion;
@@ -600,7 +611,8 @@ public class ControlSocket {
               branch,
               projectId,
               repoName,
-              gitBaseUrlConfig.orElse(""));
+              gitBaseUrlConfig.orElse(""),
+              projectsConfig.orElse(""));
       workers.execute(
           () -> {
             // A fresh clone (vs. a reconnect into an already-provisioned container) is the trigger
@@ -756,12 +768,17 @@ public class ControlSocket {
     ProcessRunner processes = new LocalProcessExecutor();
     AgentTranscriptService transcripts =
         new AgentTranscriptService(
-            store, logs, agentSessionStore, claudeMount, () -> nudge(WorkspaceChangeTopic.COMMANDS));
+            store,
+            logs,
+            agentSessionStore,
+            claudeMount,
+            () -> nudge(WorkspaceChangeTopic.COMMANDS));
     AgentTranscriptTailService tail =
         new AgentTranscriptTailService(transcripts, logs, transcriptTailPollMs);
     tail.start();
     this.transcriptTail = tail;
-    AgentAuthStatus authStatus = new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
+    AgentAuthStatus authStatus =
+        new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
     AgentLaunchService launch =
         new AgentLaunchService(
             new CommandsAgentCommands(commandService, commandRegistry, store),
@@ -803,8 +820,8 @@ public class ControlSocket {
    *
    * <p><b>Not on the boot thread, and a failure never reaches it.</b> Two process spawns before the
    * socket is dialled would delay every container's dial-home for the sake of a dropdown, and a
-   * probe that hangs on a broken binary would hold the container in a state the host reads as
-   * dead. So it runs where the rest of this daemon's blocking work runs, and {@code /agents/available}
+   * probe that hangs on a broken binary would hold the container in a state the host reads as dead.
+   * So it runs where the rest of this daemon's blocking work runs, and {@code /agents/available}
    * answers an empty capability list until it lands — an honest "nothing reported yet", which the
    * host reads as a cache miss rather than as an empty dropdown. {@link
    * HarnessCapabilityService#report} already never throws per harness; the catch here is for the
@@ -851,9 +868,9 @@ public class ControlSocket {
   }
 
   /**
-   * Push a change nudge home, if the socket is up. Best-effort by design: the frame carries no state,
-   * so a nudge dropped while reconnecting costs one stale view until the next one, and the backend's
-   * own poll is still there underneath.
+   * Push a change nudge home, if the socket is up. Best-effort by design: the frame carries no
+   * state, so a nudge dropped while reconnecting costs one stale view until the next one, and the
+   * backend's own poll is still there underneath.
    */
   private void nudge(String topic) {
     if (workspaceId == null || workspaceId.isBlank()) {
@@ -983,8 +1000,8 @@ public class ControlSocket {
 
   /**
    * Mint the commissioned container's machine token without blocking the Vert.x event loop. Absent
-   * configuration keeps the clone-alone/developer topology anonymous; a partial configuration
-   * fails closed and is retried with the socket.
+   * configuration keeps the clone-alone/developer topology anonymous; a partial configuration fails
+   * closed and is retried with the socket.
    */
   java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
     boolean any =

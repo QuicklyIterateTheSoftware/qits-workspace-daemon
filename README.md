@@ -277,6 +277,19 @@ in particular: the hook webhook binds one and the agent launch renders it into e
 two independent reads that disagree would leave agents running fine and silently never reporting
 lineage or activity.
 
+`projects` is the estate a container carries beside — or instead of — its own checkout:
+`<projectId>/<repoName>` wrappers, comma- or whitespace-separated, each cloned to
+`/workspace/<repoName>` by the `Provisioner` as one more step of the same sequence that clones a
+single wrapper. The **shared editor container** is what gets a list, and that is the whole of the
+"one editor for the platform" change on this side: same git base, same `qits:agent` token, same
+forked `git`, one clone per project. A wrapper's repository name is the directory, because a project
+id is a uuid and a sidebar of uuids helps nobody. One project failing to clone is a `WARN` and the
+rest still land; the terminal event is emitted either way. A project added later arrives with the
+next container **recreate** — nothing polls. An ordinary workspace is handed no list and provisions
+exactly as before, and a container with no repository of its own skips the root clone only when it
+does have a list. The cost is deliberate and unfought: first-boot clone time and disk grow with the
+estate, and an agent's `grep` now crosses every project.
+
 `editor-enabled` (default `false`) and `editor-port` (default `13339`) are the web editor's pair, and
 the default is the contract for every image without one: nothing spawned, nothing announced, and the
 tunnel's `EDITOR` target refused. The switch alone does not conjure a binary — supervision also

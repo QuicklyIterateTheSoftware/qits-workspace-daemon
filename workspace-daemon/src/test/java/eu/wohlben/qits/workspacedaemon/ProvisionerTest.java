@@ -9,6 +9,7 @@ import eu.wohlben.qits.workspacedaemon.Provisioner.Env;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
+import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
@@ -21,10 +22,14 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Container-free coverage of the {@link Provisioner}'s pure decision helpers — the git base,
  * project-scoped vs. id addressing, {@code .gitmodules} parsing, and basename normalization. The
- * end-to-end
- * clone + submodule walk (which touches {@code /workspace} and real git) is the extended
- * real-docker IT's job; here we pin the logic that decides <em>what</em> the daemon clones and how
- * it addresses submodule redirects, mirroring {@link WorkspaceDescriberTest}'s parse-only approach.
+ * end-to-end clone + submodule walk against a live qits-githost is the extended real-docker IT's
+ * job; here we pin the logic that decides <em>what</em> the daemon clones and how it addresses
+ * submodule redirects, mirroring {@link WorkspaceDescriberTest}'s parse-only approach.
+ *
+ * <p>The estate cases below do drive real {@code git} against local origins, because what they
+ * prove <em>is</em> the clone sequence — several projects side by side, one failure not costing the
+ * rest, the terminal event either way. They never touch {@code /workspace}: every command the
+ * {@link Provisioner} forks addresses its checkout absolutely, so a stated root is enough.
  */
 class ProvisionerTest {
 
@@ -35,7 +40,7 @@ class ProvisionerTest {
   }
 
   private static Env env(String projectId, String repoName, String gitBaseUrl) {
-    return new Env("ws-1", "repo-abc", "feature", projectId, repoName, gitBaseUrl);
+    return new Env("ws-1", "repo-abc", "feature", projectId, repoName, gitBaseUrl, "");
   }
 
   /** Collects the messages a decision emits, so a silent refusal fails the test. */
@@ -58,8 +63,9 @@ class ProvisionerTest {
   }
 
   /**
-   * The derivation this replaced built {@code <control-socket authority>/artifacts/git}, a host that
-   * serves no git since the byte-plane split. A missing setting has to read as a missing setting.
+   * The derivation this replaced built {@code <control-socket authority>/artifacts/git}, a host
+   * that serves no git since the byte-plane split. A missing setting has to read as a missing
+   * setting.
    */
   @Test
   void noInjectedGitBaseRefusesToCloneRatherThanGuessingAHost() {
@@ -322,6 +328,266 @@ class ProvisionerTest {
     git(child, "config", "user.name", "Test");
     git(child, "switch", "--quiet", "--detach", "main");
     return child;
+  }
+
+  // --- The estate: every project's wrapper, side by side (epic "Remove the platform service
+  // concept", feature "One editor"). These drive real git against local origins, the way the
+  // branch-following tests above do, because what is being proven is the clone sequence itself.
+
+  /**
+   * A served wrapper at the address the clone is built from: {@code <gitBase>/<projectId>/<name>}.
+   */
+  private static Path servedWrapper(Path gitBase, String projectId, String repoName)
+      throws IOException, InterruptedException {
+    Path origin = Files.createDirectories(gitBase.resolve(projectId).resolve(repoName));
+    git(origin, "init", "--quiet", "--initial-branch=main");
+    git(origin, "config", "user.email", "test@example.invalid");
+    git(origin, "config", "user.name", "Test");
+    Files.writeString(origin.resolve("README.md"), "# " + repoName + "\n");
+    git(origin, "add", "README.md");
+    git(origin, "commit", "-m", "the wrapper");
+    return origin;
+  }
+
+  private static Env estateEnv(String gitBase, String projects) {
+    // A shared editor container: no repository, branch or project of its own — it carries the
+    // estate, not a workspace.
+    return new Env("editor-1", "", "", "", "", gitBase, projects);
+  }
+
+  /** The whole point: one container holding every project, each in its own directory. */
+  @Test
+  void everyProjectsWrapperIsClonedSideBySideUnderTheWorkspaceRoot(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "qits-qits");
+    servedWrapper(gitBase, "proj-2", "acme-acme");
+    servedWrapper(gitBase, "proj-3", "third-wrapper");
+    Path root = Files.createDirectories(tmp.resolve("workspace"));
+    Env env =
+        estateEnv(gitBase.toString(), "proj-1/qits-qits,proj-2/acme-acme,proj-3/third-wrapper");
+    List<DaemonMessage> log = new ArrayList<>();
+
+    int failures =
+        Provisioner.cloneProjectWrappers(
+            root.toFile(),
+            gitBase.toString(),
+            env,
+            Provisioner.parseProjects(env.projects(), log::add),
+            log::add);
+
+    assertEquals(0, failures);
+    for (String wrapper : List.of("qits-qits", "acme-acme", "third-wrapper")) {
+      assertTrue(
+          Files.isDirectory(root.resolve(wrapper).resolve(".git")),
+          wrapper + " is a checkout of its own, named for the project's wrapper");
+      assertEquals("# " + wrapper + "\n", Files.readString(root.resolve(wrapper, "README.md")));
+    }
+  }
+
+  /**
+   * The failure mode this feature cannot have: one project whose bare is missing or whose history
+   * is unreadable must not cost the editor every other project on the estate.
+   */
+  @Test
+  void oneFailingCloneDoesNotAbandonTheRest(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "first-wrapper");
+    servedWrapper(gitBase, "proj-3", "third-wrapper");
+    Path root = Files.createDirectories(tmp.resolve("workspace"));
+    Env env =
+        estateEnv(
+            gitBase.toString(), "proj-1/first-wrapper,proj-2/never-served,proj-3/third-wrapper");
+    List<DaemonMessage> log = new ArrayList<>();
+
+    int failures =
+        Provisioner.cloneProjectWrappers(
+            root.toFile(),
+            gitBase.toString(),
+            env,
+            Provisioner.parseProjects(env.projects(), log::add),
+            log::add);
+
+    assertEquals(1, failures);
+    assertTrue(Files.isDirectory(root.resolve("first-wrapper").resolve(".git")));
+    assertTrue(
+        Files.isDirectory(root.resolve("third-wrapper").resolve(".git")),
+        "the project AFTER the failure is the one a fail-fast walk would lose");
+    assertFalse(Files.exists(root.resolve("never-served")));
+    assertTrue(
+        log.stream()
+            .anyMatch(
+                m ->
+                    m instanceof DaemonLog entry
+                        && "WARN".equals(entry.level())
+                        && entry.message().contains("never-served")),
+        "the failure is reported, not swallowed");
+  }
+
+  /** The volume outlives the container and may hold commits nobody pushed. */
+  @Test
+  void aProjectAlreadyOnTheVolumeIsNeverReCloned(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "first-wrapper");
+    Path root = Files.createDirectories(tmp.resolve("workspace"));
+    Files.createDirectories(root.resolve("first-wrapper"));
+    Files.writeString(root.resolve("first-wrapper", "unpushed.txt"), "work nobody pushed yet");
+    Env env = estateEnv(gitBase.toString(), "proj-1/first-wrapper");
+
+    assertEquals(
+        0,
+        Provisioner.cloneProjectWrappers(
+            root.toFile(),
+            gitBase.toString(),
+            env,
+            Provisioner.parseProjects(env.projects(), m -> {}),
+            m -> {}));
+    assertEquals(
+        "work nobody pushed yet", Files.readString(root.resolve("first-wrapper", "unpushed.txt")));
+  }
+
+  /**
+   * The container's own checkout is already at the root, so listing it must not produce a second
+   * copy of it one directory down.
+   */
+  @Test
+  void theContainersOwnProjectIsNotClonedASecondTime(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "my-repo");
+    servedWrapper(gitBase, "proj-2", "other-wrapper");
+    Path root = Files.createDirectories(tmp.resolve("workspace"));
+    Env env =
+        new Env(
+            "ws-1",
+            "repo-abc",
+            "",
+            "proj-1",
+            "my-repo",
+            gitBase.toString(),
+            "proj-1/my-repo,proj-2/other-wrapper");
+
+    Provisioner.cloneProjectWrappers(
+        root.toFile(),
+        gitBase.toString(),
+        env,
+        Provisioner.parseProjects(env.projects(), m -> {}),
+        m -> {});
+
+    assertFalse(Files.exists(root.resolve("my-repo")), "it IS the root");
+    assertTrue(Files.isDirectory(root.resolve("other-wrapper").resolve(".git")));
+  }
+
+  /**
+   * The host does nothing but await the terminal event, so a provision that cloned the estate has
+   * to end in one — and a project that failed is a warning, not the container's verdict.
+   */
+  @Test
+  void theTerminalEventIsEmittedWhenTheEstateIsProvisioned(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "first-wrapper");
+    Path root = tmp.resolve("workspace");
+    List<DaemonMessage> log = new ArrayList<>();
+
+    assertTrue(
+        Provisioner.provision(
+            root.toFile(),
+            estateEnv(gitBase.toString(), "proj-1/first-wrapper,proj-2/never-served"),
+            log::add));
+
+    assertTrue(
+        log.getLast() instanceof Provisioned provisioned
+            && "editor-1".equals(provisioned.workspaceId()),
+        "the terminal event is still the last thing said");
+    assertTrue(Files.isDirectory(root.resolve("first-wrapper").resolve(".git")));
+  }
+
+  /**
+   * And the other way: a container whose OWN clone failed still carries the estate, and still says
+   * exactly once what became of it.
+   */
+  @Test
+  void aFailedRootCloneStillCarriesTheEstateAndStillSaysSo(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-2", "other-wrapper");
+    Path root = tmp.resolve("workspace");
+    List<DaemonMessage> log = new ArrayList<>();
+
+    assertFalse(
+        Provisioner.provision(
+            root.toFile(),
+            new Env(
+                "ws-1",
+                "repo-abc",
+                "",
+                "proj-1",
+                "never-served",
+                gitBase.toString(),
+                "proj-2/other-wrapper"),
+            log::add));
+
+    assertTrue(log.getLast() instanceof ProvisionFailed, "one terminal event, either way");
+    assertTrue(
+        Files.isDirectory(root.resolve("other-wrapper").resolve(".git")),
+        "one broken checkout does not cost the container the estate");
+  }
+
+  /**
+   * A shared editor is created with no repository of its own, and {@code <gitBase>/} addresses
+   * nothing — so the root clone is skipped rather than attempted and reported as a failure. An
+   * ordinary workspace with no list keeps failing loudly, which is the misconfiguration it is.
+   */
+  @Test
+  void aContainerWithNoRepositoryOfItsOwnProvisionsTheProjectsOnly(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "first-wrapper");
+    Path root = tmp.resolve("workspace");
+
+    assertTrue(
+        Provisioner.provision(
+            root.toFile(), estateEnv(gitBase.toString(), "proj-1/first-wrapper"), m -> {}));
+    assertFalse(Files.exists(root.resolve(".git")), "nothing was cloned AT the root");
+
+    List<DaemonMessage> unaddressed = new ArrayList<>();
+    assertFalse(
+        Provisioner.provision(
+            tmp.resolve("other").toFile(), estateEnv(gitBase.toString(), ""), unaddressed::add));
+    assertTrue(unaddressed.getLast() instanceof ProvisionFailed);
+  }
+
+  @Test
+  void theProjectListIsReadAsTheSameTwoHalvesTheCloneUrlIsBuiltFrom() {
+    assertEquals(
+        List.of(new Provisioner.ProjectTarget("proj-1", "qits-qits")),
+        Provisioner.parseProjects("proj-1/qits-qits", m -> {}));
+    assertEquals(
+        2,
+        Provisioner.parseProjects("proj-1/qits-qits,  proj-2/acme-acme\n", m -> {}).size(),
+        "commas or whitespace, and the trailing separator is not an entry");
+    assertTrue(Provisioner.parseProjects("", m -> {}).isEmpty());
+    assertTrue(Provisioner.parseProjects(null, m -> {}).isEmpty());
+  }
+
+  /** Both halves reach a URL and a path, so an entry that could escape either is refused. */
+  @Test
+  void anEntryThatCouldEscapeTheRootOrReadAsAnOptionIsRefused() {
+    List<DaemonMessage> log = new ArrayList<>();
+
+    assertTrue(
+        Provisioner.parseProjects(
+                "no-slash,proj-1/,/qits-qits,../etc/passwd,proj-1/../../etc,-proj/-repo", log::add)
+            .isEmpty());
+    assertEquals(
+        6,
+        log.stream()
+            .filter(m -> m instanceof DaemonLog entry && "WARN".equals(entry.level()))
+            .count(),
+        "each refusal names its own entry");
   }
 
   @Test
