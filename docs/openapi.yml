@@ -1488,17 +1488,13 @@ components:
 
         The five a workspace container serves are `epic.chat`, `epic.agent`, `workspace.chat`,
         `workspace.agent`, and `ticket.dispatch` where a ticket dispatch cut the workspace; the
-        vocabulary is the platform's whole set, so the other four are accepted and simply never
-        sent here. `project.work` is the one front desk that replaces `project.epics` and
-        `project.tickets`; all three are listed while the estate turns over, and the two old keys
-        leave this enum when they leave `AgentSurface.KNOWN`.
+        vocabulary is the platform's whole set, so the other two — `project.work` and
+        `epic.autonomous` — are accepted by validation and simply never sent by this daemon.
 
         **The four human ones would send byte-identical requests without this field**, which is why
         it exists: `epic.chat` and `workspace.chat` differ only in which container the request
         reached, and nothing downstream could tell them apart.
       enum:
-        - project.epics
-        - project.tickets
         - project.work
         - epic.chat
         - epic.agent
