@@ -87,18 +87,19 @@ final class WorkspaceMcpServers implements AgentMcpServers {
           "mcp__repository__get_epic");
 
   /**
-   * The two ticket-thread writes of the {@code repository} MCP server — the one deliberate exception
-   * to "only reads are pre-approved", and kept in its own bucket rather than smuggled into the
-   * read-only list above so the exception has to be read to be taken.
+   * The comment-thread writes of the {@code repository} MCP server — the one deliberate exception to
+   * "only reads are pre-approved", and kept in its own bucket rather than smuggled into the read-only
+   * list above so the exception has to be read to be taken. Covers both the ticket-specific pair and
+   * the generic pair that comments on any work entity.
    *
    * <p>A workspace agent that investigated or fixed something should be able to say so on the
-   * ticket's thread without a prompt in the way. Commenting is additive — it appends to a thread
-   * rather than changing a ticket's state — and a comment stays editable, so pre-approving the pair
-   * costs at worst a wrongly-worded note, never a changed plan. Autonomous runs lose both anyway:
-   * the {@code agentReadOnly=true} marker puts qits-projects' own tool filter in front of every
-   * mutating tool, and this list cannot buy past it. For kimi the bucket is not a convenience at all
-   * — {@code enabledTools} is a hard set there, so a tool left out of it does not exist for the
-   * session, and without these two the thread is unreachable rather than prompted.
+   * entity's thread without a prompt in the way. Commenting is additive — it appends to a thread
+   * rather than changing an entity's state — and a comment stays editable, so pre-approving the four
+   * costs at worst a wrongly-worded note, never a changed plan. Autonomous runs lose all of them
+   * anyway: the {@code agentReadOnly=true} marker puts qits-projects' own tool filter in front of
+   * every mutating tool, and this list cannot buy past it. For kimi the bucket is not a convenience at
+   * all — {@code enabledTools} is a hard set there, so a tool left out of it does not exist for the
+   * session, and without these four the thread is unreachable rather than prompted.
    *
    * <p>What is deliberately absent is the filing half of the domain: {@code create_ticket} and
    * {@code update_ticket} stay unlisted like every other write on every server here. Filing a ticket
@@ -106,7 +107,11 @@ final class WorkspaceMcpServers implements AgentMcpServers {
    * out of reach for kimi; the projects-daemon front desk is the filing surface.
    */
   private static final List<String> TICKET_THREAD_TOOLS =
-      List.of("mcp__repository__add_ticket_comment", "mcp__repository__update_ticket_comment");
+      List.of(
+          "mcp__repository__add_ticket_comment",
+          "mcp__repository__update_ticket_comment",
+          "mcp__repository__add_comment",
+          "mcp__repository__update_comment");
 
   /**
    * {@code transition_ticket} — the second named exception, and it exists because of one caller.

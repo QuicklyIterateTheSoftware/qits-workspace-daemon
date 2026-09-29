@@ -229,8 +229,9 @@ says: a mutating tool is left out so Claude still prompts. Three named buckets b
 concatenated onto `READ_ONLY_REPOSITORY_TOOLS` wherever the `repository` server is wired, and each
 one's javadoc carries its own reasoning — which is why they are three buckets and not one list:
 
-- `TICKET_THREAD_TOOLS` (`add_ticket_comment`, `update_ticket_comment`) — commenting is additive and
-  a comment stays editable, so the worst case is a wrongly-worded note.
+- `TICKET_THREAD_TOOLS` (`add_ticket_comment`, `update_ticket_comment`, `add_comment`,
+  `update_comment`) — commenting is additive and a comment stays editable, so the worst case is a
+  wrongly-worded note.
 - `TICKET_RESOLUTION_TOOLS` (`transition_ticket`) — added 2026-09-08 for one caller. qits-projects'
   "Assign agent" tells the dispatched agent to resolve the ticket once its changes are released, and
   on the kimi path an unlisted tool does not exist, so without this the instruction is a dead letter
