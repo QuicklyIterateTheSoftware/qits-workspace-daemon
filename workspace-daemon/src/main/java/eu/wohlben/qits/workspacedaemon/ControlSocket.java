@@ -464,6 +464,12 @@ public class ControlSocket {
    */
   private volatile OriginSync originSync;
 
+  /**
+   * The live terminal and chat sessions {@link #wireCommands} spawns — held so {@link #stop} can
+   * terminate them ahead of everything else. See {@link #stopAgents} for why that ordering matters.
+   */
+  private volatile CommandRegistry commands;
+
   /** Timeout (seconds) for a single auto-push/incoming-pull git invocation. */
   private static final long GIT_SYNC_TIMEOUT_SECONDS = 300;
 
@@ -729,6 +735,7 @@ public class ControlSocket {
     CommandLifecycleService lifecycle =
         new CommandLifecycleService(store, () -> nudge(WorkspaceChangeTopic.COMMANDS));
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
+    commands = commandRegistry;
     CommandService commandService =
         new CommandService(
             store,
@@ -1280,6 +1287,8 @@ public class ControlSocket {
 
   @PreDestroy
   void stop() {
+    // Agents go first, before anything else is torn down — see stopAgents for why.
+    stopAgents(commands);
     ServiceSupervisor s = services;
     if (s != null) {
       s.close();
@@ -1316,6 +1325,30 @@ public class ControlSocket {
     WebSocketClient c = client;
     if (c != null) {
       c.close();
+    }
+  }
+
+  /**
+   * Terminate every live agent, ahead of everything else {@link #stop} tears down.
+   *
+   * <p>{@code claude --remote-control} archives its claude.ai session only on {@code SIGTERM}. Under
+   * tini (this container's PID 1) a plain {@code docker stop} reaches only this daemon: each agent
+   * is launched {@code setsid}'d into its own process group (see {@code CommandRegistry}'s javadoc),
+   * tini does not forward a signal to a group it did not start directly, and once this process exits
+   * the kernel {@code SIGKILL}s whatever is left in the container. {@link CommandRegistry#terminateAll}
+   * is this daemon's only chance to hand every live agent a {@code SIGTERM} at all, so it has to run
+   * before anything else — while the control socket, the network and the worker pool this method's
+   * caller is about to close are still up, which is what lets an agent's exit callback (the
+   * transcript sweep, the status update) report on its way out. Its grace ({@code termGraceMs},
+   * default 5s) has to leave room under docker's 10s stop budget for whatever {@link #stop} still
+   * does afterward — chiefly {@link EditorSupervisor#close}'s own stop grace (also 5s by default).
+   *
+   * <p>Package-private and static so it can be exercised without standing up the rest of {@link
+   * ControlSocket}.
+   */
+  static void stopAgents(CommandRegistry commands) {
+    if (commands != null) {
+      commands.terminateAll();
     }
   }
 }
