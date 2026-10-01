@@ -36,6 +36,7 @@ final class DaemonAgentDefaults implements AgentDefaults {
   private final Optional<String> refinementModel;
   private final AgentSurfaceConfigurations surfaces;
   private final Map<String, String> ambientFacts;
+  private final String entityId;
 
   DaemonAgentDefaults(
       Supplier<DaemonQitsConfig> config,
@@ -44,12 +45,31 @@ final class DaemonAgentDefaults implements AgentDefaults {
       Optional<String> refinementModel,
       AgentSurfaceConfigurations surfaces,
       Map<String, String> ambientFacts) {
+    this(
+        config,
+        daemonDefault,
+        activityTrackingDefault,
+        refinementModel,
+        surfaces,
+        ambientFacts,
+        null);
+  }
+
+  DaemonAgentDefaults(
+      Supplier<DaemonQitsConfig> config,
+      Optional<String> daemonDefault,
+      boolean activityTrackingDefault,
+      Optional<String> refinementModel,
+      AgentSurfaceConfigurations surfaces,
+      Map<String, String> ambientFacts,
+      String entityId) {
     this.config = config;
     this.daemonDefault = AgentType.parse(daemonDefault.orElse(null)).orElse(AgentType.CLAUDE);
     this.activityTrackingDefault = activityTrackingDefault;
     this.refinementModel = refinementModel;
     this.surfaces = surfaces == null ? AgentSurfaceConfigurations.shipped() : surfaces;
     this.ambientFacts = ambientFacts == null ? Map.of() : Map.copyOf(ambientFacts);
+    this.entityId = entityId == null ? "" : entityId.trim();
   }
 
   @Override
@@ -74,6 +94,28 @@ final class DaemonAgentDefaults implements AgentDefaults {
       return Optional.of(declared.refinementModel());
     }
     return refinementModel.filter(model -> !model.isBlank());
+  }
+
+  /**
+   * The qualified ticket or epic id ({@code <project-slug>-<number>}, e.g. {@code qits-614}) this
+   * container exists for — the <b>boot value</b>, injected as {@code
+   * QITS_WORKSPACE_DAEMON_ENTITY_ID} by the host that created the container (qits-workspaces-service
+   * for a workspace container, qits-projects-service for a refinement one) and held here for the
+   * life of the container, exactly like {@link #ambientFacts()}: a container keeps what it was born
+   * with, and nothing here goes looking for a later answer.
+   *
+   * <p>Empty for every container the host cannot name an entity for — an ad-hoc workspace, the web
+   * editor, or one created before the host started injecting this — in which case {@link
+   * AgentLaunchService} falls back to its older {@code qits <surface> <branch>} session name.
+   *
+   * <p>Deliberately <b>not</b> folded into {@link #ambientFacts()}: the ambient facts are prompt-
+   * template placeholders, a surface mirrored by hand in qits-projects-service's editor, and widening
+   * that list is a separate, reviewed change this is not making. This answers one specific caller —
+   * the Claude Remote Control session name — not a general-purpose fact.
+   */
+  @Override
+  public Optional<String> entityId() {
+    return entityId.isBlank() ? Optional.empty() : Optional.of(entityId);
   }
 
   /**

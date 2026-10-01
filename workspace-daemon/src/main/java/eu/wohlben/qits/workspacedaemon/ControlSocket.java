@@ -143,6 +143,13 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.branch")
   Optional<String> branchConfig;
 
+  // The qualified ticket/epic id (<project-slug>-<number>) this container was created for, injected
+  // by the host only when it is known — qits-workspaces for a workspace container, qits-projects for
+  // a refinement one. Absent for an ad-hoc workspace, the editor, or a container older than this.
+  // See DaemonAgentDefaults.entityId for why this is not folded into ambientFacts.
+  @ConfigProperty(name = "qits.workspace-daemon.entity-id")
+  Optional<String> entityIdConfig;
+
   @ConfigProperty(name = "qits.workspace-daemon.parent")
   Optional<String> parentConfig;
 
@@ -186,6 +193,7 @@ public class ControlSocket {
   private String workspaceId = "";
   private String repositoryId = "";
   private String branch = "";
+  private String entityId = "";
   private String parent = "";
   private String projectId = "";
   private String repoName = "";
@@ -509,6 +517,7 @@ public class ControlSocket {
     workspaceId = workspaceIdConfig.orElse("");
     repositoryId = repositoryIdConfig.orElse("");
     branch = branchConfig.orElse("");
+    entityId = entityIdConfig.orElse("");
     parent = parentConfig.orElse("");
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
@@ -755,7 +764,8 @@ public class ControlSocket {
             refinementModel,
             surfaceConfigurations,
             DaemonAgentDefaults.ambientFactsOf(
-                projectId, repoName, repositoryId, workspaceId, branch));
+                projectId, repoName, repositoryId, workspaceId, branch),
+            entityId);
     DaemonMcpEndpoints endpoints;
     try {
       endpoints =

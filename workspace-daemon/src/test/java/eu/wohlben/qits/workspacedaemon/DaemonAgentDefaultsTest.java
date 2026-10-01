@@ -2,9 +2,12 @@ package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.agents.AgentPromptTemplate;
+import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -87,5 +90,31 @@ class DaemonAgentDefaultsTest {
       assertEquals(
           true, AgentPromptTemplate.NAMES.contains(name), name + " is not a documented fact");
     }
+  }
+
+  private static DaemonAgentDefaults defaultsWithEntityId(String entityId) {
+    return new DaemonAgentDefaults(
+        () -> null,
+        Optional.empty(),
+        true,
+        Optional.empty(),
+        AgentSurfaceConfigurations.shipped(),
+        Map.of(),
+        entityId);
+  }
+
+  @Test
+  void theInjectedEntityIdIsAnsweredTrimmed() {
+    assertEquals(Optional.of("qits-614"), defaultsWithEntityId("  qits-614  ").entityId());
+  }
+
+  @Test
+  void aBlankEntityIdIsAbsentRatherThanAnEmptyValue() {
+    assertTrue(defaultsWithEntityId("   ").entityId().isEmpty());
+  }
+
+  @Test
+  void aNullEntityIdIsAbsent() {
+    assertTrue(defaultsWithEntityId(null).entityId().isEmpty());
   }
 }
