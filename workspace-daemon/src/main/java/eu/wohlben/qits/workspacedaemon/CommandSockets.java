@@ -137,8 +137,11 @@ final class CommandSockets {
       return;
     }
     switch (json.getString("type", "")) {
+      // personInput, not input: these are the person's keystrokes, and only theirs move the draft
+      // flag a live interactive rename waits on (AgentLaunchService.setEntity).
       case "data" ->
-          registry.input(commandId, json.getString("data", "").getBytes(StandardCharsets.UTF_8));
+          registry.personInput(
+              commandId, json.getString("data", "").getBytes(StandardCharsets.UTF_8));
       // The 80x24 fallbacks are the host socket's, and they are what a client that sends a resize
       // with a missing dimension gets rather than a zero-sized terminal.
       case "resize" ->

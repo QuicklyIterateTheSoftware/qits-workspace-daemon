@@ -601,8 +601,10 @@ paths:
         happens next. Then every live Claude chat this container's `AgentLaunchService` started with
         Remote Control on is renamed over its own stdin (`/rename`, answered locally by the harness,
         no model call); a session whose rename fails has ended and is dropped from the renameable
-        set. A Kimi chat and an interactive session are left alone and pick the marker up at their
-        next launch — see `AgentLaunchService.setBlocked` for why.
+        set. Interactive sessions are renamed as for `POST /agents/entity`. The title and status
+        stay what they were.
+
+        Superseded by `POST /agents/entity` and kept, unchanged, for a host that predates it.
       requestBody:
         required: true
         content:
@@ -616,6 +618,46 @@ paths:
               schema: { $ref: "#/components/schemas/AgentBlockedResult" }
         "400":
           description: A missing or non-boolean `blocked`, or an unparseable body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agents/entity:
+    post:
+      tags: [coding agents]
+      operationId: setAgentEntity
+      summary: Tell this container its entity's title, status and blocked flag; rename live sessions.
+      description: |
+        The successor of `POST /agents/blocked`, reached by the same two hosts the same way. A
+        session name is `[❗]<status square> <id> <title>`; the id is the container's boot value and
+        this call moves the other three facts, whole — a `title` or `status` that is null or absent
+        is cleared, not kept, and the name drops that fact.
+
+        The facts are stored first, so every launch from here on renders the new name. Every live
+        Claude Remote Control chat is renamed over its own stdin at once. A live interactive
+        `--remote-control` session is renamed by typing `/rename <name>` into its terminal — but
+        only when its hooks last reported IDLE and the person's browser terminal holds no unsent
+        draft; otherwise the name is queued and typed at the next safe moment. With activity
+        tracking off there is never such a moment, and the session takes the name at its next
+        launch. See `AgentLaunchService.setEntity`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentEntityRequest" }
+      responses:
+        "200":
+          description: The facts this call left standing, and how many live sessions carry the name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentEntityResult" }
+        "400":
+          description: |
+            A missing or non-boolean `blocked`, a `title` or `status` that is neither a string nor
+            null, or an unparseable body. Nothing is stored.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1660,6 +1702,46 @@ components:
         blocked:
           type: boolean
           description: The new marker. Stored before any session is renamed, so it is never stale.
+
+    AgentEntityRequest:
+      type: object
+      description: |
+        What this container's entity is now, whole. `blocked` is required and a JSON boolean;
+        `title` and `status` are each a string, or null/absent for "not known". Any other type is a
+        `400` rather than a coercion.
+      required: [blocked]
+      properties:
+        title:
+          type: [string, "null"]
+          description: The entity's title. Sanitised and truncated by the library when rendered.
+        status:
+          type: [string, "null"]
+          description: |
+            The entity's status word (e.g. `IMPLEMENTING`), passed through untouched. The library
+            picks the square it draws; a word it does not know draws none.
+        blocked:
+          type: boolean
+          description: Whether the entity is BLOCKED — the leading `❗`.
+
+    AgentEntityResult:
+      type: object
+      description: The facts this call stored, and how many live sessions carry the name they render.
+      required: [title, status, blocked, renamed]
+      properties:
+        title:
+          type: [string, "null"]
+          description: Echoes the request; present as null when not known, never omitted.
+        status:
+          type: [string, "null"]
+          description: Echoes the request; present as null when not known, never omitted.
+        blocked:
+          type: boolean
+          description: Echoes the request.
+        renamed:
+          type: integer
+          description: |
+            Live chats renamed now, plus live interactive sessions renamed now, queued for their
+            next idle moment, or already carrying the name. `0` is a normal answer and always present.
 
     AgentBlockedResult:
       type: object

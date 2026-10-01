@@ -151,12 +151,23 @@ public class ControlSocket {
   Optional<String> entityIdConfig;
 
   // Whether the entity above was BLOCKED when this container booted — the seed for
-  // AgentLaunchService's blocked flag, which POST /agents/blocked moves from then on. A primitive
+  // AgentLaunchService's blocked flag, which POST /agents/entity (or the older /agents/blocked)
+  // moves from then on. A primitive
   // boolean, unlike the identity values above: the SmallRye "empty default is no value" trap is a
   // String problem, and absent here is an ordinary, meaningful false (not-blocked), not a value to
   // distinguish from "unset".
   @ConfigProperty(name = "qits.workspace-daemon.entity-blocked", defaultValue = "false")
   boolean entityBlocked;
+
+  // The entity's title and status word when this container booted — the rest of the session name
+  // `[❗]<status square> <id> <title>`, seeded here and moved from then on by POST /agents/entity.
+  // Optional<String> for the same SmallRye reason as the identity values; absent for a container
+  // whose host does not inject them yet, which renders the id alone. See DaemonAgentDefaults.
+  @ConfigProperty(name = "qits.workspace-daemon.entity-title")
+  Optional<String> entityTitleConfig;
+
+  @ConfigProperty(name = "qits.workspace-daemon.entity-status")
+  Optional<String> entityStatusConfig;
 
   @ConfigProperty(name = "qits.workspace-daemon.parent")
   Optional<String> parentConfig;
@@ -202,6 +213,8 @@ public class ControlSocket {
   private String repositoryId = "";
   private String branch = "";
   private String entityId = "";
+  private String entityTitle = "";
+  private String entityStatus = "";
   private String parent = "";
   private String projectId = "";
   private String repoName = "";
@@ -444,6 +457,14 @@ public class ControlSocket {
   private volatile HookWebhook hooks;
 
   /**
+   * The launch service {@link #wireAgents} built, or null before it ran (or when the agent surface
+   * stayed unwired). {@link HookWebhook} is started before it exists, so the webhook is handed a
+   * listener that reads this field rather than the service itself — a hook that fires first is
+   * simply not forwarded, which {@code AgentLaunchService.onActivity} would ignore anyway.
+   */
+  private volatile AgentLaunchService agentLaunch;
+
+  /**
    * The reverse tunnel {@link WorkspaceApi} is reached through, now that it binds loopback and has
    * no address on {@code qits-net} at all.
    */
@@ -526,6 +547,8 @@ public class ControlSocket {
     repositoryId = repositoryIdConfig.orElse("");
     branch = branchConfig.orElse("");
     entityId = entityIdConfig.orElse("");
+    entityTitle = entityTitleConfig.orElse("");
+    entityStatus = entityStatusConfig.orElse("");
     parent = parentConfig.orElse("");
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
@@ -590,7 +613,7 @@ public class ControlSocket {
     // reconnect-adopted (already-provisioned) container, and SessionStart drives session-lineage
     // which must be captured regardless. Its frames buffer in pendingOutbound until the socket is
     // up.
-    hooks = new HookWebhook(vertx, hooksPort, this::send);
+    hooks = new HookWebhook(vertx, hooksPort, this::send, this::forwardActivity);
     hooks.start();
     // The web editor, on the same footing: independent of provisioning (it is a process, not a view
     // of the checkout) and silent when there is nothing to supervise. start() answering false is
@@ -774,7 +797,9 @@ public class ControlSocket {
             DaemonAgentDefaults.ambientFactsOf(
                 projectId, repoName, repositoryId, workspaceId, branch),
             entityId,
-            entityBlocked);
+            entityBlocked,
+            entityTitle,
+            entityStatus);
     DaemonMcpEndpoints endpoints;
     try {
       endpoints =
@@ -812,6 +837,7 @@ public class ControlSocket {
             context,
             claudeMount,
             hooksPort);
+    agentLaunch = launch;
     workspaceApi.wireAgents(
         launch,
         new AgentSessionQueryService(store, agentSessionStore),
@@ -824,6 +850,18 @@ public class ControlSocket {
     reportHarnessCapabilities(
         new HarnessCapabilityService(processes, authStatus, claudeMount, WORKSPACE_DIR.toPath()));
     LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
+  }
+
+  /**
+   * Hands an agent command's stored activity state to the launch service, which retries a queued
+   * interactive rename on {@code IDLE} and forgets the session on {@code ENDED}. A no-op until
+   * {@link #wireAgents} has run.
+   */
+  private void forwardActivity(String commandId, String state) {
+    AgentLaunchService launch = agentLaunch;
+    if (launch != null) {
+      launch.onActivity(commandId, state);
+    }
   }
 
   /**

@@ -3,6 +3,7 @@ package eu.wohlben.qits.workspacedaemon;
 import eu.wohlben.qits.agents.AgentSessionNodeDto;
 import eu.wohlben.qits.agents.AgentSubagentDto;
 import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.EntityFacts;
 import eu.wohlben.qits.agents.HarnessCapabilities;
 import eu.wohlben.qits.agents.InstalledPluginDto;
 import io.vertx.core.json.JsonArray;
@@ -161,6 +162,20 @@ final class AgentJson {
    */
   static JsonObject blocked(boolean blocked, int renamed) {
     return new JsonObject().put("blocked", blocked).put("renamed", renamed);
+  }
+
+  /**
+   * {@code POST /agents/entity} — the facts this call left standing, and how many live sessions
+   * will carry the name they render. {@code title} and {@code status} are always present, null when
+   * not known, so a caller reads "cleared" rather than "omitted"; {@code renamed} always present for
+   * the reason {@link #blocked} gives.
+   */
+  static JsonObject entity(EntityFacts facts, int renamed) {
+    return new JsonObject()
+        .put("title", facts.title())
+        .put("status", facts.status())
+        .put("blocked", facts.blocked())
+        .put("renamed", renamed);
   }
 
   /** {@code POST /prompt-refinements} — the rewritten prompt. */

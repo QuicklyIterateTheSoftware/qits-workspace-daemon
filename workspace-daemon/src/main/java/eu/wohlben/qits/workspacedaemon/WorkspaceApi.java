@@ -15,6 +15,7 @@ import eu.wohlben.qits.agents.AgentPluginService;
 import eu.wohlben.qits.agents.AgentSessionQueryService;
 import eu.wohlben.qits.agents.AgentSurface;
 import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.EntityFacts;
 import eu.wohlben.qits.agents.HarnessCapabilities;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.CommandService;
@@ -248,8 +249,9 @@ public class WorkspaceApi {
   static final String AGENTS_TURN_PATH = "/agents/turn";
 
   /**
-   * Marks the entity this container exists for as BLOCKED or not, and renames every live Claude
-   * Remote Control session to match — the daemon-side twin of {@code AgentLaunchService.setBlocked}.
+   * Marks the entity this container exists for as BLOCKED or not, and renames every live session
+   * that can be renamed to match — the daemon-side twin of {@code AgentLaunchService.setBlocked}.
+   * Superseded by {@link #AGENTS_ENTITY_PATH} and kept, unchanged, for a host that predates it.
    *
    * <p>Called by qits-workspaces-service for a workspace container and by qits-projects-service
    * through the refinement tunnel for a refinement one, the same way either reaches {@link
@@ -258,6 +260,15 @@ public class WorkspaceApi {
    * is the one that knows the entity changed state.
    */
   static final String AGENTS_BLOCKED_PATH = "/agents/blocked";
+
+  /**
+   * Tells this container what its entity is now — title, status, blocked — and renames every live
+   * session that can be renamed to the name those render ({@code [❗]<status square> <id> <title>}):
+   * the daemon-side twin of {@code AgentLaunchService.setEntity}. The successor of {@link
+   * #AGENTS_BLOCKED_PATH}, which carried the blocked flag alone and is still served for a host that
+   * predates this; reached by the same two hosts, the same way.
+   */
+  static final String AGENTS_ENTITY_PATH = "/agents/entity";
 
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
 
@@ -694,6 +705,7 @@ public class WorkspaceApi {
         || path.equals(AGENTS_SIGN_IN_PATH)
         || path.equals(AGENTS_TURN_PATH)
         || path.equals(AGENTS_BLOCKED_PATH)
+        || path.equals(AGENTS_ENTITY_PATH)
         || path.equals(AGENT_SESSIONS_PATH)
         || path.equals(AGENT_PLUGINS_PATH)
         || path.startsWith(AGENT_PLUGINS_PATH + "/")
@@ -781,6 +793,11 @@ public class WorkspaceApi {
       if (AGENTS_BLOCKED_PATH.equals(path)) {
         return method == HttpMethod.POST
             ? setBlocked(body)
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (AGENTS_ENTITY_PATH.equals(path)) {
+        return method == HttpMethod.POST
+            ? setEntity(body)
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       if (AGENT_SESSIONS_PATH.equals(path)) {
@@ -877,8 +894,8 @@ public class WorkspaceApi {
   }
 
   /**
-   * {@code POST /agents/blocked} — mark this container's entity BLOCKED or not, and rename every
-   * live Claude Remote Control session to match.
+   * {@code POST /agents/blocked} — mark this container's entity BLOCKED or not, keeping its title
+   * and status, and rename every live session that can be renamed to match.
    *
    * <p>{@code blocked} is required and must be a JSON boolean — a 400 for a missing or
    * mistyped field rather than a guess, the same discipline {@link #deliverTurn} applies to a blank
@@ -893,6 +910,36 @@ public class WorkspaceApi {
     }
     int renamed = agentLaunch.setBlocked(blocked);
     return new Reply(200, AgentJson.blocked(blocked, renamed));
+  }
+
+  /**
+   * {@code POST /agents/entity} — replace this container's entity facts and rename every live
+   * session to match.
+   *
+   * <p>{@code blocked} is required and a JSON boolean, as on {@link #setBlocked}. {@code title} and
+   * {@code status} are each a string, or null or absent for "not known" — which the session name
+   * renders by dropping that fact, not by keeping the old one: the body is the whole of what the
+   * host knows, so a field it omits is cleared. Any other type is a 400 rather than a coercion. The
+   * status word is passed through untouched; the library decides which square it draws, and an
+   * unknown word simply draws none. {@link AgentLaunchService#setEntity} answers how many sessions
+   * will carry the new name, echoed back with the facts it stored.
+   */
+  private Reply setEntity(String body) {
+    JsonObject json = jsonBody(body);
+    if (!(json.getValue("blocked") instanceof Boolean blocked)) {
+      return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
+    }
+    Object title = json.getValue("title");
+    if (title != null && !(title instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("title must be a string or null"));
+    }
+    Object status = json.getValue("status");
+    if (status != null && !(status instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("status must be a string or null"));
+    }
+    EntityFacts facts = new EntityFacts((String) title, (String) status, blocked);
+    int renamed = agentLaunch.setEntity(facts);
+    return new Reply(200, AgentJson.entity(facts, renamed));
   }
 
   /**

@@ -10,6 +10,7 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.jboss.logging.Logger;
 
@@ -32,6 +33,13 @@ import org.jboss.logging.Logger;
  * also fires when Claude pauses to ask the user — so a {@code Stop} arriving while the stored state
  * is {@code WAITING} (a preceding {@code Notification}) is dropped, keeping the permission-prompt
  * signal.
+ *
+ * <p>Every hook that maps to a state also hands the state this <em>stores</em> — not the one the
+ * event maps to — to the activity listener ({@code AgentLaunchService.onActivity}), which types a
+ * queued interactive rename only on {@code IDLE}. Stored, because a dropped {@code Stop} during a
+ * permission prompt forwarded as {@code IDLE} would type {@code /rename} into the dialog: that Stop
+ * forwards {@code WAITING} again. {@code SessionEnd} forwards {@code ENDED}. A listener that throws
+ * is logged and swallowed — the hook still gets its {@code 200}, and the relay home still happens.
  */
 final class HookWebhook {
 
@@ -42,6 +50,7 @@ final class HookWebhook {
   private final Vertx vertx;
   private final int port;
   private final Consumer<DaemonMessage> send;
+  private final BiConsumer<String, String> activity;
 
   /** Last activity per qits command id; replayed by {@link #reportCurrent()}, evicted on end. */
   private final Map<String, AgentActivity> lastByCommand = new ConcurrentHashMap<>();
@@ -49,9 +58,19 @@ final class HookWebhook {
   private volatile HttpServer server;
 
   HookWebhook(Vertx vertx, int port, Consumer<DaemonMessage> send) {
+    this(vertx, port, send, null);
+  }
+
+  /**
+   * @param activity told {@code (commandId, storedState)} after every stored state change, or null
+   *     for none
+   */
+  HookWebhook(
+      Vertx vertx, int port, Consumer<DaemonMessage> send, BiConsumer<String, String> activity) {
     this.vertx = vertx;
     this.port = port;
     this.send = send;
+    this.activity = activity;
   }
 
   void start() {
@@ -96,6 +115,7 @@ final class HookWebhook {
     // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins).
     AgentActivity current = lastByCommand.get(commandId);
     if ("Stop".equals(hookEvent) && current != null && AgentState.WAITING.equals(current.state())) {
+      forward(commandId, current.state());
       return;
     }
     AgentActivity activity =
@@ -113,6 +133,19 @@ final class HookWebhook {
       lastByCommand.put(commandId, activity);
     }
     send.accept(activity);
+    forward(commandId, state);
+  }
+
+  /** Tells the activity listener the stored state, never letting it fail the hook. */
+  private void forward(String commandId, String state) {
+    if (activity == null) {
+      return;
+    }
+    try {
+      activity.accept(commandId, state);
+    } catch (RuntimeException e) {
+      LOG.warnf(e, "workspace-daemon activity listener failed for command %s", commandId);
+    }
   }
 
   /** Re-send the last known activity for every still-tracked command (reconnect adoption). */
