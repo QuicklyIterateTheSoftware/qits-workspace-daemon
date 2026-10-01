@@ -585,6 +585,44 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
+  /agents/blocked:
+    post:
+      tags: [coding agents]
+      operationId: setAgentBlocked
+      summary: Mark this container's entity BLOCKED or not, and rename live sessions to match.
+      description: |
+        The daemon-side twin of `POST /agents/turn`: qits-workspaces-service (a workspace container)
+        and qits-projects-service, through the refinement tunnel (a refinement container), call this
+        the same way either reaches `/agents/turn`, because this container is the only place that
+        holds the stdin channel a Claude Remote Control rename travels over — the host knows the
+        entity changed state, but cannot act on it itself.
+
+        The flag is stored first, so every launch from here on renders the new session name whatever
+        happens next. Then every live Claude chat this container's `AgentLaunchService` started with
+        Remote Control on is renamed over its own stdin (`/rename`, answered locally by the harness,
+        no model call); a session whose rename fails has ended and is dropped from the renameable
+        set. A Kimi chat and an interactive session are left alone and pick the marker up at their
+        next launch — see `AgentLaunchService.setBlocked` for why.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentBlockedRequest" }
+      responses:
+        "200":
+          description: The marker this call left standing, and how many live sessions it renamed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentBlockedResult" }
+        "400":
+          description: A missing or non-boolean `blocked`, or an unparseable body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
   /agents/available:
     get:
       tags: [coding agents]
@@ -1611,6 +1649,34 @@ components:
             contract** — do not match on it. This route answers one absence, so there is no
             discriminator yet; a second reason gets an `error` key beside it rather than a second
             sentence to match.
+
+    AgentBlockedRequest:
+      type: object
+      description: |
+        Whether this container's entity is BLOCKED, whole. Required and must be a JSON boolean — a
+        `400` for a missing or mistyped field rather than guessing which state was meant.
+      required: [blocked]
+      properties:
+        blocked:
+          type: boolean
+          description: The new marker. Stored before any session is renamed, so it is never stale.
+
+    AgentBlockedResult:
+      type: object
+      description: |
+        The marker this call left standing, and how many live Claude Remote Control sessions it
+        renamed to match.
+      required: [blocked, renamed]
+      properties:
+        blocked:
+          type: boolean
+          description: Echoes the request — what every launch from here on renders.
+        renamed:
+          type: integer
+          description: |
+            How many live sessions were renamed in place. `0` is a normal answer (nothing was
+            running yet, or nothing was renameable) and is always present, never omitted, so a
+            caller can tell "nothing to rename" from "the rename failed".
 
     NotSignedIn:
       type: object

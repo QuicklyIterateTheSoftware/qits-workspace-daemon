@@ -153,6 +153,16 @@ final class AgentJson {
     return json;
   }
 
+  /**
+   * {@code POST /agents/blocked} — the marker this call left standing, and how many live sessions it
+   * renamed to match. {@code renamed} is always present, including {@code 0}: a caller that just
+   * blocked an entity with nothing running yet needs to tell "nothing to rename" from "the rename
+   * failed", and an omitted count would read as the latter.
+   */
+  static JsonObject blocked(boolean blocked, int renamed) {
+    return new JsonObject().put("blocked", blocked).put("renamed", renamed);
+  }
+
   /** {@code POST /prompt-refinements} — the rewritten prompt. */
   static JsonObject refinement(String prompt) {
     return new JsonObject().put("prompt", prompt);

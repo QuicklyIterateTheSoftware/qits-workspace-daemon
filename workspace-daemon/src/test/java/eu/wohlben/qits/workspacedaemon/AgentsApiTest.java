@@ -1021,6 +1021,36 @@ class AgentsApiTest {
     assertEquals(405, get("/agents/turn").status());
   }
 
+  @Test
+  void settingBlockedCallsSetBlockedAndAnswersTheRenamedCount() throws Exception {
+    // No live Claude Remote Control session is standing, so the real AgentLaunchService.setBlocked
+    // has nothing to rename — proving the route reaches it and relays the count, which is 0 here and
+    // would be the harness library's own count with one running. The rename mechanics themselves are
+    // proven in that library's suite, not duplicated here.
+    Answer answer = post("/agents/blocked", new JsonObject().put("blocked", true));
+
+    assertEquals(200, answer.status());
+    assertEquals(true, answer.body().getBoolean("blocked"));
+    assertEquals(0, answer.body().getInteger("renamed"));
+    assertTrue(launch.blocked());
+
+    Answer unblocked = post("/agents/blocked", new JsonObject().put("blocked", false));
+    assertEquals(200, unblocked.status());
+    assertEquals(false, unblocked.body().getBoolean("blocked"));
+    assertFalse(launch.blocked());
+  }
+
+  @Test
+  void aMissingOrNonBooleanBlockedFieldIsAFourHundred() throws Exception {
+    assertEquals(400, post("/agents/blocked", new JsonObject()).status());
+    assertEquals(400, post("/agents/blocked", new JsonObject().put("blocked", "true")).status());
+  }
+
+  @Test
+  void theBlockedRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
+    assertEquals(405, get("/agents/blocked").status());
+  }
+
   /**
    * A running chat command whose protocol records the turns it is asked to send. A fake rather than
    * the real {@code StreamJsonChatProtocol}: what is under test is which arm the route takes, and
