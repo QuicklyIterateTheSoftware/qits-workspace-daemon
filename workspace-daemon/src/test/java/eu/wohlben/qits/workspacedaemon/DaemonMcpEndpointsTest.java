@@ -19,12 +19,15 @@ class DaemonMcpEndpointsTest {
   private static final String DIAL_HOME = "ws://qits:8080/workspaces/daemon/ws-1";
 
   private static DaemonMcpEndpoints endpoints(
-      Optional<String> actions, Optional<String> repository, Optional<String> observability) {
-    return new DaemonMcpEndpoints(DIAL_HOME, PROJECT, actions, repository, observability);
+      Optional<String> actions,
+      Optional<String> repository,
+      Optional<String> observability,
+      Optional<String> platform) {
+    return new DaemonMcpEndpoints(DIAL_HOME, PROJECT, actions, repository, observability, platform);
   }
 
   private static DaemonMcpEndpoints derived() {
-    return endpoints(Optional.empty(), Optional.empty(), Optional.empty());
+    return endpoints(Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
   }
 
   @Test
@@ -66,19 +69,56 @@ class DaemonMcpEndpointsTest {
         endpoints(
             Optional.of("http://elsewhere/actions/mcp"),
             Optional.of("http://qits-projects:8080/projects/mcp"),
-            Optional.of("http://qits-observability:8080/observability/mcp"));
+            Optional.of("http://qits-observability:8080/observability/mcp"),
+            Optional.of("http://qits-platform-access-mcp-service:8080/mcp"));
 
     assertEquals("http://elsewhere/actions/mcp", configured.mcpUrl("actions"));
     assertEquals("http://qits-projects:8080/projects/mcp", configured.mcpUrl("repository"));
     assertEquals(
         "http://qits-observability:8080/observability/mcp", configured.mcpUrl("observability"));
+    assertEquals(
+        "http://qits-platform-access-mcp-service:8080/mcp", configured.mcpUrl("qits"));
   }
 
   @Test
   void aBlankOverrideIsNoOverride() {
     assertEquals(
         "http://qits:8080/projects/mcp",
-        endpoints(Optional.empty(), Optional.of("   "), Optional.empty()).mcpUrl("repository"));
+        endpoints(Optional.empty(), Optional.of("   "), Optional.empty(), Optional.empty())
+            .mcpUrl("repository"));
+  }
+
+  @Test
+  void theQitsServerHasNoDerivableAddressAndSaysSo() {
+    InvalidCommandRequestException e =
+        assertThrows(InvalidCommandRequestException.class, () -> derived().mcpUrl("qits"));
+
+    assertTrue(e.getMessage().contains("qits.platform-mcp.url"), e.getMessage());
+  }
+
+  @Test
+  void platformUrlAnswersEmptyRatherThanThrowingWhenUnconfigured() {
+    assertEquals(Optional.empty(), derived().platformUrl());
+  }
+
+  @Test
+  void platformUrlAnswersTheConfiguredValue() {
+    assertEquals(
+        Optional.of("http://qits-platform-access-mcp-service:8080/mcp"),
+        endpoints(
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of("http://qits-platform-access-mcp-service:8080/mcp"))
+            .platformUrl());
+  }
+
+  @Test
+  void aBlankPlatformOverrideAnswersEmptyLikeAnyOtherOverride() {
+    assertEquals(
+        Optional.empty(),
+        endpoints(Optional.empty(), Optional.empty(), Optional.empty(), Optional.of("   "))
+            .platformUrl());
   }
 
   @Test

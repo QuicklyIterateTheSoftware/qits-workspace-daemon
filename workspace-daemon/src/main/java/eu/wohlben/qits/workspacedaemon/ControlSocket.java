@@ -353,6 +353,17 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.observability-mcp.url")
   Optional<String> observabilityMcpUrl;
 
+  /**
+   * The central platform-access MCP server's base url (qits-630) — a wholly separate service from
+   * qits-workspaces, so unlike {@code repository}/{@code observability} there is no derivable
+   * fallback. Optional like {@code qits.actions-mcp.url}, but unlike it this server is attached by
+   * default on every surface the agent configuration document carries, so an unset value must not
+   * refuse every launch — see {@code DaemonMcpEndpoints.platformUrl()} and {@code
+   * WorkspaceMcpServers}.
+   */
+  @ConfigProperty(name = "qits.platform-mcp.url")
+  Optional<String> platformMcpUrl;
+
   @ConfigProperty(name = "qits.workspace-daemon.auto-push-enabled", defaultValue = "true")
   boolean autoPushEnabled;
 
@@ -811,7 +822,12 @@ public class ControlSocket {
     try {
       endpoints =
           new DaemonMcpEndpoints(
-              url.orElse(null), projectId, actionsMcpUrl, repositoryMcpUrl, observabilityMcpUrl);
+              url.orElse(null),
+              projectId,
+              actionsMcpUrl,
+              repositoryMcpUrl,
+              observabilityMcpUrl,
+              platformMcpUrl);
     } catch (IllegalStateException e) {
       LOG.warnf("Coding agents stay unwired: %s", e.getMessage());
       return;
@@ -840,7 +856,7 @@ public class ControlSocket {
             // The scope→server mapping is this daemon's, not the library's: the projects daemon
             // attaches one server and this one attaches three, with different narrowing and
             // different pre-approval. See WorkspaceMcpServers.
-            new WorkspaceMcpServers(endpoints, repositoryId, workspaceId),
+            new WorkspaceMcpServers(endpoints, repositoryId, workspaceId, endpoints.platformUrl()),
             context,
             claudeMount,
             hooksPort);

@@ -189,14 +189,39 @@ final class WorkspaceMcpServers implements AgentMcpServers {
           "mcp__observability__telemetrySearchLogs",
           "mcp__observability__telemetryMetrics");
 
+  /**
+   * {@link #PLATFORM_KEY}'s pre-approval list — empty, deliberately. The library pre-approves the
+   * whole server on Claude itself ({@code AgentLaunchService.QITS_PRE_APPROVED_TOOLS}, {@code
+   * mcp__qits__*}) because the caller's own bearer already decides what a tool call may do, so an
+   * empty list here reads as "the shipped one" the same way it does for every other server — see
+   * {@code AgentLaunchService#attachedServers}'s javadoc on an empty pre-approval list.
+   */
+  private static final List<String> PLATFORM_TOOLS = List.of();
+
+  /** The key the central platform-access MCP server attaches under — see {@code QITS_MCP_KEY}. */
+  private static final String PLATFORM_KEY = "qits";
+
   private final McpEndpoints endpoints;
   private final String repoId;
   private final String workspaceId;
 
-  WorkspaceMcpServers(McpEndpoints endpoints, String repoId, String workspaceId) {
+  /**
+   * The central platform-access server's url, or empty when {@code qits.platform-mcp.url} is not
+   * configured. Carried directly rather than fetched through {@link McpEndpoints#mcpUrl}, because
+   * that method refuses a server it cannot address — the right answer for {@code actions}, which a
+   * document attaches only by an operator's deliberate choice, but wrong here: the document turns
+   * {@code qits} on for every surface by default, so a container whose host has not deployed or
+   * configured the central server yet must simply not offer it, not refuse every launch that would
+   * otherwise attach it. See {@code DaemonMcpEndpoints.platformUrl()}.
+   */
+  private final Optional<String> platformMcpUrl;
+
+  WorkspaceMcpServers(
+      McpEndpoints endpoints, String repoId, String workspaceId, Optional<String> platformMcpUrl) {
     this.endpoints = endpoints;
     this.repoId = repoId;
     this.workspaceId = workspaceId;
+    this.platformMcpUrl = platformMcpUrl == null ? Optional.empty() : platformMcpUrl;
   }
 
   @Override
@@ -316,6 +341,16 @@ final class WorkspaceMcpServers implements AgentMcpServers {
                   "actions",
                   narrowedUrl("actions", refuseProject(narrowing, "actions")),
                   READ_ONLY_ACTION_TOOLS));
+      // The central platform-access server (qits-630). Present exactly when
+      // qits.platform-mcp.url is configured — absent, not refused, otherwise (see
+      // platformMcpUrl's javadoc) — on every surface and scope alike: the document turns it on
+      // everywhere, so this is the one place "the surface has it on" is actually decided, the
+      // same seam every other built-in attaches through. No query parameters: the session is
+      // scoped by its own bearer on every call, not by the url (unlike the other three, narrowing
+      // is silently irrelevant here rather than refused — a document has no reason to ask for it,
+      // since the editor offers no narrowing checkbox for a server with nothing to narrow).
+      case PLATFORM_KEY ->
+          platformMcpUrl.map(url -> new ScopedMcp(PLATFORM_KEY, url, PLATFORM_TOOLS));
       default -> Optional.empty();
     };
   }

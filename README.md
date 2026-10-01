@@ -248,6 +248,7 @@ Four different services, on four hosts on `qits-net`. Every address follows
 | MCP `repository` | `/projects/mcp` | qits-projects | `qits.repository-mcp.url` if set, else **derived** |
 | MCP `observability` | `/observability/mcp` | qits-observability | `qits.observability-mcp.url` if set, else **derived** |
 | MCP `actions` | — | nobody | `qits.actions-mcp.url` only; unset ⇒ an ACTIONS launch fails saying so |
+| MCP `qits` | `/mcp` | qits-platform-access-mcp-service | `qits.platform-mcp.url` only; unset ⇒ `WorkspaceMcpServers` omits it rather than failing the launch (qits-630) |
 
 **"Derived" means the authority of the control-socket url, and that is an assumption.** It is only
 right where one authority routes every segment — i.e. where the daemon was handed the gateway. So
