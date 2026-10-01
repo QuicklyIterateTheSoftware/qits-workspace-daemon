@@ -149,4 +149,41 @@ class DaemonAgentDefaultsTest {
     assertFalse(sixArg.entityBlocked());
     assertFalse(defaultsWithEntityId("qits-614").entityBlocked());
   }
+
+  private static DaemonAgentDefaults defaultsWithTitleAndStatus(String title, String status) {
+    return new DaemonAgentDefaults(
+        () -> null,
+        Optional.empty(),
+        true,
+        Optional.empty(),
+        AgentSurfaceConfigurations.shipped(),
+        Map.of(),
+        "qits-617",
+        false,
+        title,
+        status);
+  }
+
+  @Test
+  void theInjectedTitleAndStatusAreAnsweredTrimmed() {
+    DaemonAgentDefaults defaults =
+        defaultsWithTitleAndStatus("  Session names carry status  ", " IMPLEMENTING ");
+    assertEquals(Optional.of("Session names carry status"), defaults.entityTitle());
+    assertEquals(Optional.of("IMPLEMENTING"), defaults.entityStatus());
+  }
+
+  @Test
+  void aBlankOrNullTitleAndStatusAreAbsent() {
+    assertTrue(defaultsWithTitleAndStatus("   ", "  ").entityTitle().isEmpty());
+    assertTrue(defaultsWithTitleAndStatus("   ", "  ").entityStatus().isEmpty());
+    assertTrue(defaultsWithTitleAndStatus(null, null).entityTitle().isEmpty());
+    assertTrue(defaultsWithTitleAndStatus(null, null).entityStatus().isEmpty());
+  }
+
+  @Test
+  void theShorterConstructorsLeaveTitleAndStatusAbsent() {
+    assertTrue(defaultsWithEntityBlocked(true).entityTitle().isEmpty());
+    assertTrue(defaultsWithEntityBlocked(true).entityStatus().isEmpty());
+    assertTrue(defaultsWithEntityId("qits-614").entityTitle().isEmpty());
+  }
 }

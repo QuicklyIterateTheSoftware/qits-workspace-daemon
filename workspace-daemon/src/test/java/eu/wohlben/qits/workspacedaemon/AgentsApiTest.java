@@ -18,6 +18,7 @@ import eu.wohlben.qits.agents.AgentTranscriptService;
 import eu.wohlben.qits.agents.AgentTranscriptTailService;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.CommandsAgentCommands;
+import eu.wohlben.qits.agents.EntityFacts;
 import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
@@ -1049,6 +1050,73 @@ class AgentsApiTest {
   @Test
   void theBlockedRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
     assertEquals(405, get("/agents/blocked").status());
+  }
+
+  @Test
+  void settingTheEntityCallsSetEntityAndAnswersTheFactsAndTheRenamedCount() throws Exception {
+    // As with /agents/blocked: nothing live to rename, so the count is the real library's 0 and what
+    // is proven here is that the route reaches setEntity with exactly the facts it was sent.
+    Answer answer =
+        post(
+            "/agents/entity",
+            new JsonObject()
+                .put("title", "Session names carry status")
+                .put("status", "IMPLEMENTING")
+                .put("blocked", true));
+
+    assertEquals(200, answer.status());
+    assertEquals("Session names carry status", answer.body().getString("title"));
+    assertEquals("IMPLEMENTING", answer.body().getString("status"));
+    assertEquals(true, answer.body().getBoolean("blocked"));
+    assertEquals(0, answer.body().getInteger("renamed"));
+    assertEquals(
+        new EntityFacts("Session names carry status", "IMPLEMENTING", true), launch.entity());
+
+    // Null and absent both clear — the body is the whole of what the host knows — and the answer
+    // still names both fields, as null.
+    Answer cleared =
+        post("/agents/entity", new JsonObject().putNull("title").put("blocked", false));
+    assertEquals(200, cleared.status());
+    assertTrue(cleared.body().containsKey("title"));
+    assertTrue(cleared.body().containsKey("status"));
+    assertNull(cleared.body().getString("title"));
+    assertNull(cleared.body().getString("status"));
+    assertEquals(new EntityFacts(null, null, false), launch.entity());
+  }
+
+  @Test
+  void aMistypedEntityBodyIsAFourHundredAndMovesNothing() throws Exception {
+    post("/agents/entity", new JsonObject().put("title", "kept").put("blocked", false));
+
+    assertEquals(400, post("/agents/entity", new JsonObject().put("title", "t")).status());
+    assertEquals(
+        400, post("/agents/entity", new JsonObject().put("blocked", "true")).status());
+    assertEquals(
+        400,
+        post("/agents/entity", new JsonObject().put("title", 7).put("blocked", true)).status());
+    assertEquals(
+        400,
+        post("/agents/entity", new JsonObject().put("status", false).put("blocked", true))
+            .status());
+
+    assertEquals(new EntityFacts("kept", null, false), launch.entity());
+  }
+
+  @Test
+  void theEntityRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
+    assertEquals(405, get("/agents/entity").status());
+  }
+
+  @Test
+  void theOlderBlockedRouteMovesOnlyTheFlagAndKeepsTheTitleAndStatus() throws Exception {
+    post(
+        "/agents/entity",
+        new JsonObject().put("title", "A title").put("status", "REFINED").put("blocked", false));
+
+    Answer answer = post("/agents/blocked", new JsonObject().put("blocked", true));
+
+    assertEquals(200, answer.status());
+    assertEquals(new EntityFacts("A title", "REFINED", true), launch.entity());
   }
 
   /**

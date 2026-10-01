@@ -20,7 +20,12 @@ import org.junit.jupiter.api.Test;
 class HookWebhookTest {
 
   private final List<DaemonMessage> sent = new ArrayList<>();
-  private final HookWebhook webhook = new HookWebhook(null, 13337, sent::add);
+
+  /** What the activity listener ({@code AgentLaunchService.onActivity} in production) was told. */
+  private final List<String> forwarded = new ArrayList<>();
+
+  private final HookWebhook webhook =
+      new HookWebhook(null, 13337, sent::add, (id, state) -> forwarded.add(id + "=" + state));
 
   private AgentActivity lastSent() {
     return (AgentActivity) sent.get(sent.size() - 1);
@@ -103,5 +108,49 @@ class HookWebhookTest {
     sent.clear();
     webhook.reportCurrent();
     assertTrue(sent.isEmpty());
+  }
+
+  @Test
+  void sessionStartAndStopForwardIdleToTheActivityListener() {
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+    webhook.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+
+    assertEquals(List.of("cmd-1=IDLE", "cmd-1=BUSY", "cmd-1=IDLE", "cmd-1=ENDED"), forwarded);
+  }
+
+  @Test
+  void aStopWhileWaitingForwardsTheStoredWaitingNotTheEventsIdle() {
+    // The whole point of forwarding the stored state: IDLE here would let a queued /rename be typed
+    // into the open permission dialog, whose first keystroke answers it.
+    webhook.handle("Notification", payload("Notification"), "cmd-1");
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+
+    assertEquals(List.of("cmd-1=WAITING", "cmd-1=WAITING"), forwarded);
+  }
+
+  @Test
+  void droppedEventsForwardNothing() {
+    webhook.handle("PreToolUse", payload("PreToolUse"), "cmd-1");
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), null);
+
+    assertTrue(forwarded.isEmpty());
+  }
+
+  @Test
+  void aThrowingListenerNeitherEscapesNorStopsTheRelayHome() {
+    HookWebhook throwing =
+        new HookWebhook(
+            null,
+            13337,
+            sent::add,
+            (id, state) -> {
+              throw new IllegalStateException("boom");
+            });
+
+    throwing.handle("SessionStart", payload("SessionStart"), "cmd-1");
+
+    assertEquals(AgentState.IDLE, lastSent().state());
   }
 }

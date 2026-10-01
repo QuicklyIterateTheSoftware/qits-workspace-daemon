@@ -38,6 +38,8 @@ final class DaemonAgentDefaults implements AgentDefaults {
   private final Map<String, String> ambientFacts;
   private final String entityId;
   private final boolean entityBlocked;
+  private final String entityTitle;
+  private final String entityStatus;
 
   DaemonAgentDefaults(
       Supplier<DaemonQitsConfig> config,
@@ -84,6 +86,30 @@ final class DaemonAgentDefaults implements AgentDefaults {
       Map<String, String> ambientFacts,
       String entityId,
       boolean entityBlocked) {
+    this(
+        config,
+        daemonDefault,
+        activityTrackingDefault,
+        refinementModel,
+        surfaces,
+        ambientFacts,
+        entityId,
+        entityBlocked,
+        null,
+        null);
+  }
+
+  DaemonAgentDefaults(
+      Supplier<DaemonQitsConfig> config,
+      Optional<String> daemonDefault,
+      boolean activityTrackingDefault,
+      Optional<String> refinementModel,
+      AgentSurfaceConfigurations surfaces,
+      Map<String, String> ambientFacts,
+      String entityId,
+      boolean entityBlocked,
+      String entityTitle,
+      String entityStatus) {
     this.config = config;
     this.daemonDefault = AgentType.parse(daemonDefault.orElse(null)).orElse(AgentType.CLAUDE);
     this.activityTrackingDefault = activityTrackingDefault;
@@ -92,6 +118,8 @@ final class DaemonAgentDefaults implements AgentDefaults {
     this.ambientFacts = ambientFacts == null ? Map.of() : Map.copyOf(ambientFacts);
     this.entityId = entityId == null ? "" : entityId.trim();
     this.entityBlocked = entityBlocked;
+    this.entityTitle = entityTitle == null ? "" : entityTitle.trim();
+    this.entityStatus = entityStatus == null ? "" : entityStatus.trim();
   }
 
   @Override
@@ -128,7 +156,9 @@ final class DaemonAgentDefaults implements AgentDefaults {
    *
    * <p>Empty for every container the host cannot name an entity for — an ad-hoc workspace, the web
    * editor, or one created before the host started injecting this — in which case {@link
-   * AgentLaunchService} falls back to its older {@code qits <surface> <branch>} session name.
+   * AgentLaunchService} falls back to its older {@code qits <surface> <branch>} session name. Present,
+   * it heads the name {@code [❗]<status square> <id> <title>}, with {@link #entityTitle()} and
+   * {@link #entityStatus()} supplying the rest.
    *
    * <p>Deliberately <b>not</b> folded into {@link #ambientFacts()}: the ambient facts are prompt-
    * template placeholders, a surface mirrored by hand in qits-projects-service's editor, and widening
@@ -142,8 +172,8 @@ final class DaemonAgentDefaults implements AgentDefaults {
 
   /**
    * Whether {@link #entityId()} was BLOCKED when this container booted — the boot-time seed for
-   * {@code AgentLaunchService}'s blocked flag, which {@code POST /agents/blocked} moves from then on
-   * through {@code AgentLaunchService.setBlocked}. Read here only once, at construction, exactly
+   * {@code AgentLaunchService}'s blocked flag, which {@code POST /agents/entity} (or the older
+   * {@code POST /agents/blocked}) moves from then on through {@code AgentLaunchService.setEntity}. Read here only once, at construction, exactly
    * like {@link #entityId()}: a daemon that restarts inside a container created for an
    * already-blocked ticket needs the marker back without anybody blocking the ticket again, which a
    * default of {@code false} could not give it.
@@ -155,6 +185,29 @@ final class DaemonAgentDefaults implements AgentDefaults {
   @Override
   public boolean entityBlocked() {
     return entityBlocked;
+  }
+
+  /**
+   * The title of {@link #entityId()} when this container booted — the boot-time seed for the title
+   * half of {@code AgentLaunchService}'s entity facts, which a session name ({@code [❗]<status
+   * square> <id> <title>}) is rendered from. Injected as {@code QITS_WORKSPACE_DAEMON_ENTITY_TITLE}
+   * and held for the life of the container like {@link #entityId()}; a rename of the ticket after
+   * boot arrives through {@code POST /agents/entity}, never by re-reading this. Blank is absent.
+   */
+  @Override
+  public Optional<String> entityTitle() {
+    return entityTitle.isBlank() ? Optional.empty() : Optional.of(entityTitle);
+  }
+
+  /**
+   * The status word of {@link #entityId()} when this container booted (e.g. {@code IMPLEMENTING}) —
+   * the seed for the status square in a session name, moved from then on by {@code POST
+   * /agents/entity}. Injected as {@code QITS_WORKSPACE_DAEMON_ENTITY_STATUS}; the daemon passes the
+   * word through untouched and the library decides which square it draws. Blank is absent.
+   */
+  @Override
+  public Optional<String> entityStatus() {
+    return entityStatus.isBlank() ? Optional.empty() : Optional.of(entityStatus);
   }
 
   /**

@@ -57,6 +57,7 @@ class CommandSocketsTest {
   private WorkspaceApi api;
   private int port;
   private CommandService commands;
+  private CommandRegistry registry;
 
   private static final WorkspaceContext WORKSPACE =
       new WorkspaceContext() {
@@ -99,7 +100,7 @@ class CommandSocketsTest {
     api = new WorkspaceApi();
     api.vertx = vertx;
     CommandStore store = new CommandStore();
-    CommandRegistry registry = new CommandRegistry(root, 2_000);
+    registry = new CommandRegistry(root, 2_000);
     commands =
         new CommandService(
             store,
@@ -159,6 +160,24 @@ class CommandSocketsTest {
     socket.writeTextMessage(new JsonObject().put("type", "data").put("data", "ping\n").encode());
 
     awaitContains(received, "ping");
+    socket.close();
+  }
+
+  @Test
+  @Timeout(60)
+  void browserKeystrokesArePersonInputSoAnUnsentLineReadsAsADraft() throws Exception {
+    // Through personInput, not input: only the person's keystrokes move the draft flag that a live
+    // interactive rename waits on, and the browser terminal is where the person types.
+    String commandId = launch("echo");
+    List<String> received = new CopyOnWriteArrayList<>();
+
+    WebSocket socket = connect("/terminal/commands/" + commandId, "Bearer " + TOKEN, received);
+    socket.writeTextMessage(new JsonObject().put("type", "data").put("data", "half typ").encode());
+    awaitContains(received, "half typ");
+    awaitDraft(commandId, true);
+
+    socket.writeTextMessage(new JsonObject().put("type", "data").put("data", "ed\r").encode());
+    awaitDraft(commandId, false);
     socket.close();
   }
 
@@ -293,6 +312,16 @@ class CommandSocketsTest {
 
   private static <T> T await(Future<T> future) throws Exception {
     return future.toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+  }
+
+  private void awaitDraft(String commandId, boolean expected) throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 10_000;
+    while (registry.hasDraft(commandId) != expected) {
+      if (System.currentTimeMillis() > deadline) {
+        throw new AssertionError("draft never became " + expected);
+      }
+      Thread.sleep(20);
+    }
   }
 
   private static void awaitContains(List<String> frames, String needle) throws InterruptedException {
