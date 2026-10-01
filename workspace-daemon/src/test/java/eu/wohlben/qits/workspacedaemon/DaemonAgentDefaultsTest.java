@@ -117,4 +117,36 @@ class DaemonAgentDefaultsTest {
   void aNullEntityIdIsAbsent() {
     assertTrue(defaultsWithEntityId(null).entityId().isEmpty());
   }
+
+  private static DaemonAgentDefaults defaultsWithEntityBlocked(boolean entityBlocked) {
+    return new DaemonAgentDefaults(
+        () -> null,
+        Optional.empty(),
+        true,
+        Optional.empty(),
+        AgentSurfaceConfigurations.shipped(),
+        Map.of(),
+        "qits-614",
+        entityBlocked);
+  }
+
+  @Test
+  void theInjectedBlockedSeedIsAnsweredAsIs() {
+    assertTrue(defaultsWithEntityBlocked(true).entityBlocked());
+    assertFalse(defaultsWithEntityBlocked(false).entityBlocked());
+  }
+
+  @Test
+  void theDefaultSixAndSevenArgumentConstructorsLeaveBlockedFalse() {
+    DaemonAgentDefaults sixArg =
+        new DaemonAgentDefaults(
+            () -> null,
+            Optional.empty(),
+            true,
+            Optional.empty(),
+            AgentSurfaceConfigurations.shipped(),
+            Map.of());
+    assertFalse(sixArg.entityBlocked());
+    assertFalse(defaultsWithEntityId("qits-614").entityBlocked());
+  }
 }

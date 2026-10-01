@@ -37,6 +37,7 @@ final class DaemonAgentDefaults implements AgentDefaults {
   private final AgentSurfaceConfigurations surfaces;
   private final Map<String, String> ambientFacts;
   private final String entityId;
+  private final boolean entityBlocked;
 
   DaemonAgentDefaults(
       Supplier<DaemonQitsConfig> config,
@@ -63,6 +64,26 @@ final class DaemonAgentDefaults implements AgentDefaults {
       AgentSurfaceConfigurations surfaces,
       Map<String, String> ambientFacts,
       String entityId) {
+    this(
+        config,
+        daemonDefault,
+        activityTrackingDefault,
+        refinementModel,
+        surfaces,
+        ambientFacts,
+        entityId,
+        false);
+  }
+
+  DaemonAgentDefaults(
+      Supplier<DaemonQitsConfig> config,
+      Optional<String> daemonDefault,
+      boolean activityTrackingDefault,
+      Optional<String> refinementModel,
+      AgentSurfaceConfigurations surfaces,
+      Map<String, String> ambientFacts,
+      String entityId,
+      boolean entityBlocked) {
     this.config = config;
     this.daemonDefault = AgentType.parse(daemonDefault.orElse(null)).orElse(AgentType.CLAUDE);
     this.activityTrackingDefault = activityTrackingDefault;
@@ -70,6 +91,7 @@ final class DaemonAgentDefaults implements AgentDefaults {
     this.surfaces = surfaces == null ? AgentSurfaceConfigurations.shipped() : surfaces;
     this.ambientFacts = ambientFacts == null ? Map.of() : Map.copyOf(ambientFacts);
     this.entityId = entityId == null ? "" : entityId.trim();
+    this.entityBlocked = entityBlocked;
   }
 
   @Override
@@ -116,6 +138,23 @@ final class DaemonAgentDefaults implements AgentDefaults {
   @Override
   public Optional<String> entityId() {
     return entityId.isBlank() ? Optional.empty() : Optional.of(entityId);
+  }
+
+  /**
+   * Whether {@link #entityId()} was BLOCKED when this container booted — the boot-time seed for
+   * {@code AgentLaunchService}'s blocked flag, which {@code POST /agents/blocked} moves from then on
+   * through {@code AgentLaunchService.setBlocked}. Read here only once, at construction, exactly
+   * like {@link #entityId()}: a daemon that restarts inside a container created for an
+   * already-blocked ticket needs the marker back without anybody blocking the ticket again, which a
+   * default of {@code false} could not give it.
+   *
+   * <p>Injected as {@code QITS_WORKSPACE_DAEMON_ENTITY_BLOCKED}, absent meaning {@code false} —
+   * unlike {@link #entityId()} there is no third state to distinguish from absence, so this is a
+   * primitive rather than an {@code Optional}.
+   */
+  @Override
+  public boolean entityBlocked() {
+    return entityBlocked;
   }
 
   /**

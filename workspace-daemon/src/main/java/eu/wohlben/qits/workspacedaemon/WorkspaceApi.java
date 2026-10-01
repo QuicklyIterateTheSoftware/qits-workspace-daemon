@@ -247,6 +247,18 @@ public class WorkspaceApi {
    */
   static final String AGENTS_TURN_PATH = "/agents/turn";
 
+  /**
+   * Marks the entity this container exists for as BLOCKED or not, and renames every live Claude
+   * Remote Control session to match — the daemon-side twin of {@code AgentLaunchService.setBlocked}.
+   *
+   * <p>Called by qits-workspaces-service for a workspace container and by qits-projects-service
+   * through the refinement tunnel for a refinement one, the same way either reaches {@link
+   * #AGENTS_TURN_PATH}: this container is the only place that knows which sessions are live and
+   * holds the stdin channel a rename travels over, so the host cannot do this itself even though it
+   * is the one that knows the entity changed state.
+   */
+  static final String AGENTS_BLOCKED_PATH = "/agents/blocked";
+
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
 
   static final String AGENT_PLUGINS_PATH = "/agent-plugins";
@@ -681,6 +693,7 @@ public class WorkspaceApi {
         || path.equals(AGENTS_AVAILABLE_PATH)
         || path.equals(AGENTS_SIGN_IN_PATH)
         || path.equals(AGENTS_TURN_PATH)
+        || path.equals(AGENTS_BLOCKED_PATH)
         || path.equals(AGENT_SESSIONS_PATH)
         || path.equals(AGENT_PLUGINS_PATH)
         || path.startsWith(AGENT_PLUGINS_PATH + "/")
@@ -763,6 +776,11 @@ public class WorkspaceApi {
       if (AGENTS_TURN_PATH.equals(path)) {
         return method == HttpMethod.POST
             ? deliverTurn(body)
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+      }
+      if (AGENTS_BLOCKED_PATH.equals(path)) {
+        return method == HttpMethod.POST
+            ? setBlocked(body)
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       if (AGENT_SESSIONS_PATH.equals(path)) {
@@ -856,6 +874,25 @@ public class WorkspaceApi {
         200,
         AgentJson.turn(
             delivered, target.id(), target.kind().name(), delivered ? null : NO_AGENT_RUNNING));
+  }
+
+  /**
+   * {@code POST /agents/blocked} — mark this container's entity BLOCKED or not, and rename every
+   * live Claude Remote Control session to match.
+   *
+   * <p>{@code blocked} is required and must be a JSON boolean — a 400 for a missing or
+   * mistyped field rather than a guess, the same discipline {@link #deliverTurn} applies to a blank
+   * {@code text}. {@link AgentLaunchService#setBlocked} does the work and answers how many sessions
+   * it renamed; that count is echoed back so the caller can tell a rename from a no-op without a
+   * second round trip.
+   */
+  private Reply setBlocked(String body) {
+    JsonObject json = jsonBody(body);
+    if (!(json.getValue("blocked") instanceof Boolean blocked)) {
+      return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
+    }
+    int renamed = agentLaunch.setBlocked(blocked);
+    return new Reply(200, AgentJson.blocked(blocked, renamed));
   }
 
   /**

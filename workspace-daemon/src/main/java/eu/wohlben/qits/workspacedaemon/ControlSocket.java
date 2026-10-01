@@ -150,6 +150,14 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.entity-id")
   Optional<String> entityIdConfig;
 
+  // Whether the entity above was BLOCKED when this container booted — the seed for
+  // AgentLaunchService's blocked flag, which POST /agents/blocked moves from then on. A primitive
+  // boolean, unlike the identity values above: the SmallRye "empty default is no value" trap is a
+  // String problem, and absent here is an ordinary, meaningful false (not-blocked), not a value to
+  // distinguish from "unset".
+  @ConfigProperty(name = "qits.workspace-daemon.entity-blocked", defaultValue = "false")
+  boolean entityBlocked;
+
   @ConfigProperty(name = "qits.workspace-daemon.parent")
   Optional<String> parentConfig;
 
@@ -765,7 +773,8 @@ public class ControlSocket {
             surfaceConfigurations,
             DaemonAgentDefaults.ambientFactsOf(
                 projectId, repoName, repositoryId, workspaceId, branch),
-            entityId);
+            entityId,
+            entityBlocked);
     DaemonMcpEndpoints endpoints;
     try {
       endpoints =
