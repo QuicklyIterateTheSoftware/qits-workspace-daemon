@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.agents.AgentMcpNarrowing;
 import eu.wohlben.qits.agents.AgentMcpScope;
+import eu.wohlben.qits.agents.LocalMcp;
 import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ScopedMcp;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
@@ -64,6 +65,17 @@ class WorkspaceMcpServersTest {
     // this daemon's guess rather than the document's instruction — visible, but still a lie on the
     // editor's form.
     assertTrue(servers.honoursNarrowing());
+  }
+
+  @Test
+  void everyLaunchGetsTheImagesBrowserWithEveryToolPreApproved() {
+    // The image ships qits-browser-mcp; the key and the program name are the contract with it.
+    LocalMcp browser = servers.localServers().get(0);
+    assertEquals(1, servers.localServers().size());
+    assertEquals("browser", browser.key());
+    assertEquals("qits-browser-mcp", browser.command());
+    assertEquals(List.of("mcp__browser__*"), browser.allowedTools());
+    assertEquals(servers.localServers(), withoutPlatformUrl.localServers());
   }
 
   @Test

@@ -855,6 +855,10 @@ class AgentsApiTest {
     JsonObject attached = record.getJsonArray("mcpServers").getJsonObject(0);
     assertEquals("repository", attached.getString("server"));
     assertEquals(false, attached.getBoolean("readOnly"));
+    JsonArray recorded = record.getJsonArray("mcpServers");
+    JsonObject browser = recorded.getJsonObject(recorded.size() - 1);
+    assertEquals("browser", browser.getString("server"), "the image's browser comes last");
+    assertEquals(false, browser.getBoolean("readOnly"));
 
     // The same object on both reads: the list and the single command go through one serializer, and
     // the epic's per-surface verification reads whichever it has an id for.

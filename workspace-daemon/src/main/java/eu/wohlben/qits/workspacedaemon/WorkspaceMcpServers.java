@@ -4,6 +4,7 @@ import eu.wohlben.qits.agents.AgentMcpIds;
 import eu.wohlben.qits.agents.AgentMcpNarrowing;
 import eu.wohlben.qits.agents.AgentMcpScope;
 import eu.wohlben.qits.agents.AgentMcpServers;
+import eu.wohlben.qits.agents.LocalMcp;
 import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ScopedMcp;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
@@ -353,6 +354,21 @@ final class WorkspaceMcpServers implements AgentMcpServers {
           platformMcpUrl.map(url -> new ScopedMcp(PLATFORM_KEY, url, PLATFORM_TOOLS));
       default -> Optional.empty();
     };
+  }
+
+  /**
+   * The browser the workspace image ships ({@code qits-browser-mcp}, Playwright's MCP server on the
+   * image's own Chromium), attached to every Claude launch so an agent can open what it serves,
+   * click through it, take screenshots and read the console and network. Every tool pre-approved:
+   * the browser reaches only what this container can already reach, and a prompting surface should
+   * not stop on its first look at a page.
+   */
+  static final LocalMcp BROWSER =
+      new LocalMcp("browser", "qits-browser-mcp", List.of("mcp__browser__*"));
+
+  @Override
+  public List<LocalMcp> localServers() {
+    return List.of(BROWSER);
   }
 
   /**
