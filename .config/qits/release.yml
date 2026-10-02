@@ -13,7 +13,7 @@ artifacts:
   # builder step has never seen. So that step submits its own document through the same `qits` CLI
   # the postlude would have used. An `sbom:` here would make the builder step submit a path that
   # does not exist in it.
-  - { type: maven, name: "eu.wohlben.qits:qits-workspace-daemon-protocol" }
+  - { type: maven, name: "eu.wohlben.qits:qits-workspace-daemon-protocol", path: workspace-daemon-protocol }
 
 # THREE ARTIFACTS OF THREE DIFFERENT TYPES OUT OF ONE TREE — an image, a daemon jar and a published
 # protocol module. No archetype publishes more than one kind, so both slots are this repository's
