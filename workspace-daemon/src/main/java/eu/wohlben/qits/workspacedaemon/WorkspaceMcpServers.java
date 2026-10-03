@@ -152,9 +152,10 @@ final class WorkspaceMcpServers implements AgentMcpServers {
    * records a fact about work the agent itself just did, so the agent is the authority on it rather
    * than a party guessing at somebody else's state. qits-projects accepts it only while the owning
    * epic is in IMPLEMENTATION ({@code EpicLifecycle.requireImplementation}), so it is reachable
-   * exactly during the dispatch it was added for. And it changes a <em>marker</em>, not a plan: by
-   * then the epic's scope is frozen, and this tool cannot add, remove or reword a feature or a task
-   * — only say that one of them landed.
+   * exactly during the dispatch it was added for. And it moves a <em>feature's or a task's own
+   * status</em>, never an epic's plan or scope: by then the epic's scope is frozen, and this tool
+   * cannot add, remove or reword a feature or a task — only move the one it is given along the same
+   * lifecycle an epic or a ticket walks.
    *
    * <p>It is an interim. qits-projects' own note on the tool says merge-derived markers are the
    * intended answer, and when they arrive this bucket goes with the prompt-driven step.
@@ -163,9 +164,21 @@ final class WorkspaceMcpServers implements AgentMcpServers {
    * it records that work on a task has started rather than landed, is accepted while the owning
    * epic is REFINED or IMPLEMENTING, and moves a REFINED epic to IMPLEMENTING — the start-of-work
    * half of the same marker the dispatch instruction expects the agent to keep current.
+   *
+   * <p>{@code transition_task} sits beside both for a related but distinct reason: a feature or a
+   * task now carries its own status along the same eight-word lifecycle an epic or a ticket walks,
+   * rather than taking its epic's. An agent working a task may need to move it on its own — to
+   * VERIFIED once it has checked its own fix, say — without touching its epic or its siblings, and
+   * {@code transition_ticket} is already pre-approved for the equivalent move on a ticket. The same
+   * fence applies: qits-projects refuses the move with a 409 while the owning epic is still
+   * REPORTED, because the plan is still a draft there, and the move never reaches an epic's plan or
+   * scope — only the one feature or task it names.
    */
   private static final List<String> TASK_IMPLEMENTATION_TOOLS =
-      List.of("mcp__repository__mark_task_implemented", "mcp__repository__mark_task_implementing");
+      List.of(
+          "mcp__repository__mark_task_implemented",
+          "mcp__repository__mark_task_implementing",
+          "mcp__repository__transition_task");
 
   /**
    * The repository server's full pre-approval: its reads, plus the two ticket exceptions and the
