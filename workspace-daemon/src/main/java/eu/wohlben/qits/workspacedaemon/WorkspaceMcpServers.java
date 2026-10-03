@@ -158,9 +158,14 @@ final class WorkspaceMcpServers implements AgentMcpServers {
    *
    * <p>It is an interim. qits-projects' own note on the tool says merge-derived markers are the
    * intended answer, and when they arrive this bucket goes with the prompt-driven step.
+   *
+   * <p>{@code mark_task_implementing} sits beside it for the same reason and at the same standing:
+   * it records that work on a task has started rather than landed, is accepted while the owning
+   * epic is REFINED or IMPLEMENTING, and moves a REFINED epic to IMPLEMENTING — the start-of-work
+   * half of the same marker the dispatch instruction expects the agent to keep current.
    */
   private static final List<String> TASK_IMPLEMENTATION_TOOLS =
-      List.of("mcp__repository__mark_task_implemented");
+      List.of("mcp__repository__mark_task_implemented", "mcp__repository__mark_task_implementing");
 
   /**
    * The repository server's full pre-approval: its reads, plus the two ticket exceptions and the
