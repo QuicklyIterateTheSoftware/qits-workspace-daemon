@@ -27,7 +27,7 @@
 # would silently pick up a different toolchain.
 #
 # THE DEFAULT IS THE PIN, WHICH IS WHY OVERRIDING IT IS SAFE. CI passes no `--build-arg` for it
-# (its only build-arg is QITS_MAVEN_CENTRAL_URL below), so a release rebuilds on exactly the
+# (its only build-arg is QITS_DOMAIN below), so a release rebuilds on exactly the
 # toolchain its tree was released with. A developer with a hand-built base passes one:
 #
 #     docker build -t qits/workspace:native -f docker/Dockerfile \
@@ -55,8 +55,7 @@ ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.1003.425
 # the builder's own registry config (qits-containers' buildkitd.toml), and under a developer's
 # `docker build` the host daemon resolves them as it always did — one committed spelling, two
 # resolvers. The compile below resolves from Maven Central, plus the platform's own registry for the
-# one coordinate that is not there — the shared coding-agent harness; see QITS_MAVEN_REPOSITORY_URL
-# further down.
+# one coordinate that is not there — the shared coding-agent harness; see QITS_DOMAIN further down.
 FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
@@ -75,27 +74,23 @@ RUN ./mvnw --version
 # keeps this cheap — without it this line drags in every target/ dir.
 COPY . .
 
-# Where Maven Central is mirrored, when it is. CI passes the platform's pull-through
-# (qits-platform-mirror's central proxy, the same authority the FROM lines pull through); EMPTY —
-# the default — means direct Maven Central. `.qits-maven-settings.xml` activates its central-proxy
-# profile only on a non-empty value, so a hand build that passes nothing resolves exactly as it
-# always did.
-ARG QITS_MAVEN_CENTRAL_URL=
-ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
-
-# --- and the PLATFORM's own Maven repository, which this reactor now needs ------------------------
-# It did not, until the coding-agent harness became a shared released library
-# (eu.wohlben.qits:qits-coding-agents). Every other dependency of this build is on Maven Central;
-# that one is on the platform's registry, and `.qits-maven-settings.xml` mirrors the `qits-maven`
-# repository id onto this address — an exact id match, which is what gets past Maven's
-# external:http:* blocker without permitting arbitrary HTTP repositories.
+# Both platform hosts are code plus one input, the public domain (qits-731):
 #
-# The pipeline passes the address a BUILDER container can reach ($QITS_MAVEN_REGISTRY_URL); the ARG
-# default is the developer-host address, so a plain host-side `docker build` still works. Unlike the
-# central mirror above, an empty value here is NOT a valid state — there is nowhere else to get the
-# library — so the build fails on resolution rather than silently producing an image without it.
-ARG QITS_MAVEN_REPOSITORY_URL=http://registry.dev.localhost:8080/artifacts/maven/maven
-ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
+#   https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven   hosted Maven (qits-artifacts) — the
+#     coding-agent harness (eu.wohlben.qits:qits-coding-agents) lives only here; every other
+#     dependency is on Maven Central. `.qits-maven-settings.xml` mirrors the `qits-maven` repository
+#     id onto this address — an exact id match, which is what gets past Maven's external:http:*
+#     blocker without permitting arbitrary HTTP repositories. Unlike Central below, this one is NOT
+#     optional: there is nowhere else to get the library, so the build fails on resolution rather
+#     than silently producing an image without it.
+#   https://mirror.qits.$QITS_DOMAIN/mirror/maven/central      Maven Central cache (qits-mirror)
+#
+# `QITS_DOMAIN` is an ENV, not left as a bare ARG, because it has to reach the `runnable` stage's RUN
+# below too, and that stage is built `FROM build` rather than redeclaring the ARG. The two RUNs
+# derive the full URLs themselves; `wohlben.eu` is the developer-host default, so a plain host-side
+# `docker build` still works.
+ARG QITS_DOMAIN=wohlben.eu
+ENV QITS_DOMAIN=$QITS_DOMAIN
 
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
@@ -118,8 +113,9 @@ RUN --mount=type=secret,id=qits-client-id \
     --mount=type=secret,id=qits-client-secret \
     QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
     QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
+    QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$QITS_DOMAIN/mirror/maven/central" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -Dnative -DskipTests \
-      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dqits.maven.repository.url="https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven" \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
       -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \
@@ -184,8 +180,9 @@ RUN --mount=type=secret,id=qits-client-id \
     --mount=type=secret,id=qits-client-secret \
     QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
     QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
+    QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$QITS_DOMAIN/mirror/maven/central" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl workspace-daemon -am package -DskipTests \
-      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dqits.maven.repository.url="https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven" \
       -Dquarkus.package.jar.enabled=true \
       -Dquarkus.package.jar.type=uber-jar
 
