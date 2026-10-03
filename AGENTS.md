@@ -380,11 +380,11 @@ pipeline rewrites its tag. What breaks it is not a reflow but a **non-literal va
 The failure is silent in the worst direction — nothing errors, the base just stops following the
 toolchain — so if you ever need indirection in this value, move the follow somewhere it can be seen.
 
-**`$QITS_REGISTRY` is not reachable from inside a step container.** It is the host daemon's view
-(`localhost:8081`), correct in a `FROM` and in a `docker build`/`docker push` across a mounted
-socket, and useless to `curl`. Any step here that wants to *ask* the registry something must take
-qits-artifacts' origin off `$QITS_MAVEN_REGISTRY_URL` and go there instead. (The deleted bump hop
-learned this the hard way; the lesson outlives it.)
+**The host daemon's own view of the registry is not reachable from inside a step container.** A
+`FROM` and a `docker build`/`docker push` across a mounted socket resolve the registry fine; `curl`
+from inside a step does not. Any step here that wants to *ask* the registry something over HTTP must
+use the public host, `https://registry.qits.$QITS_DOMAIN` (qits-731), not a host alias from the
+builder's own namespace. (The deleted bump hop learned this the hard way; the lesson outlives it.)
 
 **Do not add a `latest` tag anywhere.** Not to a pipeline, not as a convenience in a README, not as a
 default in a consumer. The whole failure this replaced was a floating local tag with nothing behind
