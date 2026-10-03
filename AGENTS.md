@@ -237,16 +237,20 @@ one's javadoc carries its own reasoning — which is why they are three buckets 
   on the kimi path an unlisted tool does not exist, so without this the instruction is a dead letter
   rather than a prompt. It is acceptable because resolving is reversible through the same tool and
   because the dispatch is a person pressing a button on a specific ticket.
-- `TASK_IMPLEMENTATION_TOOLS` (`mark_task_implemented`, `mark_task_implementing`) — added
-  2026-09-08 for one caller too. qits-projects' "Start implementation" stands a workspace on
-  `epic/<slug>` and tells the dispatched agent to mark each task implemented as the work lands. It
-  is acceptable because it records a fact about work the agent itself just did, because
-  qits-projects only accepts it while the owning epic is in IMPLEMENTATION, and because it moves a
-  *marker* rather than a plan — the scope is frozen by then and this tool cannot touch it. It is an
-  interim: qits-projects means to derive the markers from merges, and this bucket goes when they
-  arrive. `mark_task_implementing` sits beside it, accepted while the owning epic is REFINED or
+- `TASK_IMPLEMENTATION_TOOLS` (`mark_task_implemented`, `mark_task_implementing`,
+  `transition_task`) — the first two added 2026-09-08 for one caller too. qits-projects' "Start
+  implementation" stands a workspace on `epic/<slug>` and tells the dispatched agent to mark each
+  task implemented as the work lands. It is acceptable because it records a fact about work the
+  agent itself just did, because qits-projects only accepts it while the owning epic is in
+  IMPLEMENTATION, and because it moves a feature's or a task's *own status* rather than an epic's
+  plan or scope — the scope is frozen by then and this tool cannot touch it. It is an interim:
+  qits-projects means to derive the markers from merges, and this bucket goes when they arrive.
+  `mark_task_implementing` sits beside it, accepted while the owning epic is REFINED or
   IMPLEMENTING and moving a REFINED epic to IMPLEMENTING, for the same reason: the start-of-work
-  half of the same marker.
+  half of the same marker. `transition_task` joined them once a feature or a task got a status of
+  its own on the same lifecycle as an epic or a ticket: it is `transition_ticket`'s counterpart for
+  that status, letting an agent move one task — to VERIFIED, say — without moving its epic or its
+  siblings, and it is refused the same way while the owning epic is REPORTED.
 
 The reads for that dispatch — `list_epics`, `get_epic` — are just reads and sit in
 `READ_ONLY_REPOSITORY_TOOLS` beside `list_tickets`/`get_ticket`. All of it lives in
@@ -260,9 +264,8 @@ same reason: one smuggled into a `READ_ONLY_` list is one nobody has to read.
 
 No bucket is the fence that matters. An autonomous run marks its MCP urls `agentReadOnly=true`
 and qits-projects' `ReadOnlyRepositoryToolFilter` hides the ticket writes and
-`mark_task_implemented`/`mark_task_implementing` behind it; nothing here can buy past that, so
-widening a bucket only ever widens chat and interactive
-launches.
+`mark_task_implemented`/`mark_task_implementing`/`transition_task` behind it; nothing here can buy
+past that, so widening a bucket only ever widens chat and interactive launches.
 
 The asymmetry that makes these lists worth care: for Claude every launch is `--skipPermissions` and
 no `--allowedTools` is ever emitted, so the lists are a *latent* pre-approval story. For the kimi ACP
