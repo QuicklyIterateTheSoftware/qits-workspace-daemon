@@ -38,12 +38,29 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  *     the reverse) keep agreeing about every stream that existed before a second listener did. The
  *     daemon resolves the name against its own allow-list; that is what keeps the "never learn an
  *     address from a container" rule intact while still reaching a second port.
+ * @param serviceId which declared service a {@link StreamTarget#SERVICE} stream is for — again a
+ *     name, never a port. Required (non-blank) for {@code SERVICE}, ignored for every other target,
+ *     and on the wire only when present, so a frame without one is the frame it always was.
  */
-public record OpenStream(String nonce, String path, StreamTarget target) implements DaemonMessage {
+public record OpenStream(String nonce, String path, StreamTarget target, String serviceId)
+    implements DaemonMessage {
 
-  /** Normalizes an absent target to {@link StreamTarget#API}, so no switch ever sees a null. */
+  /**
+   * Normalizes an absent target to {@link StreamTarget#API}, so no switch ever sees a null, and
+   * refuses a {@link StreamTarget#SERVICE} stream that names no service — a blank id has no service
+   * to resolve to, and failing here means the decoder drops the frame rather than the tunnel
+   * guessing.
+   */
   public OpenStream {
     target = target == null ? StreamTarget.API : target;
+    if (target == StreamTarget.SERVICE && (serviceId == null || serviceId.isBlank())) {
+      throw new IllegalArgumentException("a SERVICE stream needs a service id");
+    }
+  }
+
+  /** The pre-service form: a stream to a target that needs no service id. */
+  public OpenStream(String nonce, String path, StreamTarget target) {
+    this(nonce, path, target, null);
   }
 
   /** The pre-target form: a stream to {@link StreamTarget#API}. */

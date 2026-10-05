@@ -45,8 +45,16 @@ public final class DaemonProtocol {
    * host omits it and a new daemon decodes {@link StreamTarget#API}, the one behaviour that existed
    * before; a new host asking a 4 daemon for the editor is asking an image that has no editor in it,
    * and the old decoder ignores the field rather than mis-serving it.
+   *
+   * <p><b>6 added {@link StreamTarget#SERVICE} and {@link OpenStream#serviceId()}</b>: the
+   * dev-server web view through the tunnel, for a workspace the host cannot reach directly. Unlike
+   * 5 this one <em>is</em> gated on, by the host: a daemon below 6 cannot decode a {@code SERVICE}
+   * target (the unknown name makes the frame undecodable and it is dropped), so the host answers a
+   * runner-placed workspace whose daemon is older with "update the workspace image" rather than
+   * opening a stream that will never arrive. The new field is optional on the wire, so every
+   * frame that is not a {@code SERVICE} stream is unchanged in both directions.
    */
-  public static final int CAPABILITY_VERSION = 5;
+  public static final int CAPABILITY_VERSION = 6;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -182,6 +190,9 @@ public final class DaemonProtocol {
     // StreamTarget.API and the frame an older host sends is byte-identical to the one it always
     // sent. See DaemonCodec's OpenStream arms.
     public static final String TARGET = "target";
+    // Optional on OpenStream: written only when present — a SERVICE stream's service id, a name and
+    // never a port. Absent decodes to null, so older frames decode as before.
+    public static final String SERVICE_ID = "serviceId";
 
     private Field() {}
   }

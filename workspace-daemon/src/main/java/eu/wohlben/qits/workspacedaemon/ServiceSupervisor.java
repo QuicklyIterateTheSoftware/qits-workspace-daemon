@@ -270,6 +270,36 @@ public final class ServiceSupervisor {
       DaemonQitsConfig.WebViewDecl webView) {}
 
   /**
+   * The loopback port a running, web-viewable service declares ({@code webView.port}), looked up by
+   * service id, or {@code 0} when there is none to dial: no such service, one that declares no web
+   * view, or one that is not running. This is what {@code DaemonStreamTunnel} resolves a {@code
+   * SERVICE} stream's id against — the host names the service, and only the checkout's own
+   * declaration, held here, says where it listens.
+   */
+  public int webViewPort(String serviceId) {
+    if (serviceId == null) {
+      return 0;
+    }
+    for (Supervised s : running.values()) {
+      if (!serviceId.equals(s.decl.id())) {
+        continue;
+      }
+      DaemonQitsConfig.WebViewDecl view = s.decl.webView();
+      String state = s.state;
+      if (view == null
+          || view.port() == null
+          || view.port() <= 0
+          || view.port() > 65535
+          || ServiceTransition.State.STOPPED.equals(state)
+          || ServiceTransition.State.CRASHED.equals(state)) {
+        return 0;
+      }
+      return view.port();
+    }
+    return 0;
+  }
+
+  /**
    * Re-report the current state of every running service — the reconnect-adoption signal (called
    * from {@code ControlSocket.onConnected}). On a qits restart the host lost its in-memory
    * projection; this rebuilds it from the source of truth (the live children) instead of a host

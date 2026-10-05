@@ -350,6 +350,78 @@ class DaemonCodecTest {
   }
 
   @Test
+  void openStreamRoundTripsAServiceTargetWithItsId() {
+    OpenStream service =
+        new OpenStream(
+            "Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.SERVICE, "frontend");
+    assertEquals(service, roundTrip(service));
+    Map<String, Object> wire = DaemonCodec.encode(service);
+    assertEquals("SERVICE", wire.get(DaemonProtocol.Field.TARGET));
+    assertEquals("frontend", wire.get(DaemonProtocol.Field.SERVICE_ID));
+  }
+
+  @Test
+  void anEditorFrameIsUnchangedByTheServiceId() {
+    // The frame a capability-5 host sends for the editor: exactly nonce, path and target — no
+    // serviceId key appears on encode, and the same map decodes to the same message.
+    OpenStream editor =
+        new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.EDITOR);
+    Map<String, Object> wire = DaemonCodec.encode(editor);
+    assertEquals(
+        Map.of(
+            DaemonProtocol.Field.TYPE,
+            DaemonProtocol.Type.OPEN_STREAM,
+            DaemonProtocol.Field.NONCE,
+            "Zm9vYmFy",
+            DaemonProtocol.Field.PATH,
+            "/workspaces/daemon/stream/Zm9vYmFy",
+            DaemonProtocol.Field.TARGET,
+            "EDITOR"),
+        wire);
+    OpenStream decoded = (OpenStream) DaemonCodec.decode(wire);
+    assertEquals(editor, decoded);
+    assertEquals(null, decoded.serviceId());
+  }
+
+  @Test
+  void anOldFrameWithNoTargetStillDecodesAsTheApiWithNoServiceId() {
+    Map<String, Object> map =
+        Map.of(
+            DaemonProtocol.Field.TYPE,
+            DaemonProtocol.Type.OPEN_STREAM,
+            DaemonProtocol.Field.NONCE,
+            "n",
+            DaemonProtocol.Field.PATH,
+            "/x");
+    OpenStream decoded = (OpenStream) DaemonCodec.decode(map);
+    assertEquals(new OpenStream("n", "/x"), decoded);
+    assertEquals(StreamTarget.API, decoded.target());
+    assertEquals(null, decoded.serviceId());
+  }
+
+  @Test
+  void aServiceStreamWithoutAServiceIdIsRefused() {
+    assertThrows(
+        IllegalArgumentException.class, () -> new OpenStream("n", "/x", StreamTarget.SERVICE));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new OpenStream("n", "/x", StreamTarget.SERVICE, " "));
+    // On the wire too: a SERVICE frame that names no service is undecodable, so ControlSocket
+    // drops it rather than the tunnel guessing which service was meant.
+    Map<String, Object> map =
+        Map.of(
+            DaemonProtocol.Field.TYPE,
+            DaemonProtocol.Type.OPEN_STREAM,
+            DaemonProtocol.Field.NONCE,
+            "n",
+            DaemonProtocol.Field.PATH,
+            "/x",
+            DaemonProtocol.Field.TARGET,
+            "SERVICE");
+    assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(map));
+  }
+
+  @Test
   void openStreamRefusesATargetItCannotName() {
     // Fail closed, not fall back: an unknown target must not resolve to the API. The frame is
     // undecodable and ControlSocket drops it, so a stream meant for a listener this daemon does not
@@ -392,11 +464,12 @@ class DaemonCodecTest {
   }
 
   @Test
-  void theWebEditorLandedAtCapabilityFive() {
+  void theServiceTunnelTargetLandedAtCapabilitySix() {
     // Spelled as a literal because this file is also the drift detector between this module and the
     // copy qits-workspaces vendors: two copies at two versions is exactly the disagreement that
-    // shows up as a workspace whose editor never appears, and nowhere else.
-    assertEquals(5, DaemonProtocol.CAPABILITY_VERSION);
+    // shows up as a workspace whose dev-server view never appears, and nowhere else. The host gates
+    // a SERVICE stream on this number.
+    assertEquals(6, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test

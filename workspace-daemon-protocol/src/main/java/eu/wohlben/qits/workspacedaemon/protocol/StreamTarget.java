@@ -24,5 +24,13 @@ public enum StreamTarget {
    * image that carries the editor <em>and</em> has it enabled; otherwise the daemon refuses the
    * target rather than dialling a port nothing answers.
    */
-  EDITOR
+  EDITOR,
+
+  /**
+   * A declared web-viewable service — a dev server the daemon supervises — named by its id ({@link
+   * OpenStream#serviceId()}) and never by its port. The daemon resolves the id against its own
+   * supervisor to the port the checkout's {@code webView} declares, on loopback, and only while that
+   * service is running; any other id is refused rather than dialled. Added at capability 6.
+   */
+  SERVICE
 }

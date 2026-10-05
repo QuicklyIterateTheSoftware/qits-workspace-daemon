@@ -183,6 +183,11 @@ public final class DaemonCodec {
         if (m.target() != StreamTarget.API) {
           map.put(Field.TARGET, m.target().name());
         }
+        // Same rule for the service id: present only when there is one, so every frame that is not
+        // a SERVICE stream is byte-identical to what it was before the field existed.
+        if (m.serviceId() != null) {
+          map.put(Field.SERVICE_ID, m.serviceId());
+        }
       }
     }
     return map;
@@ -287,7 +292,10 @@ public final class DaemonCodec {
       case Type.EDITOR_STATE -> new EditorState(str(map, Field.STATE));
       case Type.OPEN_STREAM ->
           new OpenStream(
-              str(map, Field.NONCE), str(map, Field.PATH), streamTarget(map, Field.TARGET));
+              str(map, Field.NONCE),
+              str(map, Field.PATH),
+              streamTarget(map, Field.TARGET),
+              str(map, Field.SERVICE_ID));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };

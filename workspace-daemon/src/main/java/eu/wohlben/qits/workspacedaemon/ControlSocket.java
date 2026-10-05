@@ -663,7 +663,8 @@ public class ControlSocket {
             url.get(),
             bearer(),
             workspaceApi.apiPort(),
-            editor == null ? 0 : editor.port());
+            editor == null ? 0 : editor.port(),
+            services);
     tunnel.start();
     client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
@@ -1297,7 +1298,7 @@ public class ControlSocket {
         // handler-driven, so there is nothing here worth a worker thread.
         DaemonStreamTunnel t = tunnel;
         if (t != null) {
-          t.open(request.nonce(), request.path(), request.target());
+          t.open(request.nonce(), request.path(), request.target(), request.serviceId());
         }
       }
       case PullBranch request -> {
