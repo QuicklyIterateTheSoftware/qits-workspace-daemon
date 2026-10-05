@@ -9,6 +9,7 @@ import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ScopedMcp;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -235,12 +236,36 @@ final class WorkspaceMcpServers implements AgentMcpServers {
    */
   private final Optional<String> platformMcpUrl;
 
+  /**
+   * {@code Authorization: Bearer <token>}, or empty, computed once from {@code
+   * qits.workspace-daemon.token} (the same {@code QITS_TOKEN} {@code ControlSocket} reads for the
+   * control socket and the tunnels) and attached to every platform server — {@code repository},
+   * {@code observability} and {@code qits} — this class builds. Not {@code actions}: it is not a
+   * platform service in the edge-routed sense, and not {@link #BROWSER}: it runs inside this
+   * container, not behind the edge. See {@link #platformHeaders()}.
+   */
+  private final Map<String, String> platformHeaders;
+
   WorkspaceMcpServers(
-      McpEndpoints endpoints, String repoId, String workspaceId, Optional<String> platformMcpUrl) {
+      McpEndpoints endpoints,
+      String repoId,
+      String workspaceId,
+      Optional<String> platformMcpUrl,
+      Optional<String> token) {
     this.endpoints = endpoints;
     this.repoId = repoId;
     this.workspaceId = workspaceId;
     this.platformMcpUrl = platformMcpUrl == null ? Optional.empty() : platformMcpUrl;
+    this.platformHeaders = headersFor(token);
+  }
+
+  private static Map<String, String> headersFor(Optional<String> token) {
+    return token == null
+        ? Map.of()
+        : token
+            .filter(value -> !value.isBlank())
+            .map(value -> Map.of("Authorization", "Bearer " + value.trim()))
+            .orElse(Map.of());
   }
 
   @Override
@@ -259,7 +284,8 @@ final class WorkspaceMcpServers implements AgentMcpServers {
                 + repo
                 + "&workspaceId="
                 + workspaceId,
-            REPOSITORY_TOOLS);
+            REPOSITORY_TOOLS,
+            platformHeaders);
     // Telemetry is bucketed per workspace, and qits-observability's tool filter hides the tools
     // outright unless both narrowings are present — so this server is only worth listing where they
     // are, and carries exactly the two scopes that service reads (no projectId: it has no notion of
@@ -272,7 +298,8 @@ final class WorkspaceMcpServers implements AgentMcpServers {
                 + repo
                 + "&workspaceId="
                 + workspaceId,
-            READ_ONLY_OBSERVABILITY_TOOLS);
+            READ_ONLY_OBSERVABILITY_TOOLS,
+            platformHeaders);
     return switch (scope) {
       case ACTIONS ->
           // The "configure this repository" session: the actions server for the action library,
@@ -295,7 +322,8 @@ final class WorkspaceMcpServers implements AgentMcpServers {
               new ScopedMcp(
                   "repository",
                   endpoints.mcpUrl("repository") + "?projectId=" + projectId,
-                  REPOSITORY_TOOLS));
+                  REPOSITORY_TOOLS,
+                  platformHeaders));
     };
   }
 
@@ -347,13 +375,18 @@ final class WorkspaceMcpServers implements AgentMcpServers {
     return switch (key) {
       case "repository" ->
           Optional.of(
-              new ScopedMcp("repository", narrowedUrl("repository", narrowing), REPOSITORY_TOOLS));
+              new ScopedMcp(
+                  "repository",
+                  narrowedUrl("repository", narrowing),
+                  REPOSITORY_TOOLS,
+                  platformHeaders));
       case "observability" ->
           Optional.of(
               new ScopedMcp(
                   "observability",
                   narrowedUrl("observability", refuseProject(narrowing, "observability")),
-                  READ_ONLY_OBSERVABILITY_TOOLS));
+                  READ_ONLY_OBSERVABILITY_TOOLS,
+                  platformHeaders));
       case "actions" ->
           Optional.of(
               new ScopedMcp(
@@ -369,7 +402,8 @@ final class WorkspaceMcpServers implements AgentMcpServers {
       // is silently irrelevant here rather than refused — a document has no reason to ask for it,
       // since the editor offers no narrowing checkbox for a server with nothing to narrow).
       case PLATFORM_KEY ->
-          platformMcpUrl.map(url -> new ScopedMcp(PLATFORM_KEY, url, PLATFORM_TOOLS));
+          platformMcpUrl.map(
+              url -> new ScopedMcp(PLATFORM_KEY, url, PLATFORM_TOOLS, platformHeaders));
       default -> Optional.empty();
     };
   }
@@ -396,6 +430,17 @@ final class WorkspaceMcpServers implements AgentMcpServers {
   @Override
   public boolean honoursNarrowing() {
     return true;
+  }
+
+  /**
+   * {@code Authorization: Bearer <token>} when this workspace was handed a {@code QITS_TOKEN},
+   * empty otherwise — see {@link #platformHeaders}'s javadoc. Attached directly to the {@code
+   * repository}, {@code observability} and {@code qits} servers above rather than read by the
+   * library: {@link AgentMcpServers#platformHeaders} says the host attaches these itself.
+   */
+  @Override
+  public Map<String, String> platformHeaders() {
+    return platformHeaders;
   }
 
   /**

@@ -871,7 +871,8 @@ public class ControlSocket {
             // The scope→server mapping is this daemon's, not the library's: the projects daemon
             // attaches one server and this one attaches three, with different narrowing and
             // different pre-approval. See WorkspaceMcpServers.
-            new WorkspaceMcpServers(endpoints, repositoryId, workspaceId, endpoints.platformUrl()),
+            new WorkspaceMcpServers(
+                endpoints, repositoryId, workspaceId, endpoints.platformUrl(), token),
             context,
             claudeMount,
             hooksPort);

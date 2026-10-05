@@ -199,7 +199,8 @@ class AgentsApiTest {
             transcripts,
             tail,
             DEFAULTS,
-            new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x", java.util.Optional.empty()),
+            new WorkspaceMcpServers(
+                ENDPOINTS, REPO, "feature-x", java.util.Optional.empty(), java.util.Optional.empty()),
             WORKSPACE,
             claudeMount.toString(),
             HOOKS_PORT);
@@ -261,7 +262,8 @@ class AgentsApiTest {
             transcripts,
             tail,
             defaults,
-            new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x", java.util.Optional.empty()),
+            new WorkspaceMcpServers(
+                ENDPOINTS, REPO, "feature-x", java.util.Optional.empty(), java.util.Optional.empty()),
             WORKSPACE,
             claudeMount.toString(),
             HOOKS_PORT);
