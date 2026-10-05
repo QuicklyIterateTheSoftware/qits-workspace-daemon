@@ -56,7 +56,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
@@ -130,6 +129,17 @@ public class ControlSocket {
   /** The qits-workspaces audience required by the protected control socket. */
   @ConfigProperty(name = "qits.workspace-daemon.auth-audience")
   Optional<String> authAudience;
+
+  /**
+   * The workspace token ({@code QITS_TOKEN}), set only on a runner-placed workspace: a non-expiring
+   * {@code tok-…} bearer the platform minted for this workspace. Where it is set it is the whole
+   * credential — the control socket and every tunnel dial-back present it as is and nothing is
+   * minted ({@link #authorization()}) — because such a workspace reaches qits only through the
+   * public edge, which admits a bearer and nothing else. Read here and nowhere else; the tunnel is
+   * handed it.
+   */
+  @ConfigProperty(name = "qits.workspace-daemon.token")
+  Optional<String> token;
 
   // Identity is Optional<String>, not @ConfigProperty(defaultValue = ""): SmallRye treats an empty
   // default as "no value" and fails to resolve a plain String when the env is absent (the same
@@ -649,9 +659,13 @@ public class ControlSocket {
     // before the API is up simply fails to connect to loopback and answers nothing.
     tunnel =
         new DaemonStreamTunnel(
-            vertx, url.get(), workspaceApi.apiPort(), editor == null ? 0 : editor.port());
+            vertx,
+            url.get(),
+            bearer(),
+            workspaceApi.apiPort(),
+            editor == null ? 0 : editor.port());
     tunnel.start();
-    client = vertx.createWebSocketClient();
+    client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
       vertx.setPeriodic(heartbeatIntervalMs, id -> heartbeat());
     }
@@ -1063,12 +1077,8 @@ public class ControlSocket {
   }
 
   private void connect(URI uri, int attempt, Optional<String> authorization) {
-    int port = uri.getPort() != -1 ? uri.getPort() : 80;
-    WebSocketConnectOptions options =
-        new WebSocketConnectOptions().setHost(uri.getHost()).setPort(port).setURI(uri.getRawPath());
-    authorization.ifPresent(value -> options.addHeader("Authorization", value));
     client
-        .connect(options)
+        .connect(dialOptions(uri, authorization))
         .onSuccess(this::onConnected)
         .onFailure(
             t -> {
@@ -1079,11 +1089,34 @@ public class ControlSocket {
   }
 
   /**
-   * Mint the commissioned container's machine token without blocking the Vert.x event loop. Absent
-   * configuration keeps the clone-alone/developer topology anonymous; a partial configuration fails
-   * closed and is retried with the socket.
+   * The control socket's connect options: TLS and the default port follow the url's scheme ({@link
+   * DaemonDial}), and {@code authorization} rides as the {@code Authorization} header.
+   */
+  static WebSocketConnectOptions dialOptions(URI uri, Optional<String> authorization) {
+    return DaemonDial.connectOptions(uri, authorization);
+  }
+
+  /** The workspace token as a header value, or empty when this workspace was handed none. */
+  Optional<String> bearer() {
+    return token == null
+        ? Optional.empty()
+        : token.filter(value -> !value.isBlank()).map(value -> "Bearer " + value.trim());
+  }
+
+  /**
+   * The control socket's {@code Authorization}, without blocking the Vert.x event loop.
+   *
+   * <p>The workspace token wins outright: present, it is the header and nothing is minted. Absent,
+   * the commissioned pair is exchanged for a machine token by {@code client_secret_post} — the
+   * client id and secret in the form body, no {@code Basic} header, because the edge eats a {@code
+   * Basic} header rather than forwarding it. Absent configuration keeps the clone-alone/developer
+   * topology anonymous; a partial configuration fails closed and is retried with the socket.
    */
   java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
+    Optional<String> bearer = bearer();
+    if (bearer.isPresent()) {
+      return java.util.concurrent.CompletableFuture.completedFuture(bearer);
+    }
     boolean any =
         commissionedClientId.isPresent()
             || commissionedClientSecret.isPresent()
@@ -1101,18 +1134,16 @@ public class ControlSocket {
     }
     HttpRequest request;
     try {
-      String basic =
-          Base64.getEncoder()
-              .encodeToString(
-                  (commissionedClientId.get() + ":" + commissionedClientSecret.get())
-                      .getBytes(StandardCharsets.UTF_8));
       String form =
-          "grant_type=client_credentials&audience="
+          "grant_type=client_credentials&client_id="
+              + URLEncoder.encode(commissionedClientId.get(), StandardCharsets.UTF_8)
+              + "&client_secret="
+              + URLEncoder.encode(commissionedClientSecret.get(), StandardCharsets.UTF_8)
+              + "&audience="
               + URLEncoder.encode(authAudience.get(), StandardCharsets.UTF_8);
       request =
           HttpRequest.newBuilder(URI.create(authTokenUrl.get()))
               .timeout(Duration.ofSeconds(5))
-              .header("Authorization", "Basic " + basic)
               .header("Content-Type", "application/x-www-form-urlencoded")
               .POST(HttpRequest.BodyPublishers.ofString(form))
               .build();

@@ -9,16 +9,25 @@ import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketClient;
+import io.vertx.core.dns.AddressResolverOptions;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.NetSocket;
+import io.vertx.core.net.PfxOptions;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -26,6 +35,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * The reverse tunnel over real sockets: a real Vert.x server plays qits' dial-back endpoint, a real
@@ -49,6 +59,9 @@ import org.junit.jupiter.api.Test;
 class DaemonStreamTunnelTest {
 
   private static final String STREAM_PATH = "/workspaces/daemon/stream/test-nonce";
+
+  /** The TLS test's stand-in for {@code workspaces.qits.<domain>}. */
+  private static final String EDGE_HOST = "workspaces.qits.test";
 
   private Vertx vertx;
 
@@ -75,6 +88,9 @@ class DaemonStreamTunnelTest {
 
   private final CompletableFuture<Void> dialBackArrived = new CompletableFuture<>();
 
+  /** The {@code Authorization} each dial-back carried, {@code ""} for none. */
+  private final CopyOnWriteArrayList<String> dialAuthorization = new CopyOnWriteArrayList<>();
+
   @BeforeEach
   void setUp() throws Exception {
     vertx = Vertx.vertx();
@@ -83,6 +99,8 @@ class DaemonStreamTunnelTest {
     qits.webSocketHandler(
         socket -> {
           dialled.add(socket.path());
+          String authorization = socket.headers().get("Authorization");
+          dialAuthorization.add(authorization == null ? "" : authorization);
           lastDialBack.set(socket);
           dialBackArrived.complete(null);
         });
@@ -310,6 +328,160 @@ class DaemonStreamTunnelTest {
     assertFalse(dialBackArrived.isDone());
   }
 
+  @Test
+  void theDialBackCarriesTheWorkspaceBearerWhenOneIsSet() throws Exception {
+    api = vertx.createHttpServer();
+    api.requestHandler(req -> req.response().end("api:" + req.uri()));
+    await(api.listen(0, "127.0.0.1"));
+    tunnel =
+        new DaemonStreamTunnel(
+            vertx,
+            "ws://127.0.0.1:" + qits.actualPort() + "/workspaces/daemon/7",
+            Optional.of("Bearer t"),
+            api.actualPort(),
+            0);
+    tunnel.start();
+
+    tunnel.open("test-nonce", STREAM_PATH);
+    dialBackArrived.get(15, TimeUnit.SECONDS);
+
+    assertEquals(List.of("Bearer t"), dialAuthorization);
+    assertEquals("api:/files", requestThroughTunnel("/files"));
+  }
+
+  @Test
+  void theDialBackCarriesNoAuthorizationWithoutAToken() throws Exception {
+    api = vertx.createHttpServer();
+    api.requestHandler(req -> req.response().end("api:" + req.uri()));
+    await(api.listen(0, "127.0.0.1"));
+    startTunnel(api.actualPort());
+
+    tunnel.open("test-nonce", STREAM_PATH);
+    dialBackArrived.get(15, TimeUnit.SECONDS);
+
+    assertEquals(List.of(""), dialAuthorization, "a DIRECT workspace's dial-back is nonce only");
+  }
+
+  @Test
+  void aWssUrlIsDialledOverTlsNotPlain() throws Exception {
+    // The plain dial-back server cannot complete a TLS handshake, so a wss url that is honoured
+    // never arrives there — where a wss url silently dialled as ws would.
+    api = vertx.createHttpServer();
+    api.requestHandler(req -> req.response().end("api:" + req.uri()));
+    await(api.listen(0, "127.0.0.1"));
+    tunnel =
+        new DaemonStreamTunnel(
+            vertx,
+            "wss://127.0.0.1:" + qits.actualPort() + "/workspaces/daemon/7",
+            Optional.of("Bearer t"),
+            api.actualPort(),
+            0);
+    tunnel.start();
+
+    tunnel.open("test-nonce", STREAM_PATH);
+    Thread.sleep(1000);
+
+    assertTrue(dialled.isEmpty(), "a wss dial must not arrive at a plain server: " + dialled);
+  }
+
+  @Test
+  void bothDialsCompleteATlsHandshakeAgainstATrustedCertificate(@TempDir Path dir)
+      throws Exception {
+    // The edge in miniature: a TLS server whose self-signed certificate for its host is trusted
+    // only through a test trust store installed as the JVM default — the same default trust store
+    // the daemon relies on against the edge's public certificate, so nothing about the dial is
+    // configured for the test. Host verification is on, so a certificate for any other name would
+    // fail the handshake; SNI is read back on the server. The name is dotted on purpose: the JDK
+    // sends no SNI for a dotless host such as `localhost`, so the edge's shape needs a real FQDN,
+    // which this test's own Vert.x resolves to loopback.
+    await(vertx.close());
+    qits = null;
+    vertx =
+        Vertx.vertx(
+            new VertxOptions()
+                .setAddressResolverOptions(
+                    new AddressResolverOptions()
+                        .setHostsValue(Buffer.buffer("127.0.0.1 " + EDGE_HOST + "\n"))));
+    ctx = vertx.getOrCreateContext();
+    Path keyStore = selfSignedEdge(dir);
+    String previousStore = System.getProperty("javax.net.ssl.trustStore");
+    String previousPassword = System.getProperty("javax.net.ssl.trustStorePassword");
+    String previousType = System.getProperty("javax.net.ssl.trustStoreType");
+    System.setProperty("javax.net.ssl.trustStore", dir.resolve("trust.p12").toString());
+    System.setProperty("javax.net.ssl.trustStorePassword", "changeit");
+    System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
+    HttpServer edge = null;
+    try {
+      CopyOnWriteArrayList<String> seen = new CopyOnWriteArrayList<>();
+      CompletableFuture<ServerWebSocket> tunnelDial = new CompletableFuture<>();
+      CompletableFuture<Void> controlDial = new CompletableFuture<>();
+      edge =
+          vertx.createHttpServer(
+              new HttpServerOptions()
+                  .setSsl(true)
+                  .setSni(true)
+                  .setKeyCertOptions(
+                      new PfxOptions().setPath(keyStore.toString()).setPassword("changeit")));
+      edge.requestHandler(
+          req -> {
+            seen.add(
+                req.path()
+                    + " sni="
+                    + req.connection().indicatedServerName()
+                    + " auth="
+                    + req.getHeader("Authorization"));
+            req.toWebSocket()
+                .onSuccess(
+                    socket -> {
+                      if (req.path().equals(STREAM_PATH)) {
+                        tunnelDial.complete(socket);
+                      } else {
+                        controlDial.complete(null);
+                      }
+                    });
+          });
+      await(edge.listen(0, "127.0.0.1"));
+      String socketUrl = "wss://" + EDGE_HOST + ":" + edge.actualPort() + "/workspaces/daemon/7";
+
+      // The control socket's dial: its own options, on a client built as ControlSocket builds it.
+      WebSocketClient control = vertx.createWebSocketClient(DaemonDial.clientOptions());
+      Promise<WebSocket> connected = Promise.promise();
+      ctx.runOnContext(
+          v ->
+              control
+                  .connect(
+                      ControlSocket.dialOptions(URI.create(socketUrl), Optional.of("Bearer t")))
+                  .onComplete(connected));
+      await(connected.future());
+      controlDial.get(15, TimeUnit.SECONDS);
+
+      // The tunnel's dial-back, through the real tunnel, to the same authority.
+      api = vertx.createHttpServer();
+      api.requestHandler(req -> req.response().end("api:" + req.uri()));
+      await(api.listen(0, "127.0.0.1"));
+      tunnel =
+          new DaemonStreamTunnel(vertx, socketUrl, Optional.of("Bearer t"), api.actualPort(), 0);
+      tunnel.start();
+      tunnel.open("test-nonce", STREAM_PATH);
+      lastDialBack.set(tunnelDial.get(15, TimeUnit.SECONDS));
+
+      assertEquals("api:/files", requestThroughTunnel("/files"));
+      assertEquals(
+          List.of(
+              "/workspaces/daemon/7 sni=" + EDGE_HOST + " auth=Bearer t",
+              STREAM_PATH + " sni=" + EDGE_HOST + " auth=Bearer t"),
+          seen);
+      control.close();
+    } finally {
+      if (edge != null) {
+        edge.close();
+      }
+      restore("javax.net.ssl.trustStore", previousStore);
+      restore("javax.net.ssl.trustStorePassword", previousPassword);
+      restore("javax.net.ssl.trustStoreType", previousType);
+    }
+  }
+
   // --- helpers ------------------------------------------------------------------------------------
 
   /**
@@ -383,6 +555,47 @@ class DaemonStreamTunnelTest {
     Promise<WebSocket> promise = Promise.promise();
     ctx.runOnContext(v -> client.connect(bridgePort, "127.0.0.1", path).onComplete(promise));
     return await(promise.future());
+  }
+
+  /**
+   * A PKCS12 key store holding a self-signed certificate for {@link #EDGE_HOST}, and beside it
+   * ({@code trust.p12}) a trust store holding only that certificate. {@code keytool} rather than a
+   * certificate library: it ships with every JDK, and nothing new lands on the test classpath.
+   */
+  private static Path selfSignedEdge(Path dir) throws Exception {
+    Path keyStore = dir.resolve("server.p12");
+    Path cert = dir.resolve("server.cer");
+    Path trust = dir.resolve("trust.p12");
+    keytool(
+        "-genkeypair", "-alias", "edge", "-keyalg", "EC", "-groupname", "secp256r1",
+        "-dname", "CN=" + EDGE_HOST, "-ext", "san=dns:" + EDGE_HOST, "-validity", "2",
+        "-storetype", "PKCS12", "-keystore", keyStore.toString(),
+        "-storepass", "changeit", "-keypass", "changeit");
+    keytool(
+        "-exportcert", "-alias", "edge", "-keystore", keyStore.toString(),
+        "-storepass", "changeit", "-file", cert.toString());
+    keytool(
+        "-importcert", "-noprompt", "-alias", "edge", "-file", cert.toString(),
+        "-storetype", "PKCS12", "-keystore", trust.toString(), "-storepass", "changeit");
+    assertTrue(Files.exists(trust));
+    return keyStore;
+  }
+
+  private static void keytool(String... args) throws Exception {
+    List<String> command = new java.util.ArrayList<>();
+    command.add(Path.of(System.getProperty("java.home"), "bin", "keytool").toString());
+    command.addAll(List.of(args));
+    Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+    String output = new String(process.getInputStream().readAllBytes());
+    assertEquals(0, process.waitFor(), "keytool failed: " + output);
+  }
+
+  private static void restore(String key, String previous) {
+    if (previous == null) {
+      System.clearProperty(key);
+    } else {
+      System.setProperty(key, previous);
+    }
   }
 
   private static int freePort() throws Exception {
