@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentState;
 import io.vertx.core.json.JsonObject;
 import java.util.ArrayList;
@@ -136,6 +137,28 @@ class HookWebhookTest {
     webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), null);
 
     assertTrue(forwarded.isEmpty());
+  }
+
+  @Test
+  void aKilledAgentIsRelayedAsEndedWithItsExitCodeAndLeavesTheReplay() {
+    // A SIGKILLed agent fires no hook: without this frame the host keeps the IDLE it last heard,
+    // and a reconnect would replay it for a process that is gone.
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+
+    webhook.killed("cmd-1", AgentEvent.OOM_KILLED, 137, "killed by the out-of-memory killer");
+
+    AgentActivity killed = lastSent();
+    assertEquals(AgentState.ENDED, killed.state());
+    assertEquals(AgentEvent.OOM_KILLED, killed.hookEvent());
+    assertEquals(Integer.valueOf(137), killed.exitCode());
+    assertEquals("killed by the out-of-memory killer", killed.message());
+    assertEquals("11111111-1111-1111-1111-111111111111", killed.sessionId());
+    assertEquals("cmd-1=ENDED", forwarded.get(forwarded.size() - 1));
+
+    sent.clear();
+    webhook.reportCurrent();
+    assertTrue(sent.isEmpty(), "a killed agent is not replayed");
   }
 
   @Test

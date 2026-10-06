@@ -132,6 +132,15 @@ public final class DaemonCodec {
         map.put(Field.SOURCE, m.source());
         map.put(Field.TRANSCRIPT_PATH, m.transcriptPath());
         map.put(Field.AT, m.at());
+        // A kill's two fields are written only when present, OpenStream's rule: every hook-driven
+        // frame stays byte-identical to what it was before they existed, and a backend that never
+        // learned them simply does not read the keys.
+        if (m.exitCode() != null) {
+          map.put(Field.EXIT_CODE, m.exitCode());
+        }
+        if (m.message() != null) {
+          map.put(Field.MESSAGE, m.message());
+        }
       }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
@@ -266,7 +275,9 @@ public final class DaemonCodec {
               str(map, Field.HOOK_EVENT),
               str(map, Field.SOURCE),
               str(map, Field.TRANSCRIPT_PATH),
-              longVal(map, Field.AT));
+              longVal(map, Field.AT),
+              intObj(map, Field.EXIT_CODE),
+              str(map, Field.MESSAGE));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(

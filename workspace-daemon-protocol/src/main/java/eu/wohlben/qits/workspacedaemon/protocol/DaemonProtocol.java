@@ -53,8 +53,16 @@ public final class DaemonProtocol {
    * runner-placed workspace whose daemon is older with "update the workspace image" rather than
    * opening a stream that will never arrive. The new field is optional on the wire, so every
    * frame that is not a {@code SERVICE} stream is unchanged in both directions.
+   *
+   * <p><b>7 added the killed agent</b> (qits-951): an {@link AgentActivity} the daemon sends itself,
+   * {@code ENDED} with an {@link AgentEvent} as its {@code hookEvent}, when an agent's process dies
+   * by SIGKILL — and the frame's two optional fields, {@link AgentActivity#exitCode()} and {@link
+   * AgentActivity#message()}, that say what killed it. Nothing gates on this number. A backend on
+   * 6 decodes the frame (unknown keys are not read) and gets an {@code ENDED} it already
+   * understands, which is already better than the stale {@code IDLE} it kept before; it simply has
+   * no sentence to show for it.
    */
-  public static final int CAPABILITY_VERSION = 6;
+  public static final int CAPABILITY_VERSION = 7;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -160,6 +168,7 @@ public final class DaemonProtocol {
     public static final String CORRELATION_ID = "correlationId";
     public static final String STREAM = "stream";
     public static final String TEXT = "text";
+    // Also optional on AgentActivity, with MESSAGE: written only on a killed agent's frame.
     public static final String EXIT_CODE = "exitCode";
     public static final String HEAD = "head";
     public static final String DIRTY = "dirty";
@@ -217,5 +226,26 @@ public final class DaemonProtocol {
     public static final String ENDED = "ENDED";
 
     private AgentState() {}
+  }
+
+  /**
+   * The {@code hookEvent} values of the {@link AgentActivity} frames the daemon sends <em>without</em>
+   * a hook — always with {@link AgentState#ENDED}. Named like the harness's own events so a reader
+   * of the host's log cannot mistake one for the other, and never a name Claude Code or Kimi Code
+   * fires.
+   *
+   * <p>An agent killed by SIGKILL (exit 137) runs no hook, so the daemon reports its end from the
+   * process exit. Which of the two it is depends on the container's cgroup v2 {@code memory.events}:
+   * an {@code oom_kill} counted while the command ran is the OOM killer; no count, or no cgroup v2 to
+   * read, is a plain SIGKILL — still a death mid-turn, and still not a turn that finished.
+   */
+  public static final class AgentEvent {
+    /** The cgroup's out-of-memory killer took the agent's process. */
+    public static final String OOM_KILLED = "OomKilled";
+
+    /** The agent's process died by SIGKILL, and the cgroup counted no OOM kill for it. */
+    public static final String KILLED = "Killed";
+
+    private AgentEvent() {}
   }
 }

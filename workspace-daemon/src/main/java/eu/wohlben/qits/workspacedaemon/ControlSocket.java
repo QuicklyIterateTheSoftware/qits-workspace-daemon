@@ -20,6 +20,7 @@ import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
@@ -781,8 +782,15 @@ public class ControlSocket {
         new DaemonWorkspaceContext(repositoryId, workspaceId, () -> branch, monitor::head);
     CommandStore store = new CommandStore();
     CommandLogService logs = new CommandLogService(store, null);
+    AgentKillWatch kills =
+        new AgentKillWatch(store, new CgroupMemory(CgroupMemory.CONTAINER), this::reportKill);
     CommandLifecycleService lifecycle =
-        new CommandLifecycleService(store, () -> nudge(WorkspaceChangeTopic.COMMANDS));
+        new CommandLifecycleService(
+            store,
+            () -> {
+              nudge(WorkspaceChangeTopic.COMMANDS);
+              kills.commandsChanged();
+            });
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
     commands = commandRegistry;
     CommandService commandService =
@@ -889,6 +897,18 @@ public class ControlSocket {
     reportHarnessCapabilities(
         new HarnessCapabilityService(processes, authStatus, claudeMount, WORKSPACE_DIR.toPath()));
     LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
+  }
+
+  /**
+   * Relays a killed agent's end through the webhook, which owns the per-command replay ({@link
+   * HookWebhook#killed}). The webhook is started in {@link #start()} before any command can exist,
+   * so the null check is for a daemon torn down mid-exit, not for a race at boot.
+   */
+  private void reportKill(String commandId, String hookEvent, int exitCode, String message) {
+    HookWebhook h = hooks;
+    if (h != null) {
+      h.killed(commandId, hookEvent, exitCode, message);
+    }
   }
 
   /**
@@ -1346,10 +1366,13 @@ public class ControlSocket {
         send(message, ws);
         return;
       }
+      // A killed agent's ENDED is terminal in the same sense: it is the only frame that will ever
+      // say the agent died, and the replay on reconnect has already forgotten the command.
       boolean terminal =
           message instanceof Provisioned
               || message instanceof ProvisionFailed
-              || message instanceof Bootstrapped;
+              || message instanceof Bootstrapped
+              || (message instanceof AgentActivity activity && activity.exitCode() != null);
       if (terminal || pendingOutbound.size() < PENDING_OUTBOUND_CAP) {
         pendingOutbound.offer(message);
       }
