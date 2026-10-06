@@ -136,6 +136,34 @@ final class HookWebhook {
     forward(commandId, state);
   }
 
+  /**
+   * Relays the end of an agent that was killed and so fired no hook ({@link AgentKillWatch}): an
+   * {@code ENDED} frame carrying {@code hookEvent} (an {@code AgentEvent}), the exit code and the
+   * sentence saying what killed it. It goes through here rather than straight to the socket because
+   * this class owns the per-command replay: the killed command's last state is evicted exactly as a
+   * {@code SessionEnd} evicts it, so a reconnect cannot replay a dead agent's {@code BUSY} or {@code
+   * IDLE} over the truth. The session identity is carried from the last frame, when there was one.
+   */
+  void killed(String commandId, String hookEvent, int exitCode, String message) {
+    if (commandId == null || commandId.isBlank()) {
+      return;
+    }
+    AgentActivity last = lastByCommand.remove(commandId);
+    AgentActivity activity =
+        new AgentActivity(
+            commandId,
+            last == null ? null : last.sessionId(),
+            AgentState.ENDED,
+            hookEvent,
+            null,
+            last == null ? null : last.transcriptPath(),
+            System.currentTimeMillis(),
+            exitCode,
+            message);
+    send.accept(activity);
+    forward(commandId, AgentState.ENDED);
+  }
+
   /** Tells the activity listener the stored state, never letting it fail the hook. */
   private void forward(String commandId, String state) {
     if (activity == null) {

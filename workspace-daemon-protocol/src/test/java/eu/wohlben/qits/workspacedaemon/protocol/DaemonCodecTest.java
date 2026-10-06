@@ -292,6 +292,64 @@ class DaemonCodecTest {
   }
 
   @Test
+  void aKilledAgentsFrameRoundTripsItsExitCodeAndMessage() {
+    AgentActivity killed =
+        new AgentActivity(
+            "cmd-1",
+            "11111111-1111-1111-1111-111111111111",
+            DaemonProtocol.AgentState.ENDED,
+            DaemonProtocol.AgentEvent.OOM_KILLED,
+            null,
+            null,
+            42L,
+            137,
+            "the coding agent was killed by the out-of-memory killer (exit code 137, memory cap 4"
+                + " GiB)");
+    assertEquals(killed, roundTrip(killed));
+    Map<String, Object> wire = DaemonCodec.encode(killed);
+    assertEquals(137, wire.get(DaemonProtocol.Field.EXIT_CODE));
+    assertEquals("OomKilled", wire.get(DaemonProtocol.Field.HOOK_EVENT));
+  }
+
+  @Test
+  void aHookFramePutsNoExitCodeOrMessageOnTheWire() {
+    // Both halves of the compatibility, OpenStream's way: the seven-arg form every hook frame is
+    // built with leaves the new keys off entirely, so a backend that predates them receives exactly
+    // the frame it always did.
+    AgentActivity busy =
+        new AgentActivity(
+            "cmd-1", null, DaemonProtocol.AgentState.BUSY, "UserPromptSubmit", null, null, 42L);
+    Map<String, Object> wire = DaemonCodec.encode(busy);
+    assertFalse(wire.containsKey(DaemonProtocol.Field.EXIT_CODE));
+    assertFalse(wire.containsKey(DaemonProtocol.Field.MESSAGE));
+    AgentActivity decoded = (AgentActivity) DaemonCodec.decode(wire);
+    assertEquals(null, decoded.exitCode());
+    assertEquals(null, decoded.message());
+  }
+
+  @Test
+  void keysTheDecoderDoesNotKnowAreIgnoredRatherThanFatal() {
+    // The property a capability-6 backend relies on to take the killed agent's frame: its decoder
+    // reads the keys it knows by name and never enumerates the map, so exitCode and message are
+    // simply not looked at. Proven here with a key no version knows, on the same decode path.
+    Map<String, Object> wire =
+        new java.util.LinkedHashMap<>(
+            DaemonCodec.encode(
+                new AgentActivity(
+                    "cmd-1",
+                    null,
+                    DaemonProtocol.AgentState.ENDED,
+                    DaemonProtocol.AgentEvent.KILLED,
+                    null,
+                    null,
+                    42L)));
+    wire.put("somethingNewer", Map.of("nested", 1));
+    AgentActivity decoded = (AgentActivity) DaemonCodec.decode(wire);
+    assertEquals(DaemonProtocol.AgentState.ENDED, decoded.state());
+    assertEquals(DaemonProtocol.AgentEvent.KILLED, decoded.hookEvent());
+  }
+
+  @Test
   void serviceCorrelationIdIsPrefixed() {
     assertEquals("service:dev", DaemonProtocol.serviceCorrelationId("dev"));
   }
@@ -469,7 +527,14 @@ class DaemonCodecTest {
     // copy qits-workspaces vendors: two copies at two versions is exactly the disagreement that
     // shows up as a workspace whose dev-server view never appears, and nowhere else. The host gates
     // a SERVICE stream on this number.
-    assertEquals(6, DaemonProtocol.CAPABILITY_VERSION);
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 6);
+  }
+
+  @Test
+  void theKilledAgentFrameLandedAtCapabilitySeven() {
+    // A literal for the reason the SERVICE one is: the host records it, and a capability that moved
+    // without this line moving is a contract nobody re-read.
+    assertEquals(7, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test
