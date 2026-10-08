@@ -369,7 +369,10 @@ class DaemonStreamTunnelTest {
     tunnel.open("test-nonce", STREAM_PATH);
     dialBackArrived.get(15, TimeUnit.SECONDS);
 
-    assertEquals(List.of(""), dialAuthorization, "a DIRECT workspace's dial-back is nonce only");
+    assertEquals(
+        List.of(""),
+        dialAuthorization,
+        "with no QITS_TOKEN configured the dial-back is nonce only");
   }
 
   @Test

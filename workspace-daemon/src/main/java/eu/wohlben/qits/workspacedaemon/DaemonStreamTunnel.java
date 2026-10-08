@@ -67,8 +67,10 @@ final class DaemonStreamTunnel {
 
   /**
    * The {@code Authorization} header every dial-back carries — {@code Bearer <workspace token>} on
-   * a runner-placed workspace, empty otherwise. Handed in by {@link ControlSocket}, which is the one
-   * place the token is read.
+   * a workspace carrying a {@code QITS_TOKEN} (runner-placed, or an admin/editor (DIRECT) workspace
+   * since qits-1084), empty on a container still holding a commissioned pair instead (that branch
+   * goes away outright with qits-876). Handed in by {@link ControlSocket}, which is the one place
+   * the token is read.
    */
   private final Optional<String> authorization;
 
@@ -179,8 +181,9 @@ final class DaemonStreamTunnel {
         .onSuccess(
             local ->
                 // The nonce in the path is what names (and authorises) the stream to qits; the
-                // bearer is what lets the dial-back pass the edge at all on a runner-placed
-                // workspace. TLS and the port follow the scheme, as on the control socket.
+                // bearer is what lets the dial-back pass the edge at all on a workspace carrying a
+                // QITS_TOKEN (runner-placed or admin/editor DIRECT). TLS and the port follow the
+                // scheme, as on the control socket.
                 ws.connect(DaemonDial.connectOptions(dial, authorization))
                     .onFailure(
                         t -> {

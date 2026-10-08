@@ -132,12 +132,14 @@ public class ControlSocket {
   Optional<String> authAudience;
 
   /**
-   * The workspace token ({@code QITS_TOKEN}), set only on a runner-placed workspace: a non-expiring
-   * {@code tok-…} bearer the platform minted for this workspace. Where it is set it is the whole
-   * credential — the control socket and every tunnel dial-back present it as is and nothing is
-   * minted ({@link #authorization()}) — because such a workspace reaches qits only through the
-   * public edge, which admits a bearer and nothing else. Read here and nowhere else; the tunnel is
-   * handed it.
+   * The workspace token ({@code QITS_TOKEN}): a non-expiring {@code tok-…} bearer the platform
+   * minted for this workspace, set on a runner-placed workspace and, since qits-1084, on an admin
+   * or editor (DIRECT) workspace too. Where it is set it is the whole credential — the control
+   * socket and every tunnel dial-back present it as is and nothing is minted ({@link
+   * #authorization()}) — because such a workspace reaches qits only through the public edge, which
+   * admits a bearer and nothing else. The commissioned-pair branch below is what a container still
+   * holding a pair instead falls back to; removing that branch outright is qits-876. Read here and
+   * nowhere else; the tunnel is handed it.
    */
   @ConfigProperty(name = "qits.workspace-daemon.token")
   Optional<String> token;

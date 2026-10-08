@@ -133,6 +133,35 @@ class ControlSocketAuthenticationTest {
   }
 
   @Test
+  void aDirectWorkspacesWssUrlCarriesTheWorkspaceTokenAsBearer() throws Exception {
+    // Since qits-1084 an admin or editor (DIRECT) workspace carries a QITS_TOKEN exactly like a
+    // runner-placed one, and its daemon url is the same public-edge shape
+    // (wss://<vhost>/workspaces/daemon/<id>) rather than the old in-network ws dial. The pair
+    // fields are left empty to prove the token is the whole credential without any of them
+    // configured.
+    ControlSocket socket = new ControlSocket();
+    socket.token = Optional.of("qits_tok_abc123");
+    socket.commissionedClientId = Optional.empty();
+    socket.commissionedClientSecret = Optional.empty();
+    socket.authTokenUrl = Optional.empty();
+    socket.authAudience = Optional.empty();
+
+    Optional<String> authorization = socket.authorization().get();
+    assertEquals(Optional.of("Bearer qits_tok_abc123"), authorization);
+
+    WebSocketConnectOptions options =
+        ControlSocket.dialOptions(
+            URI.create("wss://workspaces.qits.example.test/workspaces/daemon/1251"),
+            authorization);
+
+    assertTrue(options.isSsl());
+    assertEquals(443, options.getPort());
+    assertEquals("workspaces.qits.example.test", options.getHost());
+    assertEquals("/workspaces/daemon/1251", options.getURI());
+    assertEquals("Bearer qits_tok_abc123", options.getHeaders().get("Authorization"));
+  }
+
+  @Test
   void noCommissionKeepsTheDeveloperSocketAnonymous() throws Exception {
     ControlSocket socket = new ControlSocket();
     socket.commissionedClientId = Optional.empty();

@@ -294,6 +294,22 @@ class WorkspaceMcpServersTest {
   }
 
   @Test
+  void aDirectWorkspacesTokenRendersAsHeadersAndNeverAHeadersHelper() {
+    // Since qits-1084 an admin or editor (DIRECT) workspace carries a QITS_TOKEN exactly like a
+    // runner-placed one, so headersFor renders the very same static Bearer map for both — there is
+    // no DIRECT-only branch here to diverge. ScopedMcp carries only `headers`; it has no
+    // headersHelper field for a populated map to ever compete with, so there is nothing here for
+    // the harness library to choose a helper script over.
+    ScopedMcp repository =
+        withToken
+            .serverFor(
+                "repository", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, false, false))
+            .orElseThrow();
+
+    assertEquals(Map.of("Authorization", "Bearer " + TOKEN), repository.headers());
+  }
+
+  @Test
   void withoutATokenEveryServerIsByteIdenticalToTodays() {
     // Blank-but-present (the un-filled "${QITS_TOKEN:}" default) and genuinely absent both answer
     // empty — the exact same shape every server rendered before this header existed.

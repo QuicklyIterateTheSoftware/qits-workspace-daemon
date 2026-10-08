@@ -11,9 +11,11 @@ import java.util.Optional;
  * authority — the dial-back's is taken from the control-socket url — so they must agree on the
  * scheme, the port and the credential, and having one place say so is what keeps them agreeing.
  *
- * <p><b>{@code wss} is TLS.</b> A runner-placed workspace reaches qits only through the public edge
- * ({@code wss://workspaces.qits.<domain>/…}), which serves a publicly trusted certificate; a {@code
- * ws} url is the plain in-network dial a DIRECT workspace has always made. The port defaults to the
+ * <p><b>{@code wss} is TLS.</b> A workspace carrying a {@code QITS_TOKEN} — runner-placed, or
+ * (since qits-1084) an admin or editor (DIRECT) workspace — reaches qits only through the public
+ * edge ({@code wss://workspaces.qits.<domain>/…}), which serves a publicly trusted certificate; a
+ * {@code ws} url is the plain in-network dial a container still holding a commissioned pair instead
+ * makes (removing that branch outright is qits-876). The port defaults to the
  * scheme's own, 443 or 80, when the url names none. SNI needs nothing here: with {@code ssl} on,
  * Vert.x hands the connect host to the TLS engine as the peer host and the JDK engine sends it as
  * the server name. The certificate is checked against the JVM's (or the native image's) default
