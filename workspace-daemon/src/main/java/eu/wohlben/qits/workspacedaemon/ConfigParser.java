@@ -4,10 +4,7 @@ import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.AgentSection;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.RepositorySection;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.WebViewDecl;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,7 +27,11 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  * objectMapper.readValue(json, QitsConfig.class)}: an unknown value normalizes to a string that no
  * host enum matches, so deserialization fails there and the workspace surfaces a config warning —
  * the same "invalid file ⇒ warning, never block" end state as a host-side structural error here.
- * The daemon holds this parsed tree for parts 3/4 (bootstrap/services run from it).
+ * The daemon holds this parsed tree for the bootstrap chain, which runs from it.
+ *
+ * <p>A legacy {@code services:} (or older {@code daemons:}) block is <b>ignored</b>, not refused:
+ * workspace services were removed (qits-947) and a checkout that still declares them must keep the
+ * rest of its config. Unknown top-level keys are never read, so the block simply has no effect.
  */
 public final class ConfigParser {
 
@@ -78,10 +79,6 @@ public final class ConfigParser {
         repositorySection(map.get("repository")),
         frameworks(map.get("frameworks")),
         actions(map.get("actions")),
-        // Accept the new `services:` key, falling back to the legacy `daemons:` (TEMPORARY — the
-        // fixtures still commit `daemons:`; drop once their submodule round-trip lands
-        // `services:`).
-        services(map.containsKey("services") ? map.get("services") : map.get("daemons")),
         bootstrap(map.get("bootstrap")),
         agentSection(map.get("agent")));
   }
@@ -148,58 +145,6 @@ public final class ConfigParser {
     return out;
   }
 
-  private static List<ServiceDecl> services(Object raw) {
-    List<ServiceDecl> out = new ArrayList<>();
-    for (Object item : asList(raw, "services")) {
-      Map<String, Object> m = asMap(item, "services[]");
-      out.add(
-          new ServiceDecl(
-              str(m, "id"),
-              reqStr(m, "name", "services[]"),
-              str(m, "description"),
-              str(m, "start"),
-              str(m, "ready-pattern"),
-              boolOrNull(m.get("auto-start")),
-              enumOf(m.get("restart-policy")),
-              intOrNull(m.get("max-restarts"), "max-restarts"),
-              str(m, "stop-signal"),
-              strMap(m.get("environment"), "services[].environment"),
-              webView(m.get("web-view")),
-              healthChecks(m.get("health-checks"))));
-    }
-    return out;
-  }
-
-  private static WebViewDecl webView(Object raw) {
-    if (raw == null) {
-      return null;
-    }
-    Map<String, Object> m = asMap(raw, "web-view");
-    return new WebViewDecl(
-        intOrNull(m.get("port"), "web-view.port"), str(m, "entry-path"), str(m, "base-path"));
-  }
-
-  private static List<HealthCheckDecl> healthChecks(Object raw) {
-    List<HealthCheckDecl> out = new ArrayList<>();
-    for (Object item : asList(raw, "health-checks")) {
-      Map<String, Object> m = asMap(item, "health-checks[]");
-      out.add(
-          new HealthCheckDecl(
-              reqStr(m, "name", "health-checks[]"),
-              enumOf(m.get("kind")),
-              intOrNull(m.get("port"), "health-checks[].port"),
-              str(m, "path"),
-              str(m, "expect-status"),
-              str(m, "command"),
-              longOrNull(m.get("interval-ms"), "interval-ms"),
-              longOrNull(m.get("timeout-ms"), "timeout-ms"),
-              intOrNull(m.get("healthy-threshold"), "healthy-threshold"),
-              intOrNull(m.get("unhealthy-threshold"), "unhealthy-threshold"),
-              longOrNull(m.get("initial-delay-ms"), "initial-delay-ms")));
-    }
-    return out;
-  }
-
   // ---- typed extraction helpers (ported from QitsConfigParser) --------------------------------
 
   private static Map<String, Object> asMap(Object raw, String where) {
@@ -251,26 +196,6 @@ public final class ConfigParser {
       return b;
     }
     throw new ConfigException("Expected a boolean, got: " + typeOf(v));
-  }
-
-  private static Integer intOrNull(Object v, String where) {
-    if (v == null) {
-      return null;
-    }
-    if (v instanceof Number n) {
-      return n.intValue();
-    }
-    throw new ConfigException("Expected an integer at " + where + ", got: " + typeOf(v));
-  }
-
-  private static Long longOrNull(Object v, String where) {
-    if (v == null) {
-      return null;
-    }
-    if (v instanceof Number n) {
-      return n.longValue();
-    }
-    throw new ConfigException("Expected a number at " + where + ", got: " + typeOf(v));
   }
 
   private static Map<String, String> strMap(Object raw, String where) {

@@ -34,15 +34,13 @@ import org.jboss.logging.Logger;
  * bit-for-bit the workspace it was — which is why the capability announcement <em>is</em> the first
  * {@link EditorState} rather than a flag in the {@code Hello} that a stale image could contradict.
  *
- * <p>Framework-free like {@link ServiceSupervisor} and {@link HookWebhook}: {@link ControlSocket}
- * reads the two config keys and hands them in, because a capability class here cannot read
- * configuration. It borrows that supervisor's shape deliberately — {@code setsid} so the whole
- * session can be reaped by session id rather than by pid, a ready grace, exponential backoff between
- * relaunches, and a waiter thread per spawn — and diverges only where the editor is not a
- * checkout-declared dev server: there is no restart <em>policy</em> to honour (it is always ON, the
- * daemon owns this process outright), and its output is not streamed home as {@link
- * eu.wohlben.qits.workspacedaemon.protocol.CommandChunk}s, because no {@code service:<name>} process
- * segment exists for it and the browser has the editor itself to look at.
+ * <p>Framework-free like {@link HookWebhook}: {@link ControlSocket} reads the two config keys and
+ * hands them in, because a capability class here cannot read configuration. Its shape — {@code
+ * setsid} so the whole session can be reaped by session id rather than by pid, a ready grace,
+ * exponential backoff between relaunches, and a waiter thread per spawn — has no restart
+ * <em>policy</em> to honour (it is always ON, the daemon owns this process outright), and its output
+ * is not streamed home as {@link eu.wohlben.qits.workspacedaemon.protocol.CommandChunk}s, because no
+ * process segment exists for it and the browser has the editor itself to look at.
  *
  * <p><b>Nothing here may take the container down.</b> A spawn that fails, a crash loop that
  * exhausts its budget, an install directory that turns out to be empty — every one of them settles
@@ -196,7 +194,7 @@ final class EditorSupervisor {
 
   /**
    * Re-report the current state — the reconnect-adoption signal, called from {@code
-   * ControlSocket.onConnected} exactly as {@link ServiceSupervisor#reportAll()} and {@code
+   * ControlSocket.onConnected} exactly as {@code GitStatusMonitor.reportCurrent()} and {@code
    * HookWebhook.reportCurrent()} are. A qits restart lost its projection of this container; this is
    * where it gets it back, and on a first connect it is also the announcement that an editor exists.
    */
@@ -249,9 +247,9 @@ final class EditorSupervisor {
     }
     // No shell: the argv is fixed and the only interpolated values are a configured int and the
     // checkout directory this process was handed at construction, so there is nothing here to
-    // quote and nothing from the untrusted checkout to quote it against. setsid is for the same
-    // reason ServiceSupervisor uses it — the editor forks helpers (extension host, terminals) that
-    // reparent to PID 1, and only a kill by SESSION reaches them.
+    // quote and nothing from the untrusted checkout to quote it against. setsid because the editor
+    // forks helpers (extension host, terminals) that reparent to PID 1, and only a kill by SESSION
+    // reaches them.
     java.util.List<String> argv =
         new java.util.ArrayList<>(
             java.util.List.of(
@@ -472,7 +470,7 @@ final class EditorSupervisor {
     }
   }
 
-  /** Signal the editor's whole session, the way {@link ServiceSupervisor} signals a service's. */
+  /** Signal the editor's whole session, so the helpers it forked are reached too. */
   private void pkill(String signal, long session) {
     if (session <= 0) {
       return;

@@ -101,13 +101,6 @@ public final class DaemonCodec {
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.OK, m.ok());
       }
-      case ServiceTransition m -> {
-        map.put(Field.TYPE, Type.SERVICE_TRANSITION);
-        map.put(Field.WORKSPACE_ID, m.workspaceId());
-        map.put(Field.ID, m.id());
-        map.put(Field.STATE, m.state());
-        map.put(Field.EXIT_CODE, m.exitCode());
-      }
       case WorkspaceChanged m -> {
         map.put(Field.TYPE, Type.WORKSPACE_CHANGED);
         map.put(Field.WORKSPACE_ID, m.workspaceId());
@@ -168,19 +161,6 @@ public final class DaemonCodec {
         map.put(Field.CORRELATION_ID, m.correlationId());
         map.put(Field.NAME, m.name());
       }
-      case StartService m -> {
-        map.put(Field.TYPE, Type.START_SERVICE);
-        map.put(Field.CORRELATION_ID, m.correlationId());
-        map.put(Field.ID, m.id());
-        map.put(Field.SCRIPT, m.script());
-        map.put(Field.ENV, m.env() == null ? Map.of() : new LinkedHashMap<>(m.env()));
-      }
-      case SignalService m -> {
-        map.put(Field.TYPE, Type.SIGNAL_SERVICE);
-        map.put(Field.CORRELATION_ID, m.correlationId());
-        map.put(Field.ID, m.id());
-        map.put(Field.SIGNAL, m.signal());
-      }
       case PullBranch m -> {
         map.put(Field.TYPE, Type.PULL_BRANCH);
         map.put(Field.CORRELATION_ID, m.correlationId());
@@ -196,11 +176,6 @@ public final class DaemonCodec {
         // a new key.
         if (m.target() != StreamTarget.API) {
           map.put(Field.TARGET, m.target().name());
-        }
-        // Same rule for the service id: present only when there is one, so every frame that is not
-        // a SERVICE stream is byte-identical to what it was before the field existed.
-        if (m.serviceId() != null) {
-          map.put(Field.SERVICE_ID, m.serviceId());
         }
       }
     }
@@ -261,12 +236,6 @@ public final class DaemonCodec {
               intVal(map, Field.EXIT_CODE));
       case Type.BOOTSTRAPPED ->
           new Bootstrapped(str(map, Field.WORKSPACE_ID), boolVal(map, Field.OK));
-      case Type.SERVICE_TRANSITION ->
-          new ServiceTransition(
-              str(map, Field.WORKSPACE_ID),
-              str(map, Field.ID),
-              str(map, Field.STATE),
-              intObj(map, Field.EXIT_CODE));
       case Type.WORKSPACE_CHANGED ->
           new WorkspaceChanged(str(map, Field.WORKSPACE_ID), str(map, Field.TOPIC));
       case Type.GIT_STATUS ->
@@ -295,24 +264,12 @@ public final class DaemonCodec {
       case Type.DESCRIBE_CONFIG -> new DescribeConfig(str(map, Field.CORRELATION_ID));
       case Type.RUN_BOOTSTRAP ->
           new RunBootstrap(str(map, Field.CORRELATION_ID), str(map, Field.NAME));
-      case Type.START_SERVICE ->
-          new StartService(
-              str(map, Field.CORRELATION_ID),
-              str(map, Field.ID),
-              str(map, Field.SCRIPT),
-              strMap(map, Field.ENV));
-      case Type.SIGNAL_SERVICE ->
-          new SignalService(
-              str(map, Field.CORRELATION_ID), str(map, Field.ID), str(map, Field.SIGNAL));
       case Type.PULL_BRANCH ->
           new PullBranch(str(map, Field.CORRELATION_ID), str(map, Field.BRANCH));
       case Type.EDITOR_STATE -> new EditorState(str(map, Field.STATE));
       case Type.OPEN_STREAM ->
           new OpenStream(
-              str(map, Field.NONCE),
-              str(map, Field.PATH),
-              streamTarget(map, Field.TARGET),
-              str(map, Field.SERVICE_ID));
+              str(map, Field.NONCE), str(map, Field.PATH), streamTarget(map, Field.TARGET));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };

@@ -13,9 +13,8 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  * reconnect re-report every other in-daemon reporter does) and then one frame per transition.
  *
  * <p>No {@code workspaceId}: like {@link AgentActivity}, this rides a socket the host opened for
- * one workspace and already routes by. {@code state} is a plain String for the reason {@link
- * ServiceTransition}'s is — the framework-free protocol module stays free of the host's display
- * enums, which mirror {@link State} by name.
+ * one workspace and already routes by. {@code state} is a plain String so the framework-free
+ * protocol module stays free of the host's display enums, which mirror {@link State} by name.
  */
 public record EditorState(String state) implements DaemonMessage {
 
@@ -23,8 +22,7 @@ public record EditorState(String state) implements DaemonMessage {
    * The {@link #state()} values.
    *
    * <p>Three, not five: the editor is one process the daemon owns outright, so there is no policy
-   * outcome to report the way {@link ServiceTransition} reports {@code RESTARTING}/{@code CRASHED}
-   * for a checkout-declared dev server. A restart is the editor going back to {@link #STARTING};
+   * outcome such as {@code RESTARTING}/{@code CRASHED} to report. A restart is the editor going back to {@link #STARTING};
    * what the host's proxy needs to know is only whether the port answers yet, and what its splash
    * needs to know is whether it should keep waiting.
    */

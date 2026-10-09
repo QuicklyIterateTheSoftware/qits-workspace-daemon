@@ -25,8 +25,8 @@ import org.junit.jupiter.api.io.TempDir;
  * Container-free coverage of the web-editor supervisor: a fake {@code bin/openvscode-server} script
  * stands in for the real one, so the whole lifecycle — the argv the editor is launched with, the two
  * routes to {@code RUNNING}, the crash/backoff/budget path to {@code ENDED}, shutdown termination
- * and the reconnect re-report — runs against real processes, the way {@link ServiceSupervisorTest}
- * covers the service supervisor. No image with openvscode-server in it is needed to prove any of it.
+ * and the reconnect re-report — runs against real processes. No image with openvscode-server in it
+ * is needed to prove any of it.
  *
  * <p>The two cases worth naming are the ones the epic turns on. The <b>argv</b> test is the loopback
  * bind: an editor on {@code 0.0.0.0} would be an unauthenticated shell over an untrusted checkout,

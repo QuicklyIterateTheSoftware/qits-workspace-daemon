@@ -203,47 +203,6 @@ class DaemonCodecTest {
   }
 
   @Test
-  void startDaemonRoundTrips() {
-    StartService start = new StartService("c1", "dev", "quarkus dev", Map.of("PORT", "8080"));
-    assertEquals(start, roundTrip(start));
-    assertEquals(
-        DaemonProtocol.Type.START_SERVICE,
-        DaemonCodec.encode(start).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void startDaemonRoundTripsWithBlankScriptAndEmptyEnv() {
-    StartService start = new StartService("c1", "dev", "", Map.of());
-    assertEquals(start, roundTrip(start));
-  }
-
-  @Test
-  void signalDaemonRoundTrips() {
-    SignalService signal = new SignalService("c1", "dev", "TERM");
-    assertEquals(signal, roundTrip(signal));
-    assertEquals(
-        DaemonProtocol.Type.SIGNAL_SERVICE,
-        DaemonCodec.encode(signal).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void daemonEventRoundTripsWithExitCode() {
-    ServiceTransition crashed =
-        new ServiceTransition("ws-1", "dev", ServiceTransition.State.CRASHED, 3);
-    assertEquals(crashed, roundTrip(crashed));
-    assertEquals(
-        DaemonProtocol.Type.SERVICE_TRANSITION,
-        DaemonCodec.encode(crashed).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void daemonEventRoundTripsWithNullExitCode() {
-    ServiceTransition ready =
-        new ServiceTransition("ws-1", "dev", ServiceTransition.State.READY, null);
-    assertEquals(ready, roundTrip(ready));
-  }
-
-  @Test
   void gitStatusRoundTripsBothCleanStates() {
     GitStatus clean = new GitStatus("ws-1", true, "abc123");
     GitStatus dirty = new GitStatus("ws-1", false, "abc123");
@@ -419,11 +378,6 @@ class DaemonCodecTest {
   }
 
   @Test
-  void serviceCorrelationIdIsPrefixed() {
-    assertEquals("service:dev", DaemonProtocol.serviceCorrelationId("dev"));
-  }
-
-  @Test
   void pullBranchRoundTrips() {
     PullBranch pull = new PullBranch("c1", "feature");
     assertEquals(pull, roundTrip(pull));
@@ -477,20 +431,9 @@ class DaemonCodecTest {
   }
 
   @Test
-  void openStreamRoundTripsAServiceTargetWithItsId() {
-    OpenStream service =
-        new OpenStream(
-            "Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.SERVICE, "frontend");
-    assertEquals(service, roundTrip(service));
-    Map<String, Object> wire = DaemonCodec.encode(service);
-    assertEquals("SERVICE", wire.get(DaemonProtocol.Field.TARGET));
-    assertEquals("frontend", wire.get(DaemonProtocol.Field.SERVICE_ID));
-  }
-
-  @Test
-  void anEditorFrameIsUnchangedByTheServiceId() {
-    // The frame a capability-5 host sends for the editor: exactly nonce, path and target — no
-    // serviceId key appears on encode, and the same map decodes to the same message.
+  void anEditorFrameIsExactlyNoncePathAndTarget() {
+    // The frame a capability-5 host sends for the editor: exactly nonce, path and target, and the
+    // same map decodes to the same message.
     OpenStream editor =
         new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.EDITOR);
     Map<String, Object> wire = DaemonCodec.encode(editor);
@@ -507,11 +450,10 @@ class DaemonCodecTest {
         wire);
     OpenStream decoded = (OpenStream) DaemonCodec.decode(wire);
     assertEquals(editor, decoded);
-    assertEquals(null, decoded.serviceId());
   }
 
   @Test
-  void anOldFrameWithNoTargetStillDecodesAsTheApiWithNoServiceId() {
+  void anOldFrameWithNoTargetStillDecodesAsTheApi() {
     Map<String, Object> map =
         Map.of(
             DaemonProtocol.Field.TYPE,
@@ -523,18 +465,13 @@ class DaemonCodecTest {
     OpenStream decoded = (OpenStream) DaemonCodec.decode(map);
     assertEquals(new OpenStream("n", "/x"), decoded);
     assertEquals(StreamTarget.API, decoded.target());
-    assertEquals(null, decoded.serviceId());
   }
 
   @Test
-  void aServiceStreamWithoutAServiceIdIsRefused() {
-    assertThrows(
-        IllegalArgumentException.class, () -> new OpenStream("n", "/x", StreamTarget.SERVICE));
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> new OpenStream("n", "/x", StreamTarget.SERVICE, " "));
-    // On the wire too: a SERVICE frame that names no service is undecodable, so ControlSocket
-    // drops it rather than the tunnel guessing which service was meant.
+  void aServiceStreamFromAnOlderHostIsUndecodable() {
+    // Workspace services were removed at capability 9 (qits-947). A host that still asks for a
+    // SERVICE stream sends a target this daemon cannot name, so the frame is undecodable and
+    // ControlSocket drops it — the fail-closed rule below, not a fallback to the API.
     Map<String, Object> map =
         Map.of(
             DaemonProtocol.Field.TYPE,
@@ -546,6 +483,18 @@ class DaemonCodecTest {
             DaemonProtocol.Field.TARGET,
             "SERVICE");
     assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(map));
+  }
+
+  @Test
+  void theRetiredServiceFramesAreUndecodable() {
+    // The pre-rename wire tags the removed service messages travelled under (qits-947). An older
+    // host's start/signal is dropped by ControlSocket's catch rather than handled.
+    for (String tag : List.of("daemonEvent", "startDaemon", "signalDaemon")) {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> DaemonCodec.decode(Map.of(DaemonProtocol.Field.TYPE, tag)),
+          tag);
+    }
   }
 
   @Test
@@ -591,27 +540,22 @@ class DaemonCodecTest {
   }
 
   @Test
-  void theServiceTunnelTargetLandedAtCapabilitySix() {
-    // Spelled as a literal because this file is also the drift detector between this module and the
-    // copy qits-workspaces vendors: two copies at two versions is exactly the disagreement that
-    // shows up as a workspace whose dev-server view never appears, and nowhere else. The host gates
-    // a SERVICE stream on this number.
-    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 6);
-  }
-
-  @Test
   void theKilledAgentFrameLandedAtCapabilitySeven() {
-    // No longer the bleeding edge now that 8 exists (see the test below), so this one steps down to
-    // the SERVICE test's >=: the fact this capability still holds does not need re-asserting every
-    // time a later one lands.
+    // No longer the bleeding edge now that later versions exist, so this one steps down to a >=: the
+    // fact this capability still holds does not need re-asserting every time a later one lands.
     assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 7);
   }
 
   @Test
   void theAwaitingInputVerdictLandedAtCapabilityEight() {
-    // A literal for the reason the killed-agent one was: the host records it, and a capability that
-    // moved without this line moving is a contract nobody re-read.
-    assertEquals(8, DaemonProtocol.CAPABILITY_VERSION);
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 8);
+  }
+
+  @Test
+  void workspaceServicesWereRemovedAtCapabilityNine() {
+    // A literal: the host records it, and a capability that moved without this line moving is a
+    // contract nobody re-read.
+    assertEquals(9, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test

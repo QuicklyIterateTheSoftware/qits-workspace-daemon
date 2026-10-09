@@ -5,7 +5,7 @@ lifetime.
 
 A workspace is a branch ref in a repository's bare origin plus a container that clones that branch
 into `/workspace`. This binary is that container's PID-1 child. It provisions the checkout, keeps it
-synced with its origin, supervises the repository's dev servers, serves the working tree, and runs
+synced with its origin, runs its bootstrap chain, serves the working tree, and runs
 the commands and coding agents the user drives from the browser. Everything on the host's side of the
 boundary belongs to
 [qits-workspaces-service](https://github.com/QuicklyIterateTheSoftware/qits-workspaces-service).
@@ -19,7 +19,7 @@ boundary belongs to
 | `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. **Released**, as `eu.wohlben.qits:qits-workspace-daemon-protocol` — it also carries `WorkspaceImage`, the version of the image and daemon binary this release produced, which is how qits-workspaces pins them. |
 | `workspace-daemon-files/` | Reading the checkout: file listing, content, lazy directories, gitignore. |
 | `workspace-daemon-detection/` | Framework detection and the component map, over `workspace-daemon-files`. |
-| `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, service and web-editor supervision. Wires every module above by hand. |
+| `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, the bootstrap chain and web-editor supervision. Wires every module above by hand. |
 
 The first three are **framework-free**: no Quarkus, no CDI, no JAX-RS, no Jackson. They are plain
 jars with plain constructors that `ControlSocket` news up. That is not stylistic — it is what keeps
@@ -61,7 +61,7 @@ declares a `<repositories>` block. Inside CI and the Dockerfile's builder stage,
 ## The two channels
 
 **The control socket** — the daemon dials `ws://<host>/workspaces/daemon/{workspaceId}` on boot and
-keeps it open. Provisioning progress, bootstrap steps, service transitions, working-tree status,
+keeps it open. Provisioning progress, bootstrap steps, working-tree status,
 agent activity and change nudges all ride it. Message shapes live in `workspace-daemon-protocol`;
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.
@@ -73,7 +73,7 @@ set keeps the clone-alone/local topology anonymous, while a partial set fails cl
 rather than silently dropping authentication.
 
 **The HTTP API** — a bearer-authenticated server on `127.0.0.1:13338` serving the working tree, the
-commands surface, the coding-agent surface, the service and bootstrap surfaces, and the two
+commands surface, the coding-agent surface, the bootstrap surface, and the two
 interactive websockets. It **does not bind** without `qits.workspace-daemon.api-token`: it serves an
 untrusted checkout, so it is never served anonymously.
 
@@ -111,14 +111,12 @@ workspace behaves exactly as it did before an editor existed.
 | `POST /fast-forward`, `/update-from-parent` | parent integration |
 | `GET·POST /commands`, `GET /commands/actions`, `GET /commands/{id}`, `GET /commands/{id}/log`, `POST /commands/{id}/terminate` | commands |
 | `POST /agents`, `GET /agents/available`, `GET /agent-sessions`, `GET·POST /agent-plugins`, `POST /prompt-refinements` | coding agents |
-| `GET /services`, `POST /services/{name}/start`, `POST /services/{name}/signal` | service supervision |
 | `GET /bootstrap-commands`, `POST /bootstrap-commands/run`, `POST /bootstrap-commands/{name}/run` | the bootstrap chain |
 | `WS /terminal/commands/{id}`, `WS /chat/commands/{id}` | the interactive half |
 
-Every write on the last two answers **202**, not 200. Both are long-running — a bootstrap step is
-bounded only by `bootstrap-timeout-ms`, an hour by default — and both already report themselves on
-the control socket, as `ServiceTransition`s and as the `BootstrapStep`/`BootstrapOutcome`/
-`Bootstrapped` sequence. Answering with a second, synchronous account of an outcome the caller is
+Every write on the bootstrap chain answers **202**, not 200. It is long-running — a bootstrap step
+is bounded only by `bootstrap-timeout-ms`, an hour by default — and already reports itself on the
+control socket, as the `BootstrapStep`/`BootstrapOutcome`/`Bootstrapped` sequence. Answering with a second, synchronous account of an outcome the caller is
 already subscribed to would be two sources of one truth.
 
 No `{repoId}/{workspaceId}` prefix in any of those paths: this daemon serves exactly one workspace,
@@ -147,14 +145,6 @@ route below it is written as the path it is.
 The default is empty — no base, paths served as listed — which is what every direct caller gets, and
 is why a bare daemon behaves exactly as it did before a base existed.
 
-The same arrangement covers the services the daemon spawns, one hop further out: qits-workspaces
-injects `QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE` (`/workspaces/service/{workspaceId}`, the prefix
-its verbatim service proxy answers under), and the daemon completes it per spawn with the declared
-service id and `web-view.base-path`, baking the result into the dev server's environment as
-`QITS_PUBLIC_BASE`. The dev server serving under that base is the whole web-view contract — the
-proxy rewrites nothing, so an app that never learned its base 404s the framed view. With no proxy
-base injected, a web-viewable spawn warns and leaves `QITS_PUBLIC_BASE` unset rather than guessing.
-
 These paths are **not** under the `/<segment>/…` convention the six services adopted, and that is
 deliberate. Each of those six took its own gateway segment and serves the prefixed path itself. The
 daemon is one process per workspace container rather than a single service behind a segment, so its
@@ -167,7 +157,7 @@ owns the workspace row and the container lifecycle, so it proxies at
 socket the daemon already holds open. Nothing else may reach a daemon.
 
 That closes `migration-plan.md` §9 item 16 (no route, no token injected — so the server did not bind)
-and item 21's first half. The `services` and `bootstrap-commands` routes above came back here for the
+and item 21's first half. The `bootstrap-commands` routes above came back here for the
 same reason: their host-side routes were deleted when the conventions landed, so the capability had
 stayed and only the addressability was missing.
 

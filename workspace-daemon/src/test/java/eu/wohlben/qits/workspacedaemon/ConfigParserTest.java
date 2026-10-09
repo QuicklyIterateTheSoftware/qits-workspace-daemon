@@ -39,25 +39,6 @@ class ConfigParserTest {
           execute: mvn -B verify
           environment:
             CI: "true"
-      services:
-        - name: dev
-          start: mvn quarkus:dev
-          ready-pattern: Listening on
-          auto-start: true
-          restart-policy: on-failure
-          max-restarts: 3
-          stop-signal: TERM
-          environment:
-            LOG_LEVEL: DEBUG
-          web-view:
-            port: 8080
-            entry-path: /
-          health-checks:
-            - name: ready
-              kind: http
-              port: 8080
-              path: /q/health
-              interval-ms: 5000
       bootstrap:
         - name: install
           execute: mvn -o -B -DskipTests install
@@ -80,48 +61,46 @@ class ConfigParserTest {
     assertFalse(action.getBoolean("interactive"), "primitive interactive is always emitted");
     assertEquals("true", action.getJsonObject("environment").getString("CI"));
 
-    JsonObject daemon = root.getJsonArray("services").getJsonObject(0);
-    assertEquals("dev", daemon.getString("name"));
-    assertEquals("Listening on", daemon.getString("readyPattern"));
-    assertTrue(daemon.getBoolean("autoStart"));
-    assertEquals(
-        "ON_FAILURE", daemon.getString("restartPolicy"), "enum normalized upper + '-'→'_'");
-    assertEquals(3, daemon.getInteger("maxRestarts"));
-    assertEquals("TERM", daemon.getString("stopSignal"));
-    assertEquals("DEBUG", daemon.getJsonObject("environment").getString("LOG_LEVEL"));
-    assertEquals(8080, daemon.getJsonObject("webView").getInteger("port"));
-    assertEquals("/", daemon.getJsonObject("webView").getString("entryPath"));
-
-    JsonObject health = daemon.getJsonArray("healthChecks").getJsonObject(0);
-    assertEquals("HTTP", health.getString("kind"));
-    assertEquals(8080, health.getInteger("port"));
-    assertEquals(5000L, health.getLong("intervalMs"));
-
     assertEquals("install", root.getJsonArray("bootstrap").getJsonObject(0).getString("name"));
   }
 
   @Test
-  void nestedCollectionsAndEnvironmentAreAlwaysPresent() {
-    // A daemon with no health-checks/env still emits them as []/{} so the round-trip into a nested
-    // (non-normalizing) QitsConfig record is equals-exact.
-    JsonObject daemon =
-        json("version: 1\ndaemons:\n  - name: bare\n    start: run")
-            .getJsonArray("services")
+  void nestedEnvironmentIsAlwaysPresent() {
+    // A step with no env still emits it as {} so the round-trip into a nested (non-normalizing)
+    // QitsConfig record is equals-exact.
+    JsonObject step =
+        json("version: 1\nbootstrap:\n  - name: bare\n    execute: run")
+            .getJsonArray("bootstrap")
             .getJsonObject(0);
-    assertTrue(daemon.getJsonObject("environment").isEmpty());
-    assertTrue(daemon.getJsonArray("healthChecks").isEmpty());
-    assertNull(daemon.getJsonObject("webView"), "an absent web-view is omitted (decodes to null)");
+    assertTrue(step.getJsonObject("environment").isEmpty());
   }
 
   @Test
-  void legacyDaemonsKeyIsAcceptedAsServices() {
-    // TEMPORARY back-compat: committed fixtures still use `daemons:`; the parser accepts it as the
-    // `services:` key until the fixtures' submodule round-trip lands. Remove with the alias.
-    JsonObject service =
-        json("version: 1\ndaemons:\n  - name: dev\n    start: run")
-            .getJsonArray("services")
-            .getJsonObject(0);
-    assertEquals("dev", service.getString("name"));
+  void aLegacyServicesOrDaemonsBlockIsIgnoredAndTheRestStillParses() {
+    // Workspace services were removed (qits-947). A checkout that still declares them — under
+    // `services:` or the older `daemons:`, well-formed or not — must keep its actions and bootstrap
+    // chain: the block is not read at all, so it can neither warn nor degrade the config.
+    for (String legacy :
+        java.util.List.of(
+            "services:\n  - name: dev\n    start: run\n    web-view:\n      port: 8080\n",
+            "daemons:\n  - name: dev\n    start: run\n",
+            "services: notalist\n",
+            "daemons:\n  - start: no-name\n")) {
+      String yaml =
+          "version: 1\n"
+              + legacy
+              + "actions:\n  - name: build\n    execute: mvn -B verify\n"
+              + "bootstrap:\n  - name: install\n    execute: ./install.sh\n";
+      DaemonQitsConfig parsed = ConfigParser.parse(yaml);
+      assertEquals("build", parsed.actions().get(0).name(), legacy);
+      assertEquals("install", parsed.bootstrap().get(0).name(), legacy);
+
+      JsonObject root = json(yaml);
+      assertFalse(root.containsKey("services"), "no services key is emitted: " + legacy);
+      assertFalse(root.containsKey("daemons"), legacy);
+      assertEquals("build", root.getJsonArray("actions").getJsonObject(0).getString("name"));
+      assertEquals("install", root.getJsonArray("bootstrap").getJsonObject(0).getString("name"));
+    }
   }
 
   @Test
@@ -136,9 +115,6 @@ class ConfigParserTest {
               - id: build-backend
                 name: build
                 execute: mvn -B verify
-            services:
-              - name: dev
-                start: run
             bootstrap:
               - name: install
                 execute: ./install.sh
@@ -147,17 +123,12 @@ class ConfigParserTest {
     assertEquals("build-backend", action.getString("id"), "explicit id round-trips");
     assertEquals("build", action.getString("name"));
     assertEquals(
-        "dev",
-        root.getJsonArray("services").getJsonObject(0).getString("id"),
-        "id defaults to name");
-    assertEquals(
         "install",
         root.getJsonArray("bootstrap").getJsonObject(0).getString("id"),
         "id defaults to name");
 
     DaemonQitsConfig parsed = ConfigParser.parse(FULL_CONFIG);
     assertEquals("build", parsed.actions().get(0).id());
-    assertEquals("dev", parsed.services().get(0).id());
     assertEquals("install", parsed.bootstrap().get(0).id());
   }
 
@@ -168,7 +139,6 @@ class ConfigParserTest {
     JsonObject empty = new JsonObject(ConfigJson.empty());
     assertNull(empty.getJsonObject("repository"));
     assertTrue(empty.getJsonArray("actions").isEmpty());
-    assertTrue(empty.getJsonArray("services").isEmpty());
     assertTrue(empty.getJsonArray("bootstrap").isEmpty());
     assertTrue(empty.getJsonArray("frameworks").isEmpty());
   }
