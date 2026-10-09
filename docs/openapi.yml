@@ -5,7 +5,7 @@ info:
   version: "1"
   description: |
     Everything qits serves from **inside** a workspace container: the working tree, the commands
-    surface, the coding-agent surface, the service and bootstrap surfaces, and two websockets.
+    surface, the coding-agent surface, the bootstrap surface, and two websockets.
 
     ## This file is written by hand, and that is deliberate
 
@@ -18,8 +18,8 @@ info:
 
     > **Every field named here is asserted as a literal string by a test in this repository.**
 
-    Those tests are `WorkspaceApiTest`, `CommandsApiTest`, `AgentsApiTest`, `ServicesApiTest` and
-    `BootstrapApiTest`, which drive a real Vert.x server on an ephemeral port against real
+    Those tests are `WorkspaceApiTest`, `CommandsApiTest`, `AgentsApiTest` and `BootstrapApiTest`,
+    which drive a real Vert.x server on an ephemeral port against real
     processes and a real git tree. They assert wire keys as literal strings on purpose — a test
     that read the names off the records would rename itself along with the bug. Change a key here
     and you must change a test; change a test and you must change this file.
@@ -71,9 +71,9 @@ info:
       present, `[]` when empty.
     - Timestamps are ISO-8601 strings (`Instant.toString()`).
     - Enums go out as their constant name.
-    - **Every write on the services and bootstrap surfaces answers `202`, not `200`.** Both are
-      long-running (a bootstrap step is bounded only by an hour-default timeout) and both already
-      report themselves on the control socket. A second, synchronous account of an outcome the
+    - **Every write on the bootstrap surface answers `202`, not `200`.** A chain is long-running
+      (a bootstrap step is bounded only by an hour-default timeout) and already reports itself on
+      the control socket. A second, synchronous account of an outcome the
       caller is already subscribed to would be two sources of one truth.
     - `503` means "not wired yet" and is retryable — the daemon is up but the capability's
       preconditions are not met. It is never a `404`, which would read as "this daemon will never
@@ -108,8 +108,6 @@ tags:
     description: Launching and inspecting this container's processes.
   - name: coding agents
     description: Launching harnesses, and the session lineage they leave behind.
-  - name: services
-    description: The dev servers the checkout declares, and this daemon supervises.
   - name: bootstrap
     description: The declared setup chain.
 
@@ -806,106 +804,6 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
-  /services:
-    get:
-      tags: [services]
-      operationId: listServices
-      summary: Every declared service and the state this supervisor holds for it.
-      description: |
-        **The container owns the service lifecycle; the host projects it.** This supervisor makes
-        every spawn/restart/backoff/policy/kill decision locally, so a service keeps crash-restarting
-        while qits is down. Host-side supervision — the launcher, the liveness poll, the restart
-        policy, the straggler reaper, the boot re-adoption, the scheduler and health probing — was
-        deleted, because double supervision meant a socket blip could put host and daemon into a
-        port fight. Do not re-add any of it anywhere.
-
-        A declared service that has never run answers `STOPPED` rather than being absent: the
-        caller's next move is to start it, and a missing entry would read as "no such service". A
-        service started with a `script` override is supervised without being declared, and is
-        listed too — it would otherwise be invisible to the very caller that started it.
-
-        ### Two things are deliberately not here
-
-        **No `health`.** The checkout's `health-checks:` are parsed by this daemon and published on
-        the control socket's `ConfigView`, but **nothing runs them** — there is no prober here, and
-        none on the host either (its supervisor reports every declared check as `UNKNOWN` and says
-        in a comment that health is the daemon's to report). Any value emitted under a `health` key
-        today would be a verdict the daemon has not formed, so the field is absent rather than
-        dishonest. A daemon-side prober is a feature with its own decision to make, not a
-        serialization change.
-
-        **No `DEGRADED` state.** It was derived host-side from per-line log observers that were
-        deleted; re-minting it here would resurrect them by another name.
-      responses:
-        "200":
-          description: The services.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ServiceList" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/ServicesUnavailable" }
-
-  /services/{name}/start:
-    post:
-      tags: [services]
-      operationId: startService
-      summary: Start a service.
-      description: |
-        Idempotent per name — an already-running service is left alone and just re-reports its
-        current state on the control socket.
-
-        With a `script` override this is the "try this edit" start of a service the committed
-        config does not carry: a minimal, never-restart definition is synthesized from the
-        override.
-
-        `202`, not `200`: the outcome arrives as `ServiceTransition`s on the control socket.
-      parameters:
-        - $ref: "#/components/parameters/ServiceName"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/StartServiceRequest" }
-      responses:
-        "202": { $ref: "#/components/responses/Accepted" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/ServicesUnavailable" }
-
-  /services/{name}/signal:
-    post:
-      tags: [services]
-      operationId: signalService
-      summary: Deliver a signal to a service — the stop request.
-      description: |
-        Marks the service stop-requested so the restart policy does not resurrect it, signals the
-        whole **session** group (`pkill -<SIG> -s <sid>`, which survives the reparenting a forked
-        JVM does and a process-group kill did not), and force-kills after the stop grace.
-
-        Signalling a service that is not running is still a `202`. A `404` there would be a claim
-        about the declared set that this route is not the one to make.
-      parameters:
-        - $ref: "#/components/parameters/ServiceName"
-        - name: signal
-          in: query
-          required: false
-          schema: { type: string, examples: ["TERM", "KILL", "SIGTERM"] }
-          description: |
-            **Wins over the body**, so a signal can be sent with no body at all. Both absent is the
-            stop signal, which is what the supervisor's own default resolves to. A `SIG` prefix is
-            stripped.
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/SignalServiceRequest" }
-      responses:
-        "202": { $ref: "#/components/responses/Accepted" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/ServicesUnavailable" }
-
   /bootstrap-commands:
     get:
       tags: [bootstrap]
@@ -1003,15 +901,6 @@ components:
       schema: { type: string }
       description: The daemon-generated command id.
 
-    ServiceName:
-      name: name
-      in: path
-      required: true
-      schema: { type: string }
-      description: |
-        The service's declared `name` — not its `id`. A name absent from the config is startable
-        only with a `script` override.
-
   responses:
     Unauthorized:
       description: |
@@ -1066,14 +955,6 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     AgentsUnavailable:
       description: Coding agents are not wired yet. Retryable.
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    ServicesUnavailable:
-      description: |
-        The supervisor is not wired yet. Rare in practice — it is constructed before provisioning
-        starts, so `GET /services` answers a declared-but-stopped list while the checkout is still
-        cloning.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -1289,10 +1170,8 @@ components:
       type: string
       description: |
         What the frontend routes its view on. `TERMINAL` is an interactive PTY streamed to xterm.js;
-        `CHAT` is a coding-agent session over line-delimited JSON on pipes; `SERVICE` is carried
-        because it is part of the shape the frontend already switches on — this surface does not
-        launch services, `/services` does.
-      enum: [TERMINAL, CHAT, SERVICE]
+        `CHAT` is a coding-agent session over line-delimited JSON on pipes.
+      enum: [TERMINAL, CHAT]
 
     LogChannel:
       type: string
@@ -1953,107 +1832,6 @@ components:
       required: [prompt]
       properties:
         prompt: { type: string }
-
-    # --- services ----------------------------------------------------------------------------
-
-    ServiceState:
-      type: string
-      description: |
-        The `ServiceTransition.State` vocabulary, verbatim — a caller reading this list and a
-        caller following the transition stream never see two spellings of one thing.
-
-        `DEGRADED` is **not** a member and must not become one; see `GET /services`.
-
-        One behaviour to know: a service that reaches a terminal state leaves the supervisor's live
-        map, so it reads as `STOPPED` on a later list even if it crashed. The `CRASHED` transition
-        is on the control socket.
-      enum: [STARTING, READY, RESTARTING, CRASHED, STOPPED]
-
-    ServiceList:
-      type: object
-      required: [services]
-      properties:
-        services:
-          type: array
-          items: { $ref: "#/components/schemas/Service" }
-
-    Service:
-      type: object
-      required: [name, state, restartCount, webViewable]
-      properties:
-        name:
-          type: string
-          description: What the verbs address this service by.
-        id:
-          type: string
-          description: |
-            The declared id, defaulting to `name`. Omitted only if the declaration carries neither.
-            This is the segment qits-workspaces builds its service proxy path from.
-        description:
-          type: string
-          description: Omitted when the checkout declares none.
-        state: { $ref: "#/components/schemas/ServiceState" }
-        restartCount:
-          type: integer
-          description: |
-            How many times **this** supervisor relaunched the service, in this container. Resets
-            with the container, like everything else the daemon holds. `0` for a service that has
-            never run, rather than omitted.
-        webViewable:
-          type: boolean
-          description: |
-            Derived — `webView` is present. Always emitted so the web view's service picker is a
-            filter rather than an inference over an omitted key. Combine with a live `state` before
-            framing anything.
-        webView:
-          $ref: "#/components/schemas/WebView"
-          description: Omitted when the checkout declares no web view.
-
-    WebView:
-      type: object
-      description: |
-        The checkout's declaration, and only that. The daemon deliberately does **not** build the
-        served proxy URL from it: that path is
-        `/workspaces/service/{workspaceId}/{serviceId}/` plus `basePath`, which is
-        qits-workspaces' shape over ids this daemon is not the authority on — the same reason a
-        lazy directory carries no `href`. Same spelling as the control socket's `ConfigView`, so
-        one declaration never has two shapes.
-      properties:
-        port:
-          type: integer
-          description: The port the dev server listens on inside the container.
-        entryPath:
-          type: string
-          description: Where to land the frame, relative to the served base.
-        basePath:
-          type: string
-          description: The base the app itself is built to be served under.
-
-    StartServiceRequest:
-      type: object
-      description: |
-        Both fields optional. With neither, the committed declaration is started as-is.
-      properties:
-        script:
-          type: string
-          description: |
-            Overrides the declared start command. For a name the config does not carry at all, this
-            synthesizes a minimal, never-restart definition — the "try this edit" start.
-        env:
-          type: object
-          additionalProperties: true
-          description: |
-            An environment overlay. Values are coerced with `String.valueOf`, because a
-            `.qits-config.yml`-shaped body writing `PORT: 8080` means the number. A null entry is
-            dropped rather than becoming the text "null" in a child process's environment.
-
-    SignalServiceRequest:
-      type: object
-      properties:
-        signal:
-          type: string
-          description: Ignored when the `signal` query parameter is present.
-          examples: ["TERM", "KILL"]
 
     # --- bootstrap ---------------------------------------------------------------------------
 

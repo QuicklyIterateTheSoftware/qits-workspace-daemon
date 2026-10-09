@@ -277,19 +277,16 @@ public class WorkspaceApi {
   static final String PROMPT_REFINEMENTS_PATH = "/prompt-refinements";
 
   /**
-   * The service-supervision surface and the bootstrap chain's. Both were host routes — {@code
-   * /workspaces/{id}/services…} and {@code /workspaces/{id}/bootstrap-commands…} — that were
-   * <em>deleted rather than moved</em> when the work went into the container: {@link
-   * ServiceSupervisor} and {@link BootstrapRunner} do it here, and nothing ever grew routes for
-   * them. So the capability survived the move and the addressability did not. These two put the
-   * addressability back where the capability already is.
+   * The bootstrap chain's surface. It was a host route — {@code
+   * /workspaces/{id}/bootstrap-commands…} — that was <em>deleted rather than moved</em> when the
+   * work went into the container: {@link BootstrapRunner} does it here, and nothing ever grew a
+   * route for it. So the capability survived the move and the addressability did not. This puts
+   * the addressability back where the capability already is.
    *
    * <p>Prefix-free like {@link #COMMANDS_PATH} and for the same reason: the daemon serves exactly
    * one workspace, so a {@code /{repoId}/{workspaceId}} prefix would be a constant the caller has
    * to get right.
    */
-  static final String SERVICES_PATH = "/services";
-
   static final String BOOTSTRAP_COMMANDS_PATH = "/bootstrap-commands";
 
   private static final String BEARER = "Bearer ";
@@ -325,9 +322,7 @@ public class WorkspaceApi {
    * about the daemon's own address, and that disagreement surfaces far from the rewrite. So the
    * daemon is configured with the part of the path that is its address rather than guessing at one:
    * no leading segment is stripped by shape, no prefix is matched by pattern. It is the same
-   * property the control-socket url has — handed over whole, dialled verbatim, never parsed — and
-   * the same arrangement {@code ServiceProxyRoute} already has with a dev server's {@code
-   * QITS_PUBLIC_BASE}.
+   * property the control-socket url has — handed over whole, dialled verbatim, never parsed.
    *
    * <p>The routes below stay written as the paths they are, {@code /files} and not {@code
    * <base>/files}: the base is where this server is mounted, not part of what it serves, so exactly
@@ -407,10 +402,7 @@ public class WorkspaceApi {
   private volatile java.util.function.Supplier<List<HarnessCapabilities>> harnessCapabilities =
       List::of;
 
-  /** The service supervisor, wired by {@link ControlSocket}; null ⇒ every route answers 503. */
-  private volatile ServiceSupervisor services;
-
-  /** The bootstrap wiring, null until {@link #wireBootstrap} runs; same 503 rule. */
+  /** The bootstrap wiring, null until {@link #wireBootstrap} runs; null ⇒ every route is a 503. */
   private volatile BootstrapWiring bootstrap;
 
   /**
@@ -456,16 +448,6 @@ public class WorkspaceApi {
     this.agentDefaults = agentDefaults;
     this.imageVersion = imageVersion == null ? "" : imageVersion;
     this.harnessCapabilities = harnessCapabilities == null ? List::of : harnessCapabilities;
-  }
-
-  /**
-   * Wire the service-supervision surface. Separate from the others for the reason they are separate
-   * from each other — the preconditions differ. This one is available earliest of all: {@link
-   * ControlSocket} constructs the supervisor before provisioning even starts, so {@code
-   * GET /services} answers a declared-but-stopped list while the checkout is still cloning.
-   */
-  void wireServices(ServiceSupervisor services) {
-    this.services = services;
   }
 
   /** Wire the bootstrap surface; see {@link BootstrapWiring} for why it takes five arguments. */
@@ -960,8 +942,7 @@ public class WorkspaceApi {
    * command that one rejects, the host would be told no agent is running and then told a turn was
    * delivered to one. Two probes over one fact have to agree, so they read it the same way.
    * (Locally {@code Command.agentType()} is the stronger signal and is deliberately not used: it
-   * does not cross the wire the host's probe reads.) SERVICE commands and plain declared actions
-   * fall outside both.
+   * does not cross the wire the host's probe reads.) Plain declared actions fall outside both.
    *
    * <p>More than one is possible — a workspace can hold a chat and an interactive run at once — and
    * the newest wins, by {@code launchedAt}. Sorted here rather than trusted off the listing,
@@ -999,16 +980,14 @@ public class WorkspaceApi {
     return agentDefaults.resolve(requested);
   }
 
-  /** Whether {@code path} belongs to the services / bootstrap surface. */
+  /** Whether {@code path} belongs to the bootstrap surface. */
   private static boolean isLifecyclePath(String path) {
-    return path.equals(SERVICES_PATH)
-        || path.startsWith(SERVICES_PATH + "/")
-        || path.equals(BOOTSTRAP_COMMANDS_PATH)
+    return path.equals(BOOTSTRAP_COMMANDS_PATH)
         || path.startsWith(BOOTSTRAP_COMMANDS_PATH + "/");
   }
 
   /**
-   * The services / bootstrap routes. Same shape as {@link #onAgentRequest} — GET/POST only, body
+   * The bootstrap routes. Same shape as {@link #onAgentRequest} — GET/POST only, body
    * read on the event loop, work handed to a worker — because they have the same two needs: a path
    * segment after a fixed prefix, and a request body.
    */
@@ -1027,7 +1006,7 @@ public class WorkspaceApi {
               try {
                 workers.execute(
                     () -> {
-                      Reply reply = dispatchLifecycle(method, path, request, body.toString());
+                      Reply reply = dispatchLifecycle(method, path);
                       context.runOnContext(v -> respond(request, reply.status(), reply.body()));
                     });
               } catch (RejectedExecutionException shuttingDown) {
@@ -1037,66 +1016,25 @@ public class WorkspaceApi {
   }
 
   /**
-   * Route and run one services / bootstrap request.
+   * Route and run one bootstrap request.
    *
-   * <p><b>Every write here answers 202, not 200.</b> Starting a service and running a bootstrap
-   * chain are long-running and already report themselves over the control socket — a service as
-   * {@code ServiceTransition}s, a chain as {@code BootstrapStep}/{@code BootstrapOutcome}/{@code
-   * Bootstrapped} — and a bootstrap step is bounded only by {@code bootstrap-timeout-ms}, which
+   * <p><b>Every write here answers 202, not 200.</b> Running a bootstrap chain is long-running and
+   * already reports itself over the control socket — as {@code BootstrapStep}/{@code
+   * BootstrapOutcome}/{@code Bootstrapped} — and a bootstrap step is bounded only by {@code
+   * bootstrap-timeout-ms}, which
    * defaults to an hour. Holding a response open for that is not a contract anyone wants, and
    * inventing a second, synchronous report of an outcome the caller is already subscribed to would
    * be two sources of one truth.
    */
-  private Reply dispatchLifecycle(
-      HttpMethod method, String path, HttpServerRequest request, String body) {
+  private Reply dispatchLifecycle(HttpMethod method, String path) {
     try {
-      return path.equals(SERVICES_PATH) || path.startsWith(SERVICES_PATH + "/")
-          ? dispatchService(method, path, request, body)
-          : dispatchBootstrap(method, path);
-    } catch (InvalidCommandRequestException e) {
-      return new Reply(400, WorkspaceJson.error(e.getMessage()));
+      return dispatchBootstrap(method, path);
     } catch (RuntimeException e) {
       // Same posture as dispatch(): an arbitrary exception's text can carry container paths the
       // caller has no business seeing, so it is logged here and not returned.
       LOG.errorf(e, "workspace-daemon lifecycle API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
-  }
-
-  /** {@code /services} — list, start one, signal one. */
-  private Reply dispatchService(
-      HttpMethod method, String path, HttpServerRequest request, String body) {
-    ServiceSupervisor supervisor = services;
-    if (supervisor == null) {
-      return new Reply(503, WorkspaceJson.error("Services are not available yet"));
-    }
-    String rest = path.substring(SERVICES_PATH.length());
-    if (rest.isEmpty() || rest.equals("/")) {
-      return method == HttpMethod.GET
-          ? new Reply(200, WorkspaceJson.services(supervisor.states()))
-          : new Reply(405, WorkspaceJson.error("Method not allowed"));
-    }
-    if (method != HttpMethod.POST) {
-      return new Reply(405, WorkspaceJson.error("Method not allowed"));
-    }
-    String[] segments = rest.substring(1).split("/", 2);
-    String name = segments[0];
-    String verb = segments.length > 1 ? segments[1] : "";
-    return switch (verb) {
-      case "start" -> {
-        JsonObject json = jsonBody(body);
-        supervisor.start(name, json.getString("script"), stringMap(json.getJsonObject("env")));
-        yield new Reply(202, WorkspaceJson.accepted());
-      }
-      case "signal" -> {
-        // The query parameter wins over the body so a signal can be sent with no body at all; both
-        // absent is the stop signal, which is what SignalService's own default resolves to.
-        String signal = request.getParam("signal");
-        supervisor.signal(name, signal != null ? signal : jsonBody(body).getString("signal"));
-        yield new Reply(202, WorkspaceJson.accepted());
-      }
-      default -> new Reply(404, WorkspaceJson.error("No such endpoint"));
-    };
   }
 
   /** {@code /bootstrap-commands} — list the chain, run it whole, or run one named step. */
@@ -1143,26 +1081,6 @@ public class WorkspaceApi {
                 wiring.workingDir(),
                 wiring.stepTimeoutMs(),
                 wiring.emit()));
-  }
-
-  /**
-   * A JSON object read as an environment overlay. Values are coerced with {@code String.valueOf}
-   * rather than {@code getString}, because a {@code .qits-config.yml}-shaped body writing {@code
-   * PORT: 8080} means the number, and a null overlay entry is dropped rather than becoming the text
-   * "null" in a child process's environment.
-   */
-  private static java.util.Map<String, String> stringMap(JsonObject json) {
-    if (json == null) {
-      return null;
-    }
-    java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
-    for (String key : json.fieldNames()) {
-      Object value = json.getValue(key);
-      if (value != null) {
-        map.put(key, String.valueOf(value));
-      }
-    }
-    return map;
   }
 
   /** {@code POST /agents} — the launch request, with the enums validated like a query parameter. */

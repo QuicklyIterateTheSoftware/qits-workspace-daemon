@@ -33,7 +33,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * The {@code /bootstrap-commands} routes over a real Vert.x server running real {@code bash} steps
- * — the sibling of {@link CommandsApiTest} and {@link ServicesApiTest}.
+ * — the sibling of {@link CommandsApiTest}.
  *
  * <p>The thing worth testing here is that the route is an <em>acknowledgement</em>, not a report:
  * the run is bounded only by the step timeout (an hour by default), so the response comes back

@@ -38,8 +38,6 @@ import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
-import eu.wohlben.qits.workspacedaemon.protocol.SignalService;
-import eu.wohlben.qits.workspacedaemon.protocol.StartService;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
@@ -398,7 +396,7 @@ public class ControlSocket {
 
   // The provision-time bootstrap kill switch (host's qits.bootstrap.autorun-enabled, injected as
   // QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN). When false the daemon skips the chain and reports a
-  // benign Bootstrapped{ok:true} so the workspace still proceeds to services; manual re-run stays
+  // benign Bootstrapped{ok:true} so the host's await still completes; manual re-run stays
   // available (docs/epics/qits-workspace-daemon/ Part 3).
   @ConfigProperty(name = "qits.workspace-daemon.bootstrap-autorun", defaultValue = "true")
   boolean bootstrapAutorun;
@@ -406,39 +404,6 @@ public class ControlSocket {
   // Per-step (check/execute) timeout; a step that overruns it is terminated and reported FAILED.
   @ConfigProperty(name = "qits.workspace-daemon.bootstrap-timeout-ms", defaultValue = "3600000")
   long bootstrapTimeoutMs;
-
-  // The service auto-start kill switch (host's qits.services.autostart-enabled, injected as
-  // QITS_WORKSPACE_DAEMON_SERVICES_AUTOSTART). When false the daemon supervises no auto-start
-  // services on boot; manual StartService still works (docs/epics/qits-workspace-daemon/ Part 4).
-  @ConfigProperty(name = "qits.workspace-daemon.services-autostart", defaultValue = "true")
-  boolean servicesAutostart;
-
-  // Service supervision knobs, injected from the host's qits.services.* so host and container agree
-  // (grace before READY without a readyPattern; restart backoff bounds; stop grace before SIGKILL).
-  @ConfigProperty(name = "qits.workspace-daemon.service-ready-grace-ms", defaultValue = "10000")
-  long serviceReadyGraceMs;
-
-  @ConfigProperty(
-      name = "qits.workspace-daemon.service-restart-backoff-initial-ms",
-      defaultValue = "1000")
-  long serviceBackoffInitialMs;
-
-  @ConfigProperty(
-      name = "qits.workspace-daemon.service-restart-backoff-max-ms",
-      defaultValue = "30000")
-  long serviceBackoffMaxMs;
-
-  @ConfigProperty(name = "qits.workspace-daemon.service-stop-grace-ms", defaultValue = "5000")
-  long serviceStopGraceMs;
-
-  // The per-workspace half of every web-viewable service's public base, injected by the host as
-  // QITS_WORKSPACE_DAEMON_SERVICE_PROXY_BASE (/workspaces/service/{workspaceRowId}). Optional<> for
-  // the same SmallRye reason as the identity knobs: an empty default resolves as "no value" and a
-  // plain String would then fail at startup. Absent ⇒ web-viewable spawns warn and leave
-  // QITS_PUBLIC_BASE unset rather than deriving a path from a sibling address (the arrangement the
-  // API base path already models: told, never derived).
-  @ConfigProperty(name = "qits.workspace-daemon.service-proxy-base")
-  Optional<String> serviceProxyBase;
 
   /** Off-event-loop pool for blocking process/git work; one thread per in-flight request. */
   private final ExecutorService workers =
@@ -454,14 +419,6 @@ public class ControlSocket {
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   private volatile WebSocket socket;
   private volatile Context socketContext;
-
-  /**
-   * Supervises the workspace's services (dev servers) in-container — the tail of the boot sequence
-   * and PID-1 owner of their lifecycle (docs/epics/qits-workspace-daemon/ Part 4). Created in
-   * {@link #start()} once the identity/knobs resolve; reads the held {@link #configState} live so a
-   * reconnect that re-reads config sees the current service set.
-   */
-  private volatile ServiceSupervisor services;
 
   /**
    * Watches {@code /workspace} and reports working-tree cleanliness ({@link
@@ -609,23 +566,10 @@ public class ControlSocket {
               + " alive, docker exec paths unaffected).");
       return;
     }
-    services =
-        new ServiceSupervisor(
-            workspaceId,
-            WORKSPACE_DIR,
-            this::send,
-            () -> configState.config().services(),
-            serviceReadyGraceMs,
-            serviceBackoffInitialMs,
-            serviceBackoffMaxMs,
-            serviceStopGraceMs,
-            normalizeProxyBase(serviceProxyBase == null ? null : serviceProxyBase.orElse(null)));
-    // Both surfaces are wired here rather than beside the file/detection wiring in
-    // startGitStatusMonitor, because neither needs a provisioned checkout to answer: the service
-    // list is the declared set plus live state, and the bootstrap chain is read from the config the
+    // Wired here rather than beside the file/detection wiring in startGitStatusMonitor, because it
+    // needs no provisioned checkout to answer: the bootstrap chain is read from the config the
     // ConfigReader already holds. WorkspaceApi does not bind until start() runs anyway, so an early
     // wire only means the routes are ready the moment it does.
-    workspaceApi.wireServices(services);
     workspaceApi.wireBootstrap(
         workspaceId,
         () -> configState.config().bootstrap(),
@@ -666,8 +610,7 @@ public class ControlSocket {
             url.get(),
             bearer(),
             workspaceApi.apiPort(),
-            editor == null ? 0 : editor.port(),
-            services);
+            editor == null ? 0 : editor.port());
     tunnel.start();
     client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
@@ -696,8 +639,7 @@ public class ControlSocket {
             boolean provisioned = Provisioner.provision(env, this::send);
             // Clone → config-read: the next step of the daemon's own startup sequence. Read the
             // checkout's config even if the clone failed (absent file ⇒ empty), so a DescribeConfig
-            // always has an answer. Part 3 runs the bootstrap chain from this same held state; Part
-            // 4 will run the services.
+            // always has an answer. Part 3 runs the bootstrap chain from this same held state.
             configState = ConfigReader.read();
             runBootstrapOnBoot(freshClone, provisioned);
             startGitStatusMonitor(provisioned);
@@ -1017,13 +959,12 @@ public class ControlSocket {
   private volatile AgentTranscriptTailService transcriptTail;
 
   /**
-   * The bootstrap phase of the boot sequence (clone → config → <b>bootstrap</b> → [Part 4:
-   * services]). A failed provision means the host is tearing the workspace down (it acts on {@link
+   * The bootstrap phase of the boot sequence (clone → config → <b>bootstrap</b>). A failed provision means the host is tearing the workspace down (it acts on {@link
    * ProvisionFailed}), so there's no bootstrap phase. A reconnect into an already-provisioned
    * container ({@code !freshClone}) does not re-run the chain (bootstrap runs on fresh provision
    * only) — but the host doesn't await a bootstrap on a restart either, so nothing is emitted. On a
    * fresh clone the daemon runs the chain autonomously (or, with the autorun kill switch off, emits
-   * a benign terminal so the host's await still completes and services still start).
+   * a benign terminal so the host's await still completes).
    */
   private void runBootstrapOnBoot(boolean freshClone, boolean provisioned) {
     if (!provisioned) {
@@ -1031,49 +972,21 @@ public class ControlSocket {
     }
     if (!freshClone) {
       // Reconnect/restart into an already-provisioned checkout: no bootstrap (it ran on the fresh
-      // clone), but resume the auto-start services so a restarted container comes back up. The host
-      // doesn't await a Bootstrapped here.
-      startServicesOnBoot();
+      // clone). The host doesn't await a Bootstrapped here.
       return;
     }
-    boolean ok;
     if (!bootstrapAutorun) {
       LOG.info("bootstrap autorun disabled — skipping the chain, reporting ready.");
       send(new Bootstrapped(workspaceId, true));
-      ok = true;
     } else {
-      ok =
-          BootstrapRunner.run(
-              workspaceId,
-              configState.config().bootstrap(),
-              null,
-              WORKSPACE_DIR,
-              bootstrapTimeoutMs,
-              this::send);
+      BootstrapRunner.run(
+          workspaceId,
+          configState.config().bootstrap(),
+          null,
+          WORKSPACE_DIR,
+          bootstrapTimeoutMs,
+          this::send);
     }
-    // Services are the tail of the startup sequence — started only after a successful bootstrap (a
-    // dev server on an unbootstrapped checkout would only crash-loop). A failed chain withholds
-    // them, mirroring the host's ReadyForServices gate.
-    if (ok) {
-      startServicesOnBoot();
-    }
-  }
-
-  /** Start the auto-start service set, honouring the kill switch. */
-  private void startServicesOnBoot() {
-    ServiceSupervisor s = services;
-    if (servicesAutostart && s != null) {
-      s.startAutoStart();
-    }
-  }
-
-  /** The injected service proxy base, normalized: no trailing slash, empty when unset. */
-  private static String normalizeProxyBase(String value) {
-    if (value == null || value.isBlank()) {
-      return "";
-    }
-    String v = value.trim();
-    return v.endsWith("/") ? v.substring(0, v.length() - 1) : v;
   }
 
   private void connect(int attempt) {
@@ -1229,16 +1142,8 @@ public class ControlSocket {
       flushPending(ws);
       socket = ws;
     }
-    // Reconnect adoption: re-report every running service's current state so the host (which lost
-    // its in-memory projection on a qits restart) rebuilds it from the live children — replacing
-    // the old tmux/proc adoption probe. Off the socket-publish path (after `socket = ws`) so the
-    // re-report writes directly. A no-op on first connect (nothing running yet).
-    ServiceSupervisor s = services;
-    if (s != null) {
-      workers.execute(s::reportAll);
-    }
-    // Likewise re-report the working-tree status so a qits restart that lost its in-memory dirty
-    // cache gets the current value re-pushed (a no-op before the boot report).
+    // Reconnect adoption: re-report the working-tree status so a qits restart that lost its
+    // in-memory dirty cache gets the current value re-pushed (a no-op before the boot report).
     GitStatusMonitor g = gitStatus;
     if (g != null) {
       workers.execute(g::reportCurrent);
@@ -1304,24 +1209,12 @@ public class ControlSocket {
                       WORKSPACE_DIR,
                       bootstrapTimeoutMs,
                       this::send));
-      case StartService request -> {
-        ServiceSupervisor s = services;
-        if (s != null) {
-          workers.execute(() -> s.start(request.id(), request.script(), request.env()));
-        }
-      }
-      case SignalService request -> {
-        ServiceSupervisor s = services;
-        if (s != null) {
-          workers.execute(() -> s.signal(request.id(), request.signal()));
-        }
-      }
       case OpenStream request -> {
         // On the event loop: both connects are non-blocking futures and the pumps are
         // handler-driven, so there is nothing here worth a worker thread.
         DaemonStreamTunnel t = tunnel;
         if (t != null) {
-          t.open(request.nonce(), request.path(), request.target(), request.serviceId());
+          t.open(request.nonce(), request.path(), request.target());
         }
       }
       case PullBranch request -> {
@@ -1401,10 +1294,6 @@ public class ControlSocket {
   void stop() {
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);
-    ServiceSupervisor s = services;
-    if (s != null) {
-      s.close();
-    }
     GitStatusMonitor g = gitStatus;
     if (g != null) {
       g.close();

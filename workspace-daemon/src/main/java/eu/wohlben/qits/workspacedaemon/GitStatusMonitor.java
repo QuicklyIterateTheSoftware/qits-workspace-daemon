@@ -333,8 +333,7 @@ final class GitStatusMonitor {
 
   /**
    * Re-send the last reported status (a no-op before the first report). Invoked on every socket
-   * (re)connect so a qits restart that lost its in-memory cache gets the current value re-pushed,
-   * mirroring {@code ServiceSupervisor.reportAll}.
+   * (re)connect so a qits restart that lost its in-memory cache gets the current value re-pushed.
    */
   void reportCurrent() {
     GitStatus current = last;

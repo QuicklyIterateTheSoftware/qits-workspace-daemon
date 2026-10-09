@@ -74,12 +74,6 @@ final class DaemonStreamTunnel {
    */
   private final Optional<String> authorization;
 
-  /**
-   * The supervisor a {@link StreamTarget#SERVICE} stream's id is resolved against, or {@code null}
-   * when this daemon supervises none — which makes every {@code SERVICE} stream a refusal.
-   */
-  private final ServiceSupervisor services;
-
   private volatile WebSocketClient client;
   private volatile NetClient netClient;
 
@@ -97,22 +91,11 @@ final class DaemonStreamTunnel {
       Optional<String> authorization,
       int apiPort,
       int editorPort) {
-    this(vertx, controlSocketUrl, authorization, apiPort, editorPort, null);
-  }
-
-  DaemonStreamTunnel(
-      Vertx vertx,
-      String controlSocketUrl,
-      Optional<String> authorization,
-      int apiPort,
-      int editorPort,
-      ServiceSupervisor services) {
     this.vertx = vertx;
     this.controlSocketUrl = controlSocketUrl;
     this.authorization = authorization == null ? Optional.empty() : authorization;
     this.apiPort = apiPort;
     this.editorPort = editorPort;
-    this.services = services;
   }
 
   void start() {
@@ -134,31 +117,19 @@ final class DaemonStreamTunnel {
    * nothing here worth a worker thread, and the pumps below are handler-driven.
    */
   void open(String nonce, String path, StreamTarget target) {
-    open(nonce, path, target, null);
-  }
-
-  /** As above, with the service a {@link StreamTarget#SERVICE} stream is for. */
-  void open(String nonce, String path, StreamTarget target, String serviceId) {
     WebSocketClient ws = client;
     NetClient net = netClient;
     if (ws == null || net == null) {
       LOG.debug("stream requested before the tunnel was started — ignored");
       return;
     }
-    int localPort = portFor(target, serviceId);
+    int localPort = portFor(target);
     if (localPort <= 0) {
       // The allow-list's refusal branch. Reached when the host asks for a listener this container
-      // does not have — an EDITOR stream to a plain workspace, or a SERVICE stream to a service
-      // that is unknown, not web-viewable or not running. Refusing here rather than dialling and
-      // failing to connect keeps the two indistinguishable-from-the-outside cases apart in the
+      // does not have — an EDITOR stream to a plain workspace. Refusing here rather than dialling
+      // and failing to connect keeps the two indistinguishable-from-the-outside cases apart in the
       // log, and costs the host nothing it did not already have to handle.
-      if (target == StreamTarget.SERVICE) {
-        LOG.warnf(
-            "refusing a stream to service '%s': no running web-viewable service has that id",
-            serviceId);
-      } else {
-        LOG.warnf("refusing a stream to %s: this daemon serves no such listener", target);
-      }
+      LOG.warnf("refusing a stream to %s: this daemon serves no such listener", target);
       return;
     }
     URI dial;
@@ -206,17 +177,11 @@ final class DaemonStreamTunnel {
    * <p>A name outside the enum never reaches here at all: {@code DaemonCodec} refuses to decode it
    * and {@code ControlSocket} drops the frame. So this switch is exhaustive on purpose, and the
    * only refusal left is the honest one — a target this <em>container</em> has no listener for.
-   *
-   * <p>{@link StreamTarget#SERVICE} keeps the rule: the wire carries the service's id, and the port
-   * is the one the checkout's own {@code webView} declaration names, read from this daemon's
-   * supervisor — and only while that service is running. The connect still goes to {@code
-   * 127.0.0.1}, so the declared port can name nothing but a listener inside this container.
    */
-  private int portFor(StreamTarget target, String serviceId) {
+  private int portFor(StreamTarget target) {
     return switch (target == null ? StreamTarget.API : target) {
       case API -> apiPort;
       case EDITOR -> editorPort;
-      case SERVICE -> services == null ? 0 : services.webViewPort(serviceId);
     };
   }
 

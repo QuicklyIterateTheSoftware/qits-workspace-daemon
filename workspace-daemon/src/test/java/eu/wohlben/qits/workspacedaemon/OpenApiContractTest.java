@@ -29,8 +29,8 @@ import org.yaml.snakeyaml.Yaml;
  *
  * <p>So the two mechanical properties are asserted here, and the interesting one — that each
  * documented <em>field name</em> is real — stays where it already lives, as literal-string
- * assertions in {@code WorkspaceApiTest}, {@code CommandsApiTest}, {@code AgentsApiTest}, {@code
- * ServicesApiTest} and {@code BootstrapApiTest}. This class deliberately does not try to check
+ * assertions in {@code WorkspaceApiTest}, {@code CommandsApiTest}, {@code AgentsApiTest} and
+ * {@code BootstrapApiTest}. This class deliberately does not try to check
  * those: it would have to reimplement the serializers to do it, and the API tests already exercise
  * the real ones over a real socket.
  *
@@ -64,9 +64,6 @@ class OpenApiContractTest {
               WorkspaceApi.AGENT_PLUGINS_PATH,
               WorkspaceApi.AGENT_PLUGINS_PATH + "/{pluginId}/install",
               WorkspaceApi.PROMPT_REFINEMENTS_PATH,
-              WorkspaceApi.SERVICES_PATH,
-              WorkspaceApi.SERVICES_PATH + "/{name}/start",
-              WorkspaceApi.SERVICES_PATH + "/{name}/signal",
               WorkspaceApi.BOOTSTRAP_COMMANDS_PATH,
               WorkspaceApi.BOOTSTRAP_COMMANDS_PATH + "/run",
               WorkspaceApi.BOOTSTRAP_COMMANDS_PATH + "/{name}/run"));

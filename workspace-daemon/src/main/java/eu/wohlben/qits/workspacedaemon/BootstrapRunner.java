@@ -20,14 +20,12 @@ import java.util.function.Consumer;
 
 /**
  * Runs the <b>bootstrap chain</b> (install / migrate / seed) inside the daemon's own startup
- * sequence — between the {@linkplain Provisioner self-clone} and daemon start — driven from the
+ * sequence — right after the {@linkplain Provisioner self-clone} — driven from the
  * checkout's own {@code .qits-config.yml} ({@link DaemonQitsConfig#bootstrap()}), autonomously,
  * with no per-command instruction from qits (docs/epics/qits-workspace-daemon/ Part 3). Each step
  * runs the optional {@code check} guard (non-zero ⇒ SKIPPED, the command never runs) then the
- * {@code execute}; the chain aborts on the first FAILED step (a dev server on an unbootstrapped
- * checkout would only crash-loop). Every run ends with a terminal {@link Bootstrapped} the host
- * awaits — {@code ok:true} lets the workspace proceed to daemon auto-start, {@code ok:false} gates
- * it off.
+ * {@code execute}; the chain aborts on the first FAILED step. Every run ends with a terminal
+ * {@link Bootstrapped} the host awaits.
  *
  * <p>Framework-free (no Vert.x/CDI/JGit — native-image lean): it forks {@code bash -lc <script>}
  * via {@link ProcessBuilder}, streaming each step's output as {@link CommandChunk}s tagged {@link
@@ -48,7 +46,7 @@ public final class BootstrapRunner {
    * Run {@code chain} (whole chain when {@code onlyName} is null/blank, else just that one step) at
    * {@code workingDir}, emitting {@link BootstrapStep}/{@link BootstrapOutcome} per step and a
    * terminal {@link Bootstrapped}. {@code stepTimeoutMs} bounds each {@code check}/{@code execute}.
-   * Returns whether the chain succeeded, so the boot sequence can gate service auto-start on it.
+   * Returns whether the chain succeeded.
    */
   public static boolean run(
       String workspaceId,

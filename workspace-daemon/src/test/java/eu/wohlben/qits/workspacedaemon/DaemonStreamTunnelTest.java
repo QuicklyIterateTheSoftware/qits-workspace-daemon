@@ -35,8 +35,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -109,16 +107,8 @@ class DaemonStreamTunnelTest {
     await(qits.listen(0, "127.0.0.1"));
   }
 
-  /** The service supervisor a SERVICE test runs a real (sleeping) process under, if any. */
-  private ServiceSupervisor services;
-
   @AfterEach
   void tearDown() throws Exception {
-    if (services != null) {
-      services.signal("frontend", "KILL");
-      services.signal("worker", "KILL");
-      services.close();
-    }
     if (tunnel != null) {
       tunnel.close();
     }
@@ -495,107 +485,7 @@ class DaemonStreamTunnelTest {
     }
   }
 
-  @Test
-  @EnabledOnOs(OS.LINUX)
-  void aServiceStreamToARunningWebViewableServiceDialsItsDeclaredPort(@TempDir java.io.File dir)
-      throws Exception {
-    // The dev server is played by a Vert.x server on an ephemeral port; the supervised process is
-    // only there to make the service running. What is proven is that the id picks the port the
-    // checkout declared — the host never said it.
-    api = vertx.createHttpServer();
-    api.requestHandler(req -> req.response().end("api:" + req.uri()));
-    await(api.listen(0, "127.0.0.1"));
-    HttpServer devServer = vertx.createHttpServer();
-    devServer.requestHandler(req -> req.response().end("dev:" + req.uri()));
-    await(devServer.listen(0, "127.0.0.1"));
-    try {
-      startServiceTunnel(dir, api.actualPort(), devServer.actualPort());
-      services.start("frontend", null, null);
-
-      tunnel.open("test-nonce", STREAM_PATH, StreamTarget.SERVICE, "frontend");
-      dialBackArrived.get(15, TimeUnit.SECONDS);
-
-      assertEquals("dev:/index.html", requestThroughTunnel("/index.html"));
-    } finally {
-      devServer.close();
-    }
-  }
-
-  @Test
-  @EnabledOnOs(OS.LINUX)
-  void aServiceStreamIsRefusedForAnUnknownANonWebOrAStoppedService(@TempDir java.io.File dir)
-      throws Exception {
-    // Three refusals, none of which may dial and none of which may fall back to the API: an id
-    // nothing declares, a running service with no web view, and a web-viewable one not running.
-    api = vertx.createHttpServer();
-    api.requestHandler(req -> req.response().end("api:" + req.uri()));
-    await(api.listen(0, "127.0.0.1"));
-    startServiceTunnel(dir, api.actualPort(), api.actualPort());
-    services.start("worker", null, null);
-
-    tunnel.open("n", STREAM_PATH, StreamTarget.SERVICE, "nobody");
-    tunnel.open("n", STREAM_PATH, StreamTarget.SERVICE, "worker");
-    tunnel.open("n", STREAM_PATH, StreamTarget.SERVICE, "frontend");
-    Thread.sleep(500);
-
-    assertTrue(dialled.isEmpty(), "a refused service stream must not dial: " + dialled);
-    assertFalse(dialBackArrived.isDone());
-  }
-
-  @Test
-  void aServiceStreamIsRefusedWhereNoServicesAreSupervised() throws Exception {
-    api = vertx.createHttpServer();
-    api.requestHandler(req -> req.response().end("api:" + req.uri()));
-    await(api.listen(0, "127.0.0.1"));
-    startTunnel(api.actualPort());
-
-    tunnel.open("n", STREAM_PATH, StreamTarget.SERVICE, "frontend");
-    Thread.sleep(500);
-
-    assertTrue(dialled.isEmpty(), "no supervisor means no service to dial: " + dialled);
-  }
-
   // --- helpers ------------------------------------------------------------------------------------
-
-  /**
-   * A tunnel with a real {@link ServiceSupervisor} behind it, declaring {@code frontend} (web
-   * view on {@code webPort}) and {@code worker} (no web view). Neither is started here.
-   */
-  private void startServiceTunnel(java.io.File dir, int apiPort, int webPort) {
-    List<DaemonQitsConfig.ServiceDecl> decls =
-        List.of(
-            service("frontend", new DaemonQitsConfig.WebViewDecl(webPort, "/", null)),
-            service("worker", null));
-    services =
-        new ServiceSupervisor(
-            "ws-1", dir, message -> {}, () -> decls, 60_000, 50, 200, 1000, "/workspaces/service/7");
-    tunnel =
-        new DaemonStreamTunnel(
-            vertx,
-            "ws://127.0.0.1:" + qits.actualPort() + "/workspaces/daemon/7",
-            Optional.empty(),
-            apiPort,
-            0,
-            services);
-    tunnel.start();
-  }
-
-  private static DaemonQitsConfig.ServiceDecl service(
-      String name, DaemonQitsConfig.WebViewDecl webView) {
-    return new DaemonQitsConfig.ServiceDecl(
-        name,
-        name,
-        null,
-        "exec sleep 60",
-        null,
-        false,
-        "NEVER",
-        0,
-        "TERM",
-        java.util.Map.of(),
-        webView,
-        List.of());
-  }
 
   /**
    * The host side of the tunnel, in miniature: a loopback {@link NetServer} whose accepted socket is

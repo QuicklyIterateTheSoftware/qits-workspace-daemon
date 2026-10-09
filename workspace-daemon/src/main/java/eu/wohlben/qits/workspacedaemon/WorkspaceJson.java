@@ -127,48 +127,6 @@ final class WorkspaceJson {
   }
 
   /**
-   * {@code GET /services} — every declared service and the state the supervisor holds for it.
-   *
-   * <p>{@code restartCount} and {@code webView} are the daemon's own supervision state, published
-   * here because a browser reaching this API through qits-workspaces' proxy has no other way to see
-   * them: the count lived in a private field and the declaration only in {@code ConfigView}, which
-   * rides the control socket. {@code webView} keeps {@link ConfigJson}'s exact spelling ({@code
-   * port}/{@code entryPath}/{@code basePath}), so a caller that has seen the config dump and one
-   * that has seen this list never read two shapes of one declaration.
-   *
-   * <p>{@code webViewable} is derived — {@code webView != null} — and always present, so the web
-   * view's service picker is a filter rather than an inference over an omitted key. Cheap, and it
-   * is the one place a boolean beats "look for an absent object".
-   *
-   * <p><b>Two things are deliberately not here.</b> There is no {@code health}: the checkout's
-   * {@code health-checks:} are parsed and never run, so any value would be a verdict the daemon has
-   * not formed. And there is no {@code DEGRADED} state — it was derived host-side from per-line log
-   * observers that were deleted, and re-minting it here would resurrect them by another name.
-   */
-  static JsonObject services(List<ServiceSupervisor.ServiceState> states) {
-    JsonArray services = new JsonArray();
-    for (ServiceSupervisor.ServiceState state : states) {
-      JsonObject json =
-          new JsonObject()
-              .put("name", state.name())
-              .put("state", state.state())
-              .put("restartCount", state.restartCount())
-              .put("webViewable", state.webView() != null);
-      putIfPresent(json, "id", state.id());
-      putIfPresent(json, "description", state.description());
-      if (state.webView() != null) {
-        JsonObject webView = new JsonObject();
-        putIfPresent(webView, "port", state.webView().port());
-        putIfPresent(webView, "entryPath", state.webView().entryPath());
-        putIfPresent(webView, "basePath", state.webView().basePath());
-        json.put("webView", webView);
-      }
-      services.add(json);
-    }
-    return new JsonObject().put("services", services);
-  }
-
-  /**
    * {@code GET /bootstrap-commands} — the chain this checkout declares, in the order it runs.
    *
    * <p>The {@code execute} and {@code check} scripts are deliberately not returned. They come from
@@ -187,8 +145,8 @@ final class WorkspaceJson {
   }
 
   /**
-   * The body every write on the services / bootstrap surface answers with. There is nothing else to
-   * return — both report their progress and their outcome over the control socket — so the useful
+   * The body every write on the bootstrap surface answers with. There is nothing else to return —
+   * the chain reports its progress and its outcome over the control socket — so the useful
    * answer is "the request was taken", and giving it a shape rather than an empty body keeps the
    * client's JSON parse unconditional across every route on this server.
    */

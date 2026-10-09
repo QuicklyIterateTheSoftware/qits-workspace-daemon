@@ -3,8 +3,6 @@ package eu.wohlben.qits.workspacedaemon;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ActionDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.FrameworkDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.HealthCheckDecl;
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.ServiceDecl;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
@@ -23,7 +21,7 @@ public final class ConfigJson {
 
   private ConfigJson() {}
 
-  /** The empty-config JSON (absent/blank file): {@code repository} null, four empty lists. */
+  /** The empty-config JSON (absent/blank file): {@code repository} null, three empty lists. */
   public static String empty() {
     return toJson(DaemonQitsConfig.EMPTY);
   }
@@ -59,12 +57,6 @@ public final class ConfigJson {
     }
     root.put("actions", actions);
 
-    JsonArray services = new JsonArray();
-    for (ServiceDecl d : config.services()) {
-      services.add(serviceJson(d));
-    }
-    root.put("services", services);
-
     JsonArray bootstrap = new JsonArray();
     for (BootstrapDecl b : config.bootstrap()) {
       JsonObject o = new JsonObject();
@@ -79,45 +71,6 @@ public final class ConfigJson {
     root.put("bootstrap", bootstrap);
 
     return root.encode();
-  }
-
-  private static JsonObject serviceJson(ServiceDecl d) {
-    JsonObject o = new JsonObject();
-    putIfPresent(o, "id", d.id());
-    putIfPresent(o, "name", d.name());
-    putIfPresent(o, "description", d.description());
-    putIfPresent(o, "start", d.start());
-    putIfPresent(o, "readyPattern", d.readyPattern());
-    putIfPresent(o, "autoStart", d.autoStart());
-    putIfPresent(o, "restartPolicy", d.restartPolicy());
-    putIfPresent(o, "maxRestarts", d.maxRestarts());
-    putIfPresent(o, "stopSignal", d.stopSignal());
-    o.put("environment", strMap(d.environment()));
-    if (d.webView() != null) {
-      JsonObject w = new JsonObject();
-      putIfPresent(w, "port", d.webView().port());
-      putIfPresent(w, "entryPath", d.webView().entryPath());
-      putIfPresent(w, "basePath", d.webView().basePath());
-      o.put("webView", w);
-    }
-    JsonArray healthChecks = new JsonArray();
-    for (HealthCheckDecl h : d.healthChecks()) {
-      JsonObject o2 = new JsonObject();
-      putIfPresent(o2, "name", h.name());
-      putIfPresent(o2, "kind", h.kind());
-      putIfPresent(o2, "port", h.port());
-      putIfPresent(o2, "path", h.path());
-      putIfPresent(o2, "expectStatus", h.expectStatus());
-      putIfPresent(o2, "command", h.command());
-      putIfPresent(o2, "intervalMs", h.intervalMs());
-      putIfPresent(o2, "timeoutMs", h.timeoutMs());
-      putIfPresent(o2, "healthyThreshold", h.healthyThreshold());
-      putIfPresent(o2, "unhealthyThreshold", h.unhealthyThreshold());
-      putIfPresent(o2, "initialDelayMs", h.initialDelayMs());
-      healthChecks.add(o2);
-    }
-    o.put("healthChecks", healthChecks);
-    return o;
   }
 
   private static JsonObject strMap(Map<String, String> map) {

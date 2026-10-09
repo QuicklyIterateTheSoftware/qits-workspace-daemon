@@ -13,7 +13,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  * <p>Part 1 (docs/epics/qits-workspace-daemon/) defines only what proves the transport: the {@link
  * Hello}/{@link Ack} handshake, {@link Heartbeat}, {@link DaemonLog}, the {@link RunCommand}→{@link
  * CommandChunk}*→{@link CommandExit} round-trip, and the {@link Describe}→{@link WorkspaceInfo}
- * stub. Later parts extend it (ReadFile, StartService, …).
+ * stub. Later parts extend it.
  */
 public final class DaemonProtocol {
 
@@ -46,13 +46,9 @@ public final class DaemonProtocol {
    * before; a new host asking a 4 daemon for the editor is asking an image that has no editor in it,
    * and the old decoder ignores the field rather than mis-serving it.
    *
-   * <p><b>6 added {@link StreamTarget#SERVICE} and {@link OpenStream#serviceId()}</b>: the
-   * dev-server web view through the tunnel, for a workspace the host cannot reach directly. Unlike
-   * 5 this one <em>is</em> gated on, by the host: a daemon below 6 cannot decode a {@code SERVICE}
-   * target (the unknown name makes the frame undecodable and it is dropped), so the host answers a
-   * runner-placed workspace whose daemon is older with "update the workspace image" rather than
-   * opening a stream that will never arrive. The new field is optional on the wire, so every
-   * frame that is not a {@code SERVICE} stream is unchanged in both directions.
+   * <p><b>6 added a {@code SERVICE} stream target and an {@code OpenStream.serviceId}</b>: the
+   * dev-server web view through the tunnel. Both existed from 6 and were removed at 9 (below); the
+   * number is kept here only so the history of the field reads straight.
    *
    * <p><b>7 added the killed agent</b> (qits-951): an {@link AgentActivity} the daemon sends itself,
    * {@code ENDED} with an {@link AgentEvent} as its {@code hookEvent}, when an agent's process dies
@@ -76,8 +72,16 @@ public final class DaemonProtocol {
    * missing or not JSON arrays — is byte-identical to what it was before, and a newer host
    * reading one of those from an older daemon decodes {@code null} rather than guessing {@code
    * false}.
+   *
+   * <p><b>9 removed workspace services</b> (qits-947): the checkout-declared dev servers and
+   * everything that carried them — the {@code daemonEvent}, {@code startDaemon} and {@code
+   * signalDaemon} frames, the {@code SERVICE} stream target and {@code OpenStream.serviceId}, and
+   * the {@code service:<name>} output correlation. Nothing replaces them. A daemon at 9 never sends
+   * {@code daemonEvent}, and drops a {@code startDaemon}/{@code signalDaemon} or a {@code SERVICE}
+   * stream from an older host as an undecodable frame; a host that still knows the frames simply
+   * never receives one.
    */
-  public static final int CAPABILITY_VERSION = 8;
+  public static final int CAPABILITY_VERSION = 9;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -112,23 +116,6 @@ public final class DaemonProtocol {
     return BOOTSTRAP_CORRELATION_PREFIX + stepName;
   }
 
-  /**
-   * The prefix a running service's streamed stdout/stderr ({@link CommandChunk}) is correlated
-   * with, so the backend routes those chunks to the workspace's {@code service:<name>} process
-   * segment / log observers (docs/epics/qits-workspace-daemon/ Part 4). Like {@link
-   * #BOOTSTRAP_CORRELATION_PREFIX}, a service's output is a continuous stream, not a request/reply
-   * round-trip, so its correlation is a well-known value both sides compute from the service name.
-   */
-  public static final String SERVICE_CORRELATION_PREFIX = "service:";
-
-  /**
-   * The output correlation id for a running service — {@link #SERVICE_CORRELATION_PREFIX}{@code +
-   * name}.
-   */
-  public static String serviceCorrelationId(String serviceName) {
-    return SERVICE_CORRELATION_PREFIX + serviceName;
-  }
-
   private DaemonProtocol() {}
 
   /** The {@code "type"} discriminator values. */
@@ -146,9 +133,6 @@ public final class DaemonProtocol {
     public static final String BOOTSTRAP_STEP = "bootstrapStep";
     public static final String BOOTSTRAP_OUTCOME = "bootstrapOutcome";
     public static final String BOOTSTRAPPED = "bootstrapped";
-    // The workspace-service messages keep their pre-rename wire tags ("daemon*") so stale daemon
-    // images keep speaking to a newer qits; retag them with the next CAPABILITY_VERSION bump.
-    public static final String SERVICE_TRANSITION = "daemonEvent";
     public static final String GIT_STATUS = "gitStatus";
     public static final String AGENT_ACTIVITY = "agentActivity";
     public static final String WORKSPACE_CHANGED = "workspaceChanged";
@@ -159,9 +143,6 @@ public final class DaemonProtocol {
     public static final String DESCRIBE = "describe";
     public static final String DESCRIBE_CONFIG = "describeConfig";
     public static final String RUN_BOOTSTRAP = "runBootstrap";
-    // Pre-rename wire tags kept for stale daemon images — see SERVICE_TRANSITION above.
-    public static final String START_SERVICE = "startDaemon";
-    public static final String SIGNAL_SERVICE = "signalDaemon";
     public static final String PULL_BRANCH = "pullBranch";
     public static final String OPEN_STREAM = "openStream";
 
@@ -197,9 +178,6 @@ public final class DaemonProtocol {
     public static final String PHASE = "phase";
     public static final String OUTCOME = "outcome";
     public static final String OK = "ok";
-    public static final String ID = "id";
-    public static final String SCRIPT = "script";
-    public static final String SIGNAL = "signal";
     public static final String STATE = "state";
     public static final String COMMAND_ID = "commandId";
     public static final String SESSION_ID = "sessionId";
@@ -214,9 +192,6 @@ public final class DaemonProtocol {
     // StreamTarget.API and the frame an older host sends is byte-identical to the one it always
     // sent. See DaemonCodec's OpenStream arms.
     public static final String TARGET = "target";
-    // Optional on OpenStream: written only when present — a SERVICE stream's service id, a name and
-    // never a port. Absent decodes to null, so older frames decode as before.
-    public static final String SERVICE_ID = "serviceId";
     // Optional on AgentActivity (qits-895, capability 8): written only when the daemon has a
     // verdict, so a frame with none — SessionStart, an unrecognized Notification, a Stop whose
     // arrays are absent or not arrays — is byte-identical to one built before this field existed.
