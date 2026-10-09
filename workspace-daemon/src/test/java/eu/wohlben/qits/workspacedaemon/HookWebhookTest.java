@@ -1,12 +1,14 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentEvent;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentState;
+import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.util.ArrayList;
 import java.util.List;
@@ -175,5 +177,141 @@ class HookWebhookTest {
     throwing.handle("SessionStart", payload("SessionStart"), "cmd-1");
 
     assertEquals(AgentState.IDLE, lastSent().state());
+  }
+
+  // --- awaitingInput (qits-895) --------------------------------------------------------------
+  // One test per row of the table in HookWebhook's class javadoc. The three Stop/UserPromptSubmit/
+  // SessionEnd cases use the exact payloads captured on Claude Code 2.1.283 that the ticket shipped
+  // with; the rest (no real capture to match) are built from the payload() helper.
+
+  @Test
+  void stopWithBothTaskArraysPresentAndEmptyIsAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"background_tasks\":[],"
+                + "\"session_crons\":[]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithARunningBackgroundTaskIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"bmxnunzfz\","
+                + "\"type\":\"shell\",\"status\":\"running\",\"description\":\"Sleep\","
+                + "\"command\":\"sleep 25\"}],\"session_crons\":[]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithAPendingSessionCronIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"background_tasks\":[],\"session_crons\":"
+                + "[{\"id\":\"b8d1f60e\",\"schedule\":\"41 06 09 10 *\",\"recurring\":false,"
+                + "\"prompt\":\"say tick\"}]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithNeitherTaskArrayReportedIsAwaitingInputUnknown() {
+    // payload() carries no background_tasks/session_crons at all — an older harness's shape.
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+    assertNull(lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithATaskArrayThatIsNotAJsonArrayIsAwaitingInputUnknown() {
+    JsonObject body =
+        payload("Stop")
+            .put("background_tasks", "not-an-array")
+            .put("session_crons", new JsonArray());
+    webhook.handle("Stop", body, "cmd-1");
+    assertNull(lastSent().awaitingInput());
+  }
+
+  @Test
+  void notificationPermissionPromptIsAwaitingInput() {
+    JsonObject body = payload("Notification").put("notification_type", "permission_prompt");
+    webhook.handle("Notification", body, "cmd-1");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void notificationElicitationDialogIsAwaitingInput() {
+    JsonObject body = payload("Notification").put("notification_type", "elicitation_dialog");
+    webhook.handle("Notification", body, "cmd-1");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void notificationOfAnyOtherTypeIsAwaitingInputUnknown() {
+    // Not false: a notification type this daemon has never seen might still be a blocked prompt.
+    JsonObject body = payload("Notification").put("notification_type", "idle_prompt");
+    webhook.handle("Notification", body, "cmd-1");
+    assertNull(lastSent().awaitingInput());
+  }
+
+  @Test
+  void sessionStartIsAwaitingInputUnknown() {
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    assertNull(lastSent().awaitingInput());
+  }
+
+  @Test
+  void userPromptSubmitIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject("{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hi\"}");
+    webhook.handle("UserPromptSubmit", body, "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void sessionEndIsAwaitingInput() {
+    JsonObject body = new JsonObject("{\"hook_event_name\":\"SessionEnd\",\"reason\":\"other\"}");
+    webhook.handle("SessionEnd", body, "cmd-1");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void aKilledFrameIsAwaitingInput() {
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    webhook.killed("cmd-1", AgentEvent.KILLED, 137, "killed by SIGKILL");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWhileWaitingSendsNoFrameSoTheStandingNotificationsVerdictStillStands() {
+    // No new wire frame goes out on this path (see stopAfterNotificationKeepsWaiting above and
+    // the class javadoc), so there is nothing to carry a fresh verdict — the Notification frame
+    // already sent, which carried true, is still the latest the backend or a replay has seen.
+    JsonObject notification =
+        payload("Notification").put("notification_type", "permission_prompt");
+    webhook.handle("Notification", notification, "cmd-1");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+
+    int before = sent.size();
+    JsonObject stop =
+        payload("Stop")
+            .put("background_tasks", new JsonArray())
+            .put("session_crons", new JsonArray());
+    webhook.handle("Stop", stop, "cmd-1");
+    assertEquals(before, sent.size(), "the hold path sends no frame");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void reportCurrentReplaysAwaitingInputToo() {
+    JsonObject body =
+        payload("Stop")
+            .put("background_tasks", new JsonArray())
+            .put("session_crons", new JsonArray());
+    webhook.handle("Stop", body, "cmd-1");
+    sent.clear();
+    webhook.reportCurrent();
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
   }
 }

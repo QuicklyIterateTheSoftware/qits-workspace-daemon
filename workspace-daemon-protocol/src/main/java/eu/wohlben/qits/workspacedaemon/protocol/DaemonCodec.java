@@ -141,6 +141,11 @@ public final class DaemonCodec {
         if (m.message() != null) {
           map.put(Field.MESSAGE, m.message());
         }
+        // awaitingInput (qits-895) follows the same rule: present only when the daemon has a
+        // verdict, so a frame with none is byte-identical to one built before the field existed.
+        if (m.awaitingInput() != null) {
+          map.put(Field.AWAITING_INPUT, m.awaitingInput());
+        }
       }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
@@ -277,7 +282,8 @@ public final class DaemonCodec {
               str(map, Field.TRANSCRIPT_PATH),
               longVal(map, Field.AT),
               intObj(map, Field.EXIT_CODE),
-              str(map, Field.MESSAGE));
+              str(map, Field.MESSAGE),
+              boolObj(map, Field.AWAITING_INPUT));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -356,6 +362,16 @@ public final class DaemonCodec {
   private static boolean boolVal(Map<String, Object> map, String key) {
     Object value = map.get(key);
     return value instanceof Boolean bool && bool;
+  }
+
+  /**
+   * Like {@link #boolVal}, but absent decodes to {@code null} rather than {@code false} — for a
+   * field whose three states ({@code true}/{@code false}/unknown) are distinct, such as {@code
+   * AgentActivity#awaitingInput()}.
+   */
+  private static Boolean boolObj(Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    return value instanceof Boolean bool ? bool : null;
   }
 
   private static List<String> strList(Map<String, Object> map, String key) {

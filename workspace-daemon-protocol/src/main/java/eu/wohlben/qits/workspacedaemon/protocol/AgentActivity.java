@@ -28,6 +28,19 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  * @param message one sentence saying what killed the agent — the OOM killer or a plain SIGKILL, and
  *     the container's memory cap where the daemon could read it; null on every hook-driven frame.
  *     Optional on the wire for {@code exitCode}'s reason
+ * @param awaitingInput (qits-895) whether the agent is blocked on the user rather than merely
+ *     between turns — {@code true} for a {@code Stop} whose {@code background_tasks} and {@code
+ *     session_crons} are both present and empty, for a {@code Notification} whose {@code
+ *     notification_type} is {@code permission_prompt} or {@code elicitation_dialog}, and for every
+ *     {@code ENDED} frame (nothing is coming next, hook-driven or killed); {@code false} for a
+ *     {@code Stop} with either array non-empty (a background task or a cron is still going to want
+ *     the agent's attention) and for {@code UserPromptSubmit}; {@code null} when the payload does
+ *     not say — {@code SessionStart}, an {@code other}-typed {@code Notification}, or a {@code
+ *     Stop} whose arrays are missing or not JSON arrays at all (an older harness, say). Null on
+ *     every frame built before this field existed. Optional on the wire (written only when
+ *     present), the {@code exitCode}/{@code message} rule again: an older host reading a newer
+ *     frame simply does not see the key, and a newer host reading an older frame decodes {@code
+ *     null} — "unknown", not "no"
  */
 public record AgentActivity(
     String commandId,
@@ -38,10 +51,14 @@ public record AgentActivity(
     String transcriptPath,
     long at,
     Integer exitCode,
-    String message)
+    String message,
+    Boolean awaitingInput)
     implements DaemonMessage {
 
-  /** A hook-driven frame: no exit code and no message, which is every frame but a kill's. */
+  /**
+   * A hook-driven frame with no verdict on {@code awaitingInput}: no exit code and no message
+   * either. Kept for source compatibility with every caller written before qits-895.
+   */
   public AgentActivity(
       String commandId,
       String sessionId,
@@ -50,6 +67,59 @@ public record AgentActivity(
       String source,
       String transcriptPath,
       long at) {
-    this(commandId, sessionId, state, hookEvent, source, transcriptPath, at, null, null);
+    this(commandId, sessionId, state, hookEvent, source, transcriptPath, at, null, null, null);
+  }
+
+  /**
+   * A hook-driven frame carrying its {@code awaitingInput} verdict: still no exit code or message.
+   */
+  public AgentActivity(
+      String commandId,
+      String sessionId,
+      String state,
+      String hookEvent,
+      String source,
+      String transcriptPath,
+      long at,
+      Boolean awaitingInput) {
+    this(
+        commandId,
+        sessionId,
+        state,
+        hookEvent,
+        source,
+        transcriptPath,
+        at,
+        null,
+        null,
+        awaitingInput);
+  }
+
+  /**
+   * A killed-agent frame with no {@code awaitingInput} opinion of its own. Kept for source
+   * compatibility with every caller written before qits-895; {@code workspace-daemon}'s own killed
+   * frame now calls the canonical constructor directly so it carries {@code true}.
+   */
+  public AgentActivity(
+      String commandId,
+      String sessionId,
+      String state,
+      String hookEvent,
+      String source,
+      String transcriptPath,
+      long at,
+      Integer exitCode,
+      String message) {
+    this(
+        commandId,
+        sessionId,
+        state,
+        hookEvent,
+        source,
+        transcriptPath,
+        at,
+        exitCode,
+        message,
+        null);
   }
 }

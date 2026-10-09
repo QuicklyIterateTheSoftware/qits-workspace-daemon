@@ -61,8 +61,23 @@ public final class DaemonProtocol {
    * 6 decodes the frame (unknown keys are not read) and gets an {@code ENDED} it already
    * understands, which is already better than the stale {@code IDLE} it kept before; it simply has
    * no sentence to show for it.
+   *
+   * <p><b>8 added {@link AgentActivity#awaitingInput()}</b> (qits-895): a nullable verdict on
+   * whether the agent is blocked on the user rather than merely between turns, computed by {@code
+   * workspace-daemon} from the hook payload a {@code Stop}/{@code Notification}/{@code
+   * SessionEnd}/{@code UserPromptSubmit} carries and not from {@code state} or {@code hookEvent}
+   * alone — {@code Stop} and {@code Notification} already collapse several payload shapes onto
+   * one {@code state}, which is exactly why neither can answer this by itself. Nothing gates on
+   * this number. A backend on 7 decodes the frame (the new key is unread) and is exactly as blind
+   * to whether a session is blocked as it was before this field existed; it simply has no verdict
+   * to show. The field is optional on the wire in both directions, the {@code exitCode}/{@code
+   * message} rule again: written only when present, so a frame with no verdict — {@code
+   * SessionStart}, an {@code other}-typed {@code Notification}, a {@code Stop} whose arrays are
+   * missing or not JSON arrays — is byte-identical to what it was before, and a newer host
+   * reading one of those from an older daemon decodes {@code null} rather than guessing {@code
+   * false}.
    */
-  public static final int CAPABILITY_VERSION = 7;
+  public static final int CAPABILITY_VERSION = 8;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -202,6 +217,10 @@ public final class DaemonProtocol {
     // Optional on OpenStream: written only when present — a SERVICE stream's service id, a name and
     // never a port. Absent decodes to null, so older frames decode as before.
     public static final String SERVICE_ID = "serviceId";
+    // Optional on AgentActivity (qits-895, capability 8): written only when the daemon has a
+    // verdict, so a frame with none — SessionStart, an unrecognized Notification, a Stop whose
+    // arrays are absent or not arrays — is byte-identical to one built before this field existed.
+    public static final String AWAITING_INPUT = "awaitingInput";
 
     private Field() {}
   }

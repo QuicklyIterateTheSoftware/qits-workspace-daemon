@@ -328,6 +328,75 @@ class DaemonCodecTest {
   }
 
   @Test
+  void awaitingInputRoundTripsWhenPresent() {
+    AgentActivity waiting =
+        new AgentActivity(
+            "cmd-1",
+            null,
+            DaemonProtocol.AgentState.WAITING,
+            "Notification",
+            null,
+            null,
+            42L,
+            Boolean.TRUE);
+    assertEquals(waiting, roundTrip(waiting));
+    Map<String, Object> wire = DaemonCodec.encode(waiting);
+    assertEquals(Boolean.TRUE, wire.get(DaemonProtocol.Field.AWAITING_INPUT));
+  }
+
+  @Test
+  void aFrameWithNoAwaitingInputVerdictPutsNoKeyOnTheWire() {
+    // The exitCode/message rule again: a frame built with the pre-qits-895 constructors, or one
+    // whose verdict genuinely is "unknown", must stay byte-identical to what it was before the
+    // field existed.
+    AgentActivity busy =
+        new AgentActivity(
+            "cmd-1", null, DaemonProtocol.AgentState.BUSY, "UserPromptSubmit", null, null, 42L);
+    Map<String, Object> wire = DaemonCodec.encode(busy);
+    assertFalse(wire.containsKey(DaemonProtocol.Field.AWAITING_INPUT));
+    AgentActivity decoded = (AgentActivity) DaemonCodec.decode(wire);
+    assertEquals(null, decoded.awaitingInput());
+  }
+
+  @Test
+  void awaitingInputFalseRoundTripsDistinctlyFromAbsent() {
+    // false is a verdict, not the default: must not collapse onto the "no key" / null case.
+    AgentActivity busy =
+        new AgentActivity(
+            "cmd-1",
+            null,
+            DaemonProtocol.AgentState.IDLE,
+            "Stop",
+            null,
+            null,
+            42L,
+            Boolean.FALSE);
+    Map<String, Object> wire = DaemonCodec.encode(busy);
+    assertEquals(Boolean.FALSE, wire.get(DaemonProtocol.Field.AWAITING_INPUT));
+    AgentActivity decoded = (AgentActivity) DaemonCodec.decode(wire);
+    assertEquals(Boolean.FALSE, decoded.awaitingInput());
+  }
+
+  @Test
+  void aKilledAgentsFrameCanCarryAwaitingInputToo() {
+    AgentActivity killed =
+        new AgentActivity(
+            "cmd-1",
+            "11111111-1111-1111-1111-111111111111",
+            DaemonProtocol.AgentState.ENDED,
+            DaemonProtocol.AgentEvent.OOM_KILLED,
+            null,
+            null,
+            42L,
+            137,
+            "killed by the out-of-memory killer",
+            Boolean.TRUE);
+    assertEquals(killed, roundTrip(killed));
+    Map<String, Object> wire = DaemonCodec.encode(killed);
+    assertEquals(Boolean.TRUE, wire.get(DaemonProtocol.Field.AWAITING_INPUT));
+  }
+
+  @Test
   void keysTheDecoderDoesNotKnowAreIgnoredRatherThanFatal() {
     // The property a capability-6 backend relies on to take the killed agent's frame: its decoder
     // reads the keys it knows by name and never enumerates the map, so exitCode and message are
@@ -532,9 +601,17 @@ class DaemonCodecTest {
 
   @Test
   void theKilledAgentFrameLandedAtCapabilitySeven() {
-    // A literal for the reason the SERVICE one is: the host records it, and a capability that moved
-    // without this line moving is a contract nobody re-read.
-    assertEquals(7, DaemonProtocol.CAPABILITY_VERSION);
+    // No longer the bleeding edge now that 8 exists (see the test below), so this one steps down to
+    // the SERVICE test's >=: the fact this capability still holds does not need re-asserting every
+    // time a later one lands.
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 7);
+  }
+
+  @Test
+  void theAwaitingInputVerdictLandedAtCapabilityEight() {
+    // A literal for the reason the killed-agent one was: the host records it, and a capability that
+    // moved without this line moving is a contract nobody re-read.
+    assertEquals(8, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test

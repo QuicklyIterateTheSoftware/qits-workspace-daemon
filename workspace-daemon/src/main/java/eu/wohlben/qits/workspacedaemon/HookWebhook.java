@@ -7,6 +7,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,6 +41,30 @@ import org.jboss.logging.Logger;
  * permission prompt forwarded as {@code IDLE} would type {@code /rename} into the dialog: that Stop
  * forwards {@code WAITING} again. {@code SessionEnd} forwards {@code ENDED}. A listener that throws
  * is logged and swallowed — the hook still gets its {@code 200}, and the relay home still happens.
+ *
+ * <p><b>{@code awaitingInput} (qits-895)</b> is a second, independent verdict every frame carries
+ * alongside {@code state}: whether the agent is blocked on the user rather than merely between
+ * turns. It is computed from the hook payload, never from {@code state}/{@code hookEvent} alone,
+ * because {@link #mapState} already collapses several payload shapes onto one state and must not
+ * change to answer this — {@code Notification} maps to {@code WAITING} whether or not it is a
+ * permission prompt, and {@code Stop} maps to {@code IDLE} whether or not a background task is
+ * still running. The table: a {@code Stop} whose {@code background_tasks} and {@code
+ * session_crons} are both present and both empty is {@code true} (nothing left to run, so idle
+ * really means waiting-for-the-user); either array non-empty is {@code false} (more output is
+ * still coming, unprompted); either array absent or not a JSON array is {@code null} — an older
+ * harness that does not report them, read as "unknown" rather than guessed. A {@code Notification}
+ * is {@code true} only for a {@code permission_prompt} or {@code elicitation_dialog} {@code
+ * notification_type}; any other type is {@code null}, not {@code false} — a notification this
+ * daemon does not recognise might still be one the user has to answer. {@code UserPromptSubmit} is
+ * always {@code false} (a turn was just handed to the agent). {@code SessionStart} is always
+ * {@code null} (nothing has happened yet to have an opinion about). {@code SessionEnd}, and a
+ * {@link #killed} frame, are always {@code true} — there is no next turn to wait out, so "blocked
+ * on the user" and "session over" coincide.
+ *
+ * <p>The Stop-during-{@code WAITING} hold path below sends no wire frame at all — see its own
+ * comment — so {@code awaitingInput} is never computed for it: the frame that already went out
+ * was the preceding {@code Notification}'s, which carried {@code true}, and that is still the
+ * latest thing the backend or a reconnect replay has seen.
  */
 final class HookWebhook {
 
@@ -112,7 +137,9 @@ final class HookWebhook {
     if (state == null || commandId == null || commandId.isBlank()) {
       return;
     }
-    // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins).
+    // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins). No
+    // frame goes out on this path — see the class javadoc's "hold path" paragraph — so
+    // awaitingInput is never computed for it; the Notification frame already sent carried true.
     AgentActivity current = lastByCommand.get(commandId);
     if ("Stop".equals(hookEvent) && current != null && AgentState.WAITING.equals(current.state())) {
       forward(commandId, current.state());
@@ -126,7 +153,8 @@ final class HookWebhook {
             hookEvent,
             body.getString("source"),
             body.getString("transcript_path"),
-            System.currentTimeMillis());
+            System.currentTimeMillis(),
+            awaitingInput(hookEvent, body));
     if (AgentState.ENDED.equals(state)) {
       lastByCommand.remove(commandId);
     } else {
@@ -159,7 +187,9 @@ final class HookWebhook {
             last == null ? null : last.transcriptPath(),
             System.currentTimeMillis(),
             exitCode,
-            message);
+            message,
+            // no next turn to wait out — see the class javadoc's awaitingInput table
+            Boolean.TRUE);
     send.accept(activity);
     forward(commandId, AgentState.ENDED);
   }
@@ -202,5 +232,54 @@ final class HookWebhook {
       case "SessionEnd" -> AgentState.ENDED;
       default -> null; // SubagentStop / PreToolUse / … — not a main-agent state transition
     };
+  }
+
+  /**
+   * The {@code awaitingInput} verdict (qits-895) for a hook-driven frame — see the class
+   * javadoc's table for the full reasoning behind each arm. Deliberately independent of {@link
+   * #mapState}: that method's job is the coarse {@code IDLE}/{@code BUSY}/{@code WAITING}/{@code
+   * ENDED} state and must not change, while this one reads the payload fields that state
+   * collapses away.
+   */
+  private static Boolean awaitingInput(String hookEvent, JsonObject body) {
+    return switch (hookEvent) {
+      case "Stop" -> awaitingInputForStop(body);
+      case "Notification" -> awaitingInputForNotification(body);
+      case "UserPromptSubmit" -> Boolean.FALSE;
+      case "SessionEnd" -> Boolean.TRUE;
+      case "SessionStart" -> null; // nothing has happened yet to have an opinion about
+      default -> null; // not reached: mapState already dropped every other event
+    };
+  }
+
+  /**
+   * {@code true} when a {@code Stop}'s {@code background_tasks} and {@code session_crons} are
+   * both present <em>and</em> both empty — nothing left running, so the turn ending really does
+   * mean the agent is now waiting on the user. {@code false} when either array has an element:
+   * more output is still coming on its own, unprompted. {@code null} when either key is absent or
+   * is not a JSON array — an older harness that does not report them — read as "unknown" rather
+   * than guessed.
+   */
+  private static Boolean awaitingInputForStop(JsonObject body) {
+    Object backgroundTasks = body.getValue("background_tasks");
+    Object sessionCrons = body.getValue("session_crons");
+    if (!(backgroundTasks instanceof JsonArray tasks)
+        || !(sessionCrons instanceof JsonArray crons)) {
+      return null;
+    }
+    return tasks.isEmpty() && crons.isEmpty();
+  }
+
+  /**
+   * {@code true} only for the two {@code notification_type}s that are genuinely a blocked prompt;
+   * any other type — including one this daemon has never seen — is {@code null}, not {@code
+   * false}: an unrecognised notification might still be one the user has to answer, and guessing
+   * "no" would be worse than saying nothing.
+   */
+  private static Boolean awaitingInputForNotification(JsonObject body) {
+    String type = body.getString("notification_type");
+    return "permission_prompt".equals(type) || "elicitation_dialog".equals(type)
+        ? Boolean.TRUE
+        : null;
   }
 }
