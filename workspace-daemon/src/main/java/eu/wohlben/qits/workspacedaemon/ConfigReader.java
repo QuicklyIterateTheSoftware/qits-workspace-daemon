@@ -11,8 +11,10 @@ import java.nio.file.Files;
  * eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig} from (docs/epics/qits-workspace-daemon/
  * Part 2). "Degrade loudly, never block": an absent/blank file yields the empty config with no
  * warning; an unreadable or structurally invalid file yields the empty config plus a warning. The
- * daemon runs this once, right after its self-clone completes, so the config is the workspace's
- * <em>branch's</em> config — what the host's {@code mainBranch}-only read never could express.
+ * daemon runs this right after its self-clone completes, so the config is the workspace's
+ * <em>branch's</em> config — what the host's {@code mainBranch}-only read never could express — and
+ * again on every {@code SIGHUP} ({@code kill -HUP 1}; docker-init/tini at PID 1 forwards it to the
+ * daemon), through {@link ConfigHolder}, which keeps the last good config when a re-read degrades.
  */
 public final class ConfigReader {
 

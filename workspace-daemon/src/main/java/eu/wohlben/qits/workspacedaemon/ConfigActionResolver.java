@@ -18,8 +18,10 @@ import java.util.function.Supplier;
  * becoming a permanently-unwired port, and {@code POST /commands} works in the extracted repo.
  *
  * <p>The config is read through a supplier, not captured: it lives in the working tree and an agent
- * can edit it mid-session, so a newly declared action is launchable without restarting the daemon.
- * That is the same reason {@link WorkspaceApi} takes its {@code frameworks:} hints as a supplier.
+ * can edit it mid-session, and once the daemon re-reads it on {@code SIGHUP} ({@code kill -HUP 1};
+ * docker-init/tini at PID 1 forwards it to the daemon) a newly declared action is launchable
+ * without restarting the container. See {@link ConfigHolder}. That is the same reason {@link
+ * WorkspaceApi} takes its {@code frameworks:} hints as a supplier.
  *
  * <p>{@code check} and {@code description} are parsed but unused here — {@code check} is the
  * host's pre-flight predicate, which nothing in the launch path consumed either.

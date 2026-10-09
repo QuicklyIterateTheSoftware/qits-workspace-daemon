@@ -123,6 +123,14 @@ No `{repoId}/{workspaceId}` prefix in any of those paths: this daemon serves exa
 so those segments would be a constant the caller has to get right. The response bodies carry both
 ids back.
 
+**The checkout's config is re-read on `SIGHUP`, not watched.** Actions, the bootstrap chain and the
+`frameworks:` hints come from `/workspace/.config/qits/repository.yml` (legacy
+`/workspace/.qits-config.yml`), read once after the self-clone. After editing it, run
+`kill -HUP 1`: docker-init/tini at PID 1 forwards the signal to the daemon, which runs as the same
+uid. (`pkill -x qits-workspace-daemon` matches nothing — the kernel truncates `comm` to 15
+characters.) A file that no longer parses keeps the last good config, and its warning shows up in
+the config view. A reload never re-runs the bootstrap chain; that is `POST /bootstrap-commands/run`.
+
 **The full contract is `docs/openapi.yml`**, hand-written — there is nothing annotation-shaped here
 to generate one from. It covers every route above, every field of every body, and both socket
 protocols (under `x-websockets`, since OpenAPI does not model them). It is what a consumer's types

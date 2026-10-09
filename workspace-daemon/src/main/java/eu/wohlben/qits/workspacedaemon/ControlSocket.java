@@ -492,13 +492,15 @@ public class ControlSocket {
       new java.util.concurrent.atomic.AtomicBoolean();
 
   /**
-   * The workspace's parsed {@code .qits-config.yml}, read in-container right after the self-clone
-   * and held for {@link DescribeConfig} replies (and, in later parts, the bootstrap/daemon chains).
-   * Initialized to the empty config so a describe that races ahead of provisioning gets a benign
-   * empty answer rather than null.
+   * The checkout's parsed config ({@code .config/qits/repository.yml}, legacy {@code
+   * .qits-config.yml}), read in-container right after the self-clone and re-read on {@code SIGHUP}
+   * ({@code kill -HUP 1} — docker-init/tini at PID 1 forwards it here); see {@link #reloadConfig}.
+   * Every consumer — {@link DescribeConfig} replies, action resolution, the bootstrap chain, the
+   * frameworks hint, agent defaults — reads it through a supplier, so a reload reaches all of them.
+   * Starts as the empty config so a describe that races ahead of provisioning gets a benign empty
+   * answer rather than null.
    */
-  private volatile ConfigReader.State configState =
-      new ConfigReader.State(DaemonQitsConfig.EMPTY, ConfigJson.empty(), null);
+  private final ConfigHolder configState = ConfigHolder.forCheckout();
 
   /**
    * Where the daemon runs the self-clone, config read, and bootstrap chain (image {@code WORKDIR}).
@@ -560,6 +562,9 @@ public class ControlSocket {
                           + " harness library's shipped defaults.");
                   return AgentSurfaceConfigurations.shipped();
                 });
+    // Ahead of the url check so an idle daemon does not die on a HUP either: the JVM default for
+    // SIGHUP is to exit, and PID 1 forwards every signal it gets.
+    installReloadSignal();
     if (url.isEmpty() || url.get().isBlank()) {
       LOG.warn(
           "No qits.workspace-daemon.url configured — workspace-daemon is idle (container stays"
@@ -619,6 +624,49 @@ public class ControlSocket {
     connect(0);
   }
 
+  /**
+   * Re-read the checkout's config on {@code SIGHUP}, so an agent's edit to {@code
+   * .config/qits/repository.yml} reaches actions, frameworks and the config view without a
+   * container restart. The handler only hands off to the worker pool: a signal-dispatch thread is
+   * no place for file IO and YAML parsing.
+   *
+   * <p>Native image needs nothing extra for this. {@code sun.misc.Signal.handle} with a Java
+   * handler needs {@code EnableSignalHandling}, which on the jdk-25 Mandrel builder defaults to true
+   * for executables (graal release/graal-vm/25.0 SubstrateOptions: {@code getValueOrDefault}
+   * returns {@code ImageInfo.isExecutable()}), as does {@code InstallExitHandlers}. That is why
+   * Quarkus 3.34's NativeImageBuildStep only passes {@code --install-exit-handlers} for GraalVM
+   * older than 25 — the option is deprecated there as "enabled by default for executables". No
+   * reflection or JNI registration is involved: {@code sun.misc.Signal} is substituted by
+   * SubstrateVM itself.
+   */
+  private void installReloadSignal() {
+    try {
+      sun.misc.Signal.handle(
+          new sun.misc.Signal("HUP"),
+          signal -> {
+            try {
+              workers.execute(this::reloadConfig);
+            } catch (RejectedExecutionException e) {
+              LOG.debug("SIGHUP after shutdown; config not reloaded");
+            }
+          });
+    } catch (IllegalArgumentException e) {
+      LOG.warnf(
+          "Could not install the SIGHUP handler (%s); checkout config edits need a container"
+              + " restart",
+          e.getMessage());
+    }
+  }
+
+  /**
+   * Re-read the checkout's config and swap it in; a broken file keeps the last good config and only
+   * replaces the warning. Never runs the bootstrap chain — that stays a fresh-clone boot step (see
+   * {@link ConfigHolder}).
+   */
+  void reloadConfig() {
+    configState.reload();
+  }
+
   /** Kick off the boot self-clone on the worker pool, at most once. */
   private void startProvisioning() {
     if (provisionStarted.compareAndSet(false, true)) {
@@ -639,8 +687,9 @@ public class ControlSocket {
             boolean provisioned = Provisioner.provision(env, this::send);
             // Clone → config-read: the next step of the daemon's own startup sequence. Read the
             // checkout's config even if the clone failed (absent file ⇒ empty), so a DescribeConfig
-            // always has an answer. Part 3 runs the bootstrap chain from this same held state.
-            configState = ConfigReader.read();
+            // always has an answer. Part 3 runs the bootstrap chain from this same held state. The
+            // same holder SIGHUP reloads, so boot is simply the first read (no last good to keep).
+            configState.reload();
             runBootstrapOnBoot(freshClone, provisioned);
             startGitStatusMonitor(provisioned);
           });
@@ -691,7 +740,8 @@ public class ControlSocket {
     // `git ls-files` over the checkout, so binding it before the clone landed would publish a port
     // that answers nothing but 500s. `monitor.start()` above has already settled the first marker,
     // so its caches key on a real value from the first request. The frameworks supplier reads the
-    // live `configState`, so an agent editing the checkout's own `frameworks:` block is picked up.
+    // held `configState`, so an agent's edit to the checkout's own `frameworks:` block is picked
+    // up once the config is reloaded on SIGHUP (`kill -HUP 1`; tini at PID 1 forwards it).
     workspaceApi.start(
         WORKSPACE_DIR.toPath(),
         () ->
@@ -1191,7 +1241,7 @@ public class ControlSocket {
       case DescribeConfig request ->
           workers.execute(
               () -> {
-                ConfigReader.State state = configState;
+                ConfigReader.State state = configState.state();
                 send(
                     new ConfigView(
                         workspaceId, request.correlationId(), state.configJson(), state.warning()));
