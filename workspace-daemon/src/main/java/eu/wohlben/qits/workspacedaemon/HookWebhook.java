@@ -49,10 +49,15 @@ import org.jboss.logging.Logger;
  * change to answer this — {@code Notification} maps to {@code WAITING} whether or not it is a
  * permission prompt, and {@code Stop} maps to {@code IDLE} whether or not a background task is
  * still running. The table: a {@code Stop} whose {@code background_tasks} and {@code
- * session_crons} are both present and both empty is {@code true} (nothing left to run, so idle
- * really means waiting-for-the-user); either array non-empty is {@code false} (more output is
- * still coming, unprompted); either array absent or not a JSON array is {@code null} — an older
- * harness that does not report them, read as "unknown" rather than guessed. A {@code Notification}
+ * session_crons} are both present and both JSON arrays is {@code true} unless {@code
+ * session_crons} is non-empty or {@code background_tasks} holds anything other than a plain
+ * {@code "type": "shell"} object — a long-lived background shell (a dev server, a poller, {@code
+ * tail -f}) does not count as in flight, by the owner's decision: it must not keep the agent read
+ * as blocked on the user, and a waiting-on-build false block it would otherwise cause is cleared
+ * by the task's own completion, which re-invokes the agent anyway. A subagent, a monitor, an
+ * unknown or missing type, or a non-object element all still count as in flight and give {@code
+ * false}. Either array absent or not a JSON array is {@code null} — an older harness that does
+ * not report them, read as "unknown" rather than guessed. A {@code Notification}
  * is {@code true} only for a {@code permission_prompt} or {@code elicitation_dialog} {@code
  * notification_type}; any other type is {@code null}, not {@code false} — a notification this
  * daemon does not recognise might still be one the user has to answer. {@code UserPromptSubmit} is
@@ -254,11 +259,15 @@ final class HookWebhook {
 
   /**
    * {@code true} when a {@code Stop}'s {@code background_tasks} and {@code session_crons} are
-   * both present <em>and</em> both empty — nothing left running, so the turn ending really does
-   * mean the agent is now waiting on the user. {@code false} when either array has an element:
-   * more output is still coming on its own, unprompted. {@code null} when either key is absent or
-   * is not a JSON array — an older harness that does not report them — read as "unknown" rather
-   * than guessed.
+   * both present and both JSON arrays, {@code session_crons} is empty, and every {@code
+   * background_tasks} element is a JSON object with {@code "type": "shell"} — a long-lived
+   * background shell (a dev server, a poller, {@code tail -f}) must not keep the agent from being
+   * read as waiting, because the shell's own completion re-invokes the agent, which clears a
+   * waiting-on-build false block anyway. {@code false} when {@code session_crons} holds anything,
+   * or when any {@code background_tasks} element is not such a shell object — a subagent, a
+   * monitor, an unknown or missing type, or a non-object element all still mean more output is
+   * coming on its own, unprompted. {@code null} when either key is absent or is not a JSON array
+   * — an older harness that does not report them — read as "unknown" rather than guessed.
    */
   private static Boolean awaitingInputForStop(JsonObject body) {
     Object backgroundTasks = body.getValue("background_tasks");
@@ -267,7 +276,16 @@ final class HookWebhook {
         || !(sessionCrons instanceof JsonArray crons)) {
       return null;
     }
-    return tasks.isEmpty() && crons.isEmpty();
+    if (!crons.isEmpty()) {
+      return Boolean.FALSE;
+    }
+    for (Object task : tasks) {
+      if (!(task instanceof JsonObject taskObject)
+          || !"shell".equals(taskObject.getString("type"))) {
+        return Boolean.FALSE;
+      }
+    }
+    return Boolean.TRUE;
   }
 
   /**

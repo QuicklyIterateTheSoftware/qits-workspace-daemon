@@ -195,12 +195,50 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopWithARunningBackgroundTaskIsNotAwaitingInput() {
+  void stopWithARunningBackgroundShellIsAwaitingInput() {
+    // A long-lived background shell (dev server, poller, tail -f) must not keep the agent from
+    // being read as waiting — its own completion re-invokes the agent regardless.
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"bmxnunzfz\","
                 + "\"type\":\"shell\",\"status\":\"running\",\"description\":\"Sleep\","
                 + "\"command\":\"sleep 25\"}],\"session_crons\":[]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithARunningBackgroundSubagentIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"a94d\","
+                + "\"type\":\"subagent\",\"status\":\"running\","
+                + "\"description\":\"Reply with pong\",\"agent_type\":\"general-purpose\"}],"
+                + "\"session_crons\":[]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithAMixOfShellAndSubagentBackgroundTasksIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"background_tasks\":["
+                + "{\"id\":\"bmxnunzfz\",\"type\":\"shell\",\"status\":\"running\","
+                + "\"description\":\"Sleep\",\"command\":\"sleep 25\"},"
+                + "{\"id\":\"a94d\",\"type\":\"subagent\",\"status\":\"running\","
+                + "\"description\":\"Reply with pong\",\"agent_type\":\"general-purpose\"}],"
+                + "\"session_crons\":[]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithABackgroundTaskMissingATypeIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"bmxnunzfz\","
+                + "\"status\":\"running\"}],\"session_crons\":[]}");
     webhook.handle("Stop", body, "cmd-1");
     assertEquals(Boolean.FALSE, lastSent().awaitingInput());
   }
@@ -210,6 +248,19 @@ class HookWebhookTest {
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":[],\"session_crons\":"
+                + "[{\"id\":\"b8d1f60e\",\"schedule\":\"41 06 09 10 *\",\"recurring\":false,"
+                + "\"prompt\":\"say tick\"}]}");
+    webhook.handle("Stop", body, "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void stopWithAPendingSessionCronAndOnlyShellBackgroundTasksIsNotAwaitingInput() {
+    JsonObject body =
+        new JsonObject(
+            "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"bmxnunzfz\","
+                + "\"type\":\"shell\",\"status\":\"running\",\"description\":\"Sleep\","
+                + "\"command\":\"sleep 25\"}],\"session_crons\":"
                 + "[{\"id\":\"b8d1f60e\",\"schedule\":\"41 06 09 10 *\",\"recurring\":false,"
                 + "\"prompt\":\"say tick\"}]}");
     webhook.handle("Stop", body, "cmd-1");
