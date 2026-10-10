@@ -49,14 +49,14 @@
 
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+        <quarkus.platform.version>3.40.1</quarkus.platform.version>
 
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <!-- pact-jvm, test scope only (ticket qits-1149): ConsumerPactVerificationTest verifies
              consumers' pacts against this daemon's API; qits-pact-consumer builds this daemon's own pact
              against qits-idp on it. An external library, so it moves by hand. -->
-        <pact-jvm.version>4.6.21</pact-jvm.version>
+        <pact-jvm.version>4.7.5</pact-jvm.version>
         <!-- The consumer side of the contracts (ticket qits-1149), test scope only: the shared
              golden-master reader, and the recorded answers of each provider this daemon calls.
              Released coordinates, exact pins; the maintenance bump moves them. -->
