@@ -41,6 +41,10 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  *     present), the {@code exitCode}/{@code message} rule again: an older host reading a newer
  *     frame simply does not see the key, and a newer host reading an older frame decodes {@code
  *     null} — "unknown", not "no"
+ * @param agentId (capability 10, qits-1152) the agent worktree whose harness the command runs, or
+ *     null for a command no agent owns (the sign-in terminal). A workspace hosts several agents,
+ *     so the host keys the session id and the activity by agent, not by workspace. Optional on the
+ *     wire, written only when present
  */
 public record AgentActivity(
     String commandId,
@@ -52,8 +56,51 @@ public record AgentActivity(
     long at,
     Integer exitCode,
     String message,
-    Boolean awaitingInput)
+    Boolean awaitingInput,
+    String agentId)
     implements DaemonMessage {
+
+  /** Every field but {@code agentId}, which is then null: the shape before capability 10. */
+  public AgentActivity(
+      String commandId,
+      String sessionId,
+      String state,
+      String hookEvent,
+      String source,
+      String transcriptPath,
+      long at,
+      Integer exitCode,
+      String message,
+      Boolean awaitingInput) {
+    this(
+        commandId,
+        sessionId,
+        state,
+        hookEvent,
+        source,
+        transcriptPath,
+        at,
+        exitCode,
+        message,
+        awaitingInput,
+        null);
+  }
+
+  /** This frame, naming the agent whose harness sent it. */
+  public AgentActivity withAgentId(String agent) {
+    return new AgentActivity(
+        commandId,
+        sessionId,
+        state,
+        hookEvent,
+        source,
+        transcriptPath,
+        at,
+        exitCode,
+        message,
+        awaitingInput,
+        agent);
+  }
 
   /**
    * A hook-driven frame with no verdict on {@code awaitingInput}: no exit code and no message

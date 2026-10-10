@@ -36,7 +36,7 @@ public final class DaemonProtocol {
    * degrades safely, but {@code OpenStream} travels qits→daemon and an older image simply never
    * handles it.
    *
-   * <p><b>5 added the web editor: {@link EditorState}, and {@link OpenStream#target()}.</b> Both
+   * <p><b>5 added the web editor: {@code EditorState}, and {@link OpenStream#target()}.</b> Both
    * halves are backward compatible in both directions, so nothing gates on this number — it is a
    * fact the host records. The daemon→qits half degrades as {@link WorkspaceChanged} did: a backend
    * still on 4 drops the unknown {@code editorState} tag and simply has no editor to show. The
@@ -80,8 +80,19 @@ public final class DaemonProtocol {
    * {@code daemonEvent}, and drops a {@code startDaemon}/{@code signalDaemon} or a {@code SERVICE}
    * stream from an older host as an undecodable frame; a host that still knows the frames simply
    * never receives one.
+   *
+   * <p><b>10 decoupled agents from workspaces</b> (qits-1152): a workspace hosts several agent
+   * worktrees. {@link AgentActivity} carries an optional {@code agentId}, and the new {@link
+   * AgentBranchPushed} reports each branch the daemon pushed for an agent. Removed with the old
+   * single-checkout model: the web editor ({@code editorState}, the {@code EDITOR} stream target)
+   * and the bootstrap chain ({@code runBootstrap}, {@code bootstrapStep}, {@code bootstrapOutcome},
+   * {@code bootstrapped}). {@link Hello} and {@link WorkspaceInfo} keep their {@code branch} and
+   * {@code parent} keys, but a daemon at 10 always sends them null: a workspace no longer has a
+   * branch. {@link GitStatus} is no longer sent. {@link PullBranch} is now only a hint that a ref
+   * moved on the git host; the daemon answers it with a fetch of the base clone. A backend on 9
+   * drops the two unknown frames and reads every other one as before.
    */
-  public static final int CAPABILITY_VERSION = 9;
+  public static final int CAPABILITY_VERSION = 10;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -99,23 +110,6 @@ public final class DaemonProtocol {
    */
   public static final String PROVISION_CORRELATION_ID = "provision";
 
-  /**
-   * The prefix a bootstrap step's streamed output ({@link CommandChunk}) is correlated with, so the
-   * backend routes those chunks to the workspace's {@code bootstrap:<name>} process segment
-   * (docs/epics/qits-workspace-daemon/ Part 3). Like {@link #PROVISION_CORRELATION_ID}, a bootstrap
-   * step is not a request/reply round-trip, so its output correlation is a well-known value both
-   * sides compute from the step name rather than a per-call id.
-   */
-  public static final String BOOTSTRAP_CORRELATION_PREFIX = "bootstrap:";
-
-  /**
-   * The output correlation id for a bootstrap step — {@link #BOOTSTRAP_CORRELATION_PREFIX}{@code +
-   * name}.
-   */
-  public static String bootstrapCorrelationId(String stepName) {
-    return BOOTSTRAP_CORRELATION_PREFIX + stepName;
-  }
-
   private DaemonProtocol() {}
 
   /** The {@code "type"} discriminator values. */
@@ -130,19 +124,15 @@ public final class DaemonProtocol {
     public static final String PROVISIONED = "provisioned";
     public static final String PROVISION_FAILED = "provisionFailed";
     public static final String CONFIG_VIEW = "configView";
-    public static final String BOOTSTRAP_STEP = "bootstrapStep";
-    public static final String BOOTSTRAP_OUTCOME = "bootstrapOutcome";
-    public static final String BOOTSTRAPPED = "bootstrapped";
     public static final String GIT_STATUS = "gitStatus";
     public static final String AGENT_ACTIVITY = "agentActivity";
     public static final String WORKSPACE_CHANGED = "workspaceChanged";
-    public static final String EDITOR_STATE = "editorState";
+    public static final String AGENT_BRANCH_PUSHED = "agentBranchPushed";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
     public static final String DESCRIBE = "describe";
     public static final String DESCRIBE_CONFIG = "describeConfig";
-    public static final String RUN_BOOTSTRAP = "runBootstrap";
     public static final String PULL_BRANCH = "pullBranch";
     public static final String OPEN_STREAM = "openStream";
 
@@ -174,10 +164,6 @@ public final class DaemonProtocol {
     public static final String ENV = "env";
     public static final String CONFIG_JSON = "configJson";
     public static final String WARNING = "warning";
-    public static final String NAME = "name";
-    public static final String PHASE = "phase";
-    public static final String OUTCOME = "outcome";
-    public static final String OK = "ok";
     public static final String STATE = "state";
     public static final String COMMAND_ID = "commandId";
     public static final String SESSION_ID = "sessionId";
@@ -196,6 +182,10 @@ public final class DaemonProtocol {
     // verdict, so a frame with none — SessionStart, an unrecognized Notification, a Stop whose
     // arrays are absent or not arrays — is byte-identical to one built before this field existed.
     public static final String AWAITING_INPUT = "awaitingInput";
+    // Optional on AgentActivity (qits-1152, capability 10); required on AgentBranchPushed.
+    public static final String AGENT_ID = "agentId";
+    public static final String REPOSITORY = "repository";
+    public static final String SHA = "sha";
 
     private Field() {}
   }

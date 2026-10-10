@@ -12,17 +12,12 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  *
  * <p>{@link #API} is the default and is <b>not encoded</b> ({@link DaemonCodec}), so an older host
  * that never learned about targets keeps addressing a newer daemon exactly as it did.
+ *
+ * <p>{@code EDITOR} was the second value until capability 10 removed the web editor (qits-1152,
+ * rethought in qits-1150). A host that still names it is refused like any unknown target.
  */
 public enum StreamTarget {
 
   /** {@code WorkspaceApi} on {@code qits.workspace-daemon.api-port} — the original, the default. */
-  API,
-
-  /**
-   * The web editor (openvscode-server) on {@code qits.workspace-daemon.editor-port}, supervised by
-   * the daemon and bound to loopback for the same reason the API is. Only ever listening in an
-   * image that carries the editor <em>and</em> has it enabled; otherwise the daemon refuses the
-   * target rather than dialling a port nothing answers.
-   */
-  EDITOR
+  API
 }

@@ -1,19 +1,17 @@
 package eu.wohlben.qits.workspacedaemon.protocol;
 
 /**
- * qits → {@code workspace-daemon}: an incoming merge/integration advanced this workspace's branch
- * on origin out-of-band (a host-side {@code mergeIntoTarget} into it), so pull it into the
- * container's checkout — {@code git fetch origin <branch>} + {@code git merge --ff-only
- * origin/<branch>}
- * (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md). The
- * host only sends this to the workspace that <em>owns</em> {@code branch}, so it is always the
- * daemon's own checkout branch; the daemon validates it and refuses anything but a fast-forward
- * (never a force), so a working tree that turned dirty in the tiny window since the host's
- * clean-gate is left untouched rather than clobbered — the accepted-risk path, reconciled by the
- * next host git op.
+ * qits → {@code workspace-daemon}: a ref moved on the git host, for example a release merged into
+ * {@code main} or a branch was deleted.
  *
- * <p>Not a request/reply round-trip: the daemon's own {@link GitStatus} watch re-reports the new
- * {@code HEAD} once the fast-forward moves the tree, so {@code correlationId} is carried for
- * symmetry/tracing but no {@link Ack} is expected.
+ * <p>Since capability 10 (qits-1152) this is only a hint. A workspace no longer has one checkout
+ * branch to pull: it keeps a base clone that agents make their worktrees from, and the base clone's
+ * working tree is never moved. So the daemon answers any {@code PullBranch} with a {@code git fetch
+ * --prune} of the base clone and its submodules, ahead of its periodic fetch. {@code branch} is
+ * read for logging only. Before 10 the daemon fetched and fast-forwarded its checkout onto {@code
+ * branch}.
+ *
+ * <p>Not a request/reply round-trip: {@code correlationId} is carried for tracing, and no {@link
+ * Ack} is expected.
  */
 public record PullBranch(String correlationId, String branch) implements DaemonMessage {}

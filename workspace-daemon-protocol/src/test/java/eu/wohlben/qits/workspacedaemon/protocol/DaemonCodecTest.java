@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -152,54 +153,6 @@ class DaemonCodecTest {
   void configViewToleratesNullWarning() {
     ConfigView view = new ConfigView("ws-1", "c1", "{}", null);
     assertEquals(view, roundTrip(view));
-  }
-
-  @Test
-  void bootstrapStepRoundTrips() {
-    BootstrapStep step = new BootstrapStep("ws-1", "install", BootstrapStep.Phase.EXECUTE);
-    assertEquals(step, roundTrip(step));
-    assertEquals(
-        DaemonProtocol.Type.BOOTSTRAP_STEP,
-        DaemonCodec.encode(step).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void bootstrapOutcomeRoundTrips() {
-    BootstrapOutcome ok =
-        new BootstrapOutcome("ws-1", "install", BootstrapOutcome.Result.SUCCEEDED, 0);
-    BootstrapOutcome skipped =
-        new BootstrapOutcome("ws-1", "seed", BootstrapOutcome.Result.SKIPPED, 1);
-    assertEquals(ok, roundTrip(ok));
-    assertEquals(skipped, roundTrip(skipped));
-    assertEquals(
-        DaemonProtocol.Type.BOOTSTRAP_OUTCOME,
-        DaemonCodec.encode(ok).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void bootstrappedRoundTripsBothOutcomes() {
-    Bootstrapped ok = new Bootstrapped("ws-1", true);
-    Bootstrapped failed = new Bootstrapped("ws-1", false);
-    assertEquals(ok, roundTrip(ok));
-    assertEquals(failed, roundTrip(failed));
-    assertEquals(
-        DaemonProtocol.Type.BOOTSTRAPPED, DaemonCodec.encode(ok).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void runBootstrapRoundTrips() {
-    RunBootstrap chain = new RunBootstrap("c1", null);
-    RunBootstrap single = new RunBootstrap("c1", "install");
-    assertEquals(chain, roundTrip(chain));
-    assertEquals(single, roundTrip(single));
-    assertEquals(
-        DaemonProtocol.Type.RUN_BOOTSTRAP,
-        DaemonCodec.encode(chain).get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
-  void bootstrapCorrelationIdIsPrefixed() {
-    assertEquals("bootstrap:install", DaemonProtocol.bootstrapCorrelationId("install"));
   }
 
   @Test
@@ -407,14 +360,6 @@ class DaemonCodecTest {
   }
 
   @Test
-  void openStreamCarriesANonDefaultTarget() {
-    OpenStream editor =
-        new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.EDITOR);
-    assertEquals(editor, roundTrip(editor));
-    assertEquals("EDITOR", DaemonCodec.encode(editor).get(DaemonProtocol.Field.TARGET));
-  }
-
-  @Test
   void openStreamFromAnOlderHostDecodesAnAbsentTargetAsTheApi() {
     // The frame an old qits sends a new daemon: nonce and path, no target key at all.
     Map<String, Object> map =
@@ -428,28 +373,6 @@ class DaemonCodecTest {
     OpenStream decoded = (OpenStream) DaemonCodec.decode(map);
     assertEquals(StreamTarget.API, decoded.target());
     assertEquals("/workspaces/daemon/stream/Zm9vYmFy", decoded.path());
-  }
-
-  @Test
-  void anEditorFrameIsExactlyNoncePathAndTarget() {
-    // The frame a capability-5 host sends for the editor: exactly nonce, path and target, and the
-    // same map decodes to the same message.
-    OpenStream editor =
-        new OpenStream("Zm9vYmFy", "/workspaces/daemon/stream/Zm9vYmFy", StreamTarget.EDITOR);
-    Map<String, Object> wire = DaemonCodec.encode(editor);
-    assertEquals(
-        Map.of(
-            DaemonProtocol.Field.TYPE,
-            DaemonProtocol.Type.OPEN_STREAM,
-            DaemonProtocol.Field.NONCE,
-            "Zm9vYmFy",
-            DaemonProtocol.Field.PATH,
-            "/workspaces/daemon/stream/Zm9vYmFy",
-            DaemonProtocol.Field.TARGET,
-            "EDITOR"),
-        wire);
-    OpenStream decoded = (OpenStream) DaemonCodec.decode(wire);
-    assertEquals(editor, decoded);
   }
 
   @Test
@@ -516,20 +439,6 @@ class DaemonCodecTest {
   }
 
   @Test
-  void editorStateRoundTripsEveryState() {
-    for (String state :
-        List.of(
-            EditorState.State.STARTING, EditorState.State.RUNNING, EditorState.State.ENDED)) {
-      EditorState message = new EditorState(state);
-      assertEquals(message, roundTrip(message));
-    }
-    assertEquals(
-        DaemonProtocol.Type.EDITOR_STATE,
-        DaemonCodec.encode(new EditorState(EditorState.State.RUNNING))
-            .get(DaemonProtocol.Field.TYPE));
-  }
-
-  @Test
   void theTunnelCapabilityIsTheVersionThatIntroducedIt() {
     // The compatibility branch is keyed on this pair agreeing: a daemon at TUNNEL_CAPABILITY_VERSION
     // binds loopback and serves OpenStream, one below binds qits-net and does not. If the current
@@ -553,9 +462,64 @@ class DaemonCodecTest {
 
   @Test
   void workspaceServicesWereRemovedAtCapabilityNine() {
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 9);
+  }
+
+  @Test
+  void agentWorktreesLandedAtCapabilityTen() {
     // A literal: the host records it, and a capability that moved without this line moving is a
     // contract nobody re-read.
-    assertEquals(9, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals(10, DaemonProtocol.CAPABILITY_VERSION);
+  }
+
+  @Test
+  void anAgentBranchPushRoundTripsWithItsFourKeys() {
+    AgentBranchPushed pushed =
+        new AgentBranchPushed("agent-1", "qits-ci-service", "ticket/qits-12-fix", "abc123");
+    assertEquals(pushed, roundTrip(pushed));
+    assertEquals(
+        Map.of(
+            "type", "agentBranchPushed",
+            "agentId", "agent-1",
+            "repository", "qits-ci-service",
+            "branch", "ticket/qits-12-fix",
+            "sha", "abc123"),
+        DaemonCodec.encode(pushed));
+  }
+
+  @Test
+  void anActivityCarriesItsAgentOnlyWhenItHasOne() {
+    AgentActivity plain = new AgentActivity("cmd-1", "s-1", "IDLE", "Stop", null, null, 7L);
+    assertFalse(DaemonCodec.encode(plain).containsKey("agentId"));
+    assertNull(((AgentActivity) roundTrip(plain)).agentId());
+
+    AgentActivity tagged = plain.withAgentId("agent-1");
+    assertEquals("agent-1", DaemonCodec.encode(tagged).get("agentId"));
+    assertEquals(tagged, roundTrip(tagged));
+  }
+
+  @Test
+  void theRemovedEditorTargetIsRefusedLikeAnyUnknownOne() {
+    Map<String, Object> map =
+        Map.of(
+            DaemonProtocol.Field.TYPE,
+            DaemonProtocol.Type.OPEN_STREAM,
+            DaemonProtocol.Field.NONCE,
+            "n",
+            DaemonProtocol.Field.PATH,
+            "/x",
+            DaemonProtocol.Field.TARGET,
+            "EDITOR");
+    assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(map));
+  }
+
+  @Test
+  void theRemovedBootstrapFramesAreUnknownTypes() {
+    for (String type : List.of("runBootstrap", "bootstrapStep", "bootstrapped", "editorState")) {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> DaemonCodec.decode(Map.of(DaemonProtocol.Field.TYPE, type)));
+    }
   }
 
   @Test

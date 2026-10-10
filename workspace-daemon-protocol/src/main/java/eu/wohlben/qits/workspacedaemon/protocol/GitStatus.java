@@ -10,5 +10,9 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  *
  * <p>{@code clean} is {@code true} when {@code git status --porcelain} is empty; {@code head} is
  * the current {@code HEAD} oid (blank on an unborn branch / unreadable tree).
+ *
+ * <p>Not sent since capability 10 (qits-1152): a workspace has no single checkout to watch. Each
+ * agent worktree's state is answered by the daemon's {@code GET agent-worktrees} instead. Kept so
+ * a host can still decode a frame from an older daemon.
  */
 public record GitStatus(String workspaceId, boolean clean, String head) implements DaemonMessage {}

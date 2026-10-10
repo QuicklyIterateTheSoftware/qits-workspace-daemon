@@ -83,32 +83,10 @@ public final class DaemonCodec {
         map.put(Field.CONFIG_JSON, m.configJson());
         map.put(Field.WARNING, m.warning());
       }
-      case BootstrapStep m -> {
-        map.put(Field.TYPE, Type.BOOTSTRAP_STEP);
-        map.put(Field.WORKSPACE_ID, m.workspaceId());
-        map.put(Field.NAME, m.name());
-        map.put(Field.PHASE, m.phase());
-      }
-      case BootstrapOutcome m -> {
-        map.put(Field.TYPE, Type.BOOTSTRAP_OUTCOME);
-        map.put(Field.WORKSPACE_ID, m.workspaceId());
-        map.put(Field.NAME, m.name());
-        map.put(Field.OUTCOME, m.outcome());
-        map.put(Field.EXIT_CODE, m.exitCode());
-      }
-      case Bootstrapped m -> {
-        map.put(Field.TYPE, Type.BOOTSTRAPPED);
-        map.put(Field.WORKSPACE_ID, m.workspaceId());
-        map.put(Field.OK, m.ok());
-      }
       case WorkspaceChanged m -> {
         map.put(Field.TYPE, Type.WORKSPACE_CHANGED);
         map.put(Field.WORKSPACE_ID, m.workspaceId());
         map.put(Field.TOPIC, m.topic());
-      }
-      case EditorState m -> {
-        map.put(Field.TYPE, Type.EDITOR_STATE);
-        map.put(Field.STATE, m.state());
       }
       case GitStatus m -> {
         map.put(Field.TYPE, Type.GIT_STATUS);
@@ -139,6 +117,17 @@ public final class DaemonCodec {
         if (m.awaitingInput() != null) {
           map.put(Field.AWAITING_INPUT, m.awaitingInput());
         }
+        // agentId (qits-1152) too: absent for a command no agent owns.
+        if (m.agentId() != null) {
+          map.put(Field.AGENT_ID, m.agentId());
+        }
+      }
+      case AgentBranchPushed m -> {
+        map.put(Field.TYPE, Type.AGENT_BRANCH_PUSHED);
+        map.put(Field.AGENT_ID, m.agentId());
+        map.put(Field.REPOSITORY, m.repository());
+        map.put(Field.BRANCH, m.branch());
+        map.put(Field.SHA, m.sha());
       }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
@@ -155,11 +144,6 @@ public final class DaemonCodec {
       case DescribeConfig m -> {
         map.put(Field.TYPE, Type.DESCRIBE_CONFIG);
         map.put(Field.CORRELATION_ID, m.correlationId());
-      }
-      case RunBootstrap m -> {
-        map.put(Field.TYPE, Type.RUN_BOOTSTRAP);
-        map.put(Field.CORRELATION_ID, m.correlationId());
-        map.put(Field.NAME, m.name());
       }
       case PullBranch m -> {
         map.put(Field.TYPE, Type.PULL_BRANCH);
@@ -225,17 +209,6 @@ public final class DaemonCodec {
               str(map, Field.CORRELATION_ID),
               str(map, Field.CONFIG_JSON),
               str(map, Field.WARNING));
-      case Type.BOOTSTRAP_STEP ->
-          new BootstrapStep(
-              str(map, Field.WORKSPACE_ID), str(map, Field.NAME), str(map, Field.PHASE));
-      case Type.BOOTSTRAP_OUTCOME ->
-          new BootstrapOutcome(
-              str(map, Field.WORKSPACE_ID),
-              str(map, Field.NAME),
-              str(map, Field.OUTCOME),
-              intVal(map, Field.EXIT_CODE));
-      case Type.BOOTSTRAPPED ->
-          new Bootstrapped(str(map, Field.WORKSPACE_ID), boolVal(map, Field.OK));
       case Type.WORKSPACE_CHANGED ->
           new WorkspaceChanged(str(map, Field.WORKSPACE_ID), str(map, Field.TOPIC));
       case Type.GIT_STATUS ->
@@ -252,7 +225,14 @@ public final class DaemonCodec {
               longVal(map, Field.AT),
               intObj(map, Field.EXIT_CODE),
               str(map, Field.MESSAGE),
-              boolObj(map, Field.AWAITING_INPUT));
+              boolObj(map, Field.AWAITING_INPUT),
+              str(map, Field.AGENT_ID));
+      case Type.AGENT_BRANCH_PUSHED ->
+          new AgentBranchPushed(
+              str(map, Field.AGENT_ID),
+              str(map, Field.REPOSITORY),
+              str(map, Field.BRANCH),
+              str(map, Field.SHA));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -262,11 +242,8 @@ public final class DaemonCodec {
               strMap(map, Field.ENV));
       case Type.DESCRIBE -> new Describe(str(map, Field.CORRELATION_ID));
       case Type.DESCRIBE_CONFIG -> new DescribeConfig(str(map, Field.CORRELATION_ID));
-      case Type.RUN_BOOTSTRAP ->
-          new RunBootstrap(str(map, Field.CORRELATION_ID), str(map, Field.NAME));
       case Type.PULL_BRANCH ->
           new PullBranch(str(map, Field.CORRELATION_ID), str(map, Field.BRANCH));
-      case Type.EDITOR_STATE -> new EditorState(str(map, Field.STATE));
       case Type.OPEN_STREAM ->
           new OpenStream(
               str(map, Field.NONCE), str(map, Field.PATH), streamTarget(map, Field.TARGET));
