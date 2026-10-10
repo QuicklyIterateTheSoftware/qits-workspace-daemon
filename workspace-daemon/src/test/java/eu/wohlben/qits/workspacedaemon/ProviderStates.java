@@ -50,11 +50,11 @@ import java.util.stream.Stream;
  * <p>Every state answers one param, {@code workspaceRowId}: the row id qits-workspaces keys the
  * container on and puts in the path. It is always {@value #WORKSPACE_ROW_ID}.
  *
- * <p><b>A running chat agent is {@code sleep}, not a harness.</b> The harness binary is not in the
- * build image, so a launched agent exits at once and nothing would stand for a turn to reach. The
- * state launches a real {@code CHAT} command that sleeps, with a recorded agent session, and a chat
- * protocol that only counts the turns it is handed — as {@code AgentsApiTest} does. What is under
- * contract is the route and the answer, not the harness.
+ * <p><b>No real harness ever starts.</b> A running chat agent is a real {@code CHAT} command that
+ * sleeps, with a recorded agent session, and a chat protocol that only counts the turns it is
+ * handed — as {@code AgentsApiTest} does. A launch goes through {@link StubHarness}, which swaps
+ * the harness script for a stub. What is under contract is the route and the answer, not the
+ * harness.
  *
  * <p>Close it after each interaction: it terminates what it launched and stops its Vert.x.
  */
@@ -172,7 +172,8 @@ final class ProviderStates implements AutoCloseable {
     commands = new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(store, logs, sessions, claudeMount.toString(), null);
-    AgentCommands agentCommands = new CommandsAgentCommands(commands, registry, store);
+    AgentCommands agentCommands =
+        new StubHarness(new CommandsAgentCommands(commands, registry, store));
     AgentLaunchService launch =
         new AgentLaunchService(
             agentCommands,

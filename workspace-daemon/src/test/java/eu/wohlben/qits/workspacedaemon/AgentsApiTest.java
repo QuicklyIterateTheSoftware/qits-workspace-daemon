@@ -105,7 +105,7 @@ class AgentsApiTest {
   /**
    * The same {@link CommandService} the API is wired with, kept as a field so the turn tests can
    * stand up a <em>real</em> running command for the route to find. They cannot go through {@code
-   * POST /agents}: the harness binary is absent here, so a launched agent exits immediately and
+   * POST /agents}: a launch runs {@link StubHarness}'s stub, which speaks no chat protocol, so
    * there is nothing standing for a turn to reach.
    */
   private CommandService commands;
@@ -190,7 +190,8 @@ class AgentsApiTest {
     AgentTranscriptService transcripts =
         new AgentTranscriptService(store, logs, sessionStore, claudeMount.toString(), null);
     AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
-    AgentCommands agentCommands = new CommandsAgentCommands(commands, registry, store);
+    AgentCommands agentCommands =
+        new StubHarness(new CommandsAgentCommands(commands, registry, store));
     launch =
         new AgentLaunchService(
             agentCommands,
@@ -257,7 +258,7 @@ class AgentsApiTest {
     AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
     AgentLaunchService rewired =
         new AgentLaunchService(
-            new CommandsAgentCommands(commands, registry, store),
+            new StubHarness(new CommandsAgentCommands(commands, registry, store)),
             new eu.wohlben.qits.agents.AgentAuthStatus(processes, claudeMount.toString(), root),
             transcripts,
             tail,
@@ -577,8 +578,8 @@ class AgentsApiTest {
 
     assertEquals(200, answer.status());
     // The same `{command: …}` envelope POST /commands answers with, so one client-side decoder
-    // serves both launch paths. The harness binary is absent in the suite, so the process exits
-    // immediately — what is under test here is the request contract and the response shape.
+    // serves both launch paths. The harness is a stub (StubHarness) — what is under test here is
+    // the request contract and the response shape.
     JsonObject command = answer.body().getJsonObject("command");
     assertEquals("feature-x", command.getString("workspaceId"));
     // The launch mode maps onto the command kind the frontend routes its view on: INTERACTIVE is a
@@ -954,7 +955,7 @@ class AgentsApiTest {
   void aTurnReachesTheRunningChatSession() throws Exception {
     List<String> turns = new CopyOnWriteArrayList<>();
     // `sleep` rather than the harness: what is under test is that the route finds the running chat
-    // and hands the text to the protocol, and the harness binary is not in this image anyway.
+    // and hands the text to the protocol, not the harness.
     Command chat = launchChatThatRecords("chat-1", turns);
 
     Answer answer = post("/agents/turn", new JsonObject().put("text", "keep going"));
