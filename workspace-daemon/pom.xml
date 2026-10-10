@@ -5,7 +5,7 @@
     <parent>
         <groupId>eu.wohlben</groupId>
         <artifactId>qits</artifactId>
-        <version>2026.1010.110036</version>
+        <version>2026.1010.154553</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -94,6 +94,26 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The provider half of the contract: ConsumerPactVerificationTest. Test scope, so its
+                 Kotlin and HTTP client tree never reaches the native image. -->
+            <groupId>au.com.dius.pact.provider</groupId>
+            <artifactId>junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The consumer half: IdpConsumerPactTest, this daemon's call to qits-idp, on the
+                 shared golden-master reader (it brings pact-jvm's consumer DSL with it). -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-pact-consumer</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- qits-idp's recorded answers, pinned in the root pom. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-idp-golden-masters</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

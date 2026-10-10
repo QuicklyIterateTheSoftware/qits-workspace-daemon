@@ -1,0 +1,50 @@
+{
+  "command": {
+    "id": "00000000-0000-4000-8000-000000000100",
+    "repoId": "00000000-0000-4000-8000-000000000003",
+    "workspaceId": "ticket-contract-1",
+    "branch": "ticket/contract-1",
+    "actionName": "Claude Code (repository MCP)",
+    "status": "RUNNING",
+    "interactive": false,
+    "kind": "CHAT",
+    "launchedAt": "2026-01-01T00:00:00Z",
+    "agentSessions": [
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000101",
+        "source": "PINNED",
+        "recordedAt": "2026-01-01T00:00:00Z"
+      }
+    ],
+    "commitHash": "0123456789abcdef0123456789abcdef01234567",
+    "shortCommitHash": "0123456",
+    "agentSurface": "ticket.dispatch",
+    "agentLaunchRecord": {
+      "surface": "ticket.dispatch",
+      "harness": "CLAUDE",
+      "model": "",
+      "effort": "",
+      "permissionMode": "SKIP_PERMISSIONS",
+      "remoteControl": true,
+      "remoteControlName": "qits ticket.dispatch ticket/contract-1",
+      "activityTracking": false,
+      "mcpServers": [
+        {
+          "server": "repository",
+          "readOnly": false
+        },
+        {
+          "server": "observability",
+          "readOnly": false
+        },
+        {
+          "server": "browser",
+          "readOnly": false
+        }
+      ],
+      "externalMcpServers": [],
+      "configured": false,
+      "notes": []
+    }
+  }
+}

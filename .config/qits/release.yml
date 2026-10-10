@@ -10,6 +10,16 @@ artifacts:
   # on the last step that it reached the store.
   - { type: maven, name: "eu.wohlben.qits:qits-workspace-daemon-protocol", path: workspace-daemon-protocol, sbom: workspace-daemon-protocol/target/sbom.json }
 
+# The provider golden masters (ticket qits-1149): the platform packages `golden-masters/` as
+# `eu.wohlben.qits:qits-workspace-daemon-golden-masters` and its npm twin, each published only when
+# its content changed. GoldenMasterRecordingTest keeps the directory current. `pacts:` publishes
+# this daemon's own consumer pact (IdpConsumerPactTest writes pacts/<this>_<provider>.json).
+contracts:
+  application: qits-workspace-daemon
+  golden-masters: { from: golden-masters/, packages: [maven, npm] }
+  pacts:
+    qits-idp-service: { packages: [maven] }
+
 # THREE ARTIFACTS OF THREE DIFFERENT TYPES OUT OF ONE TREE — an image, a daemon jar and a published
 # protocol module. No archetype publishes more than one kind, so both slots are this repository's
 # and the archetype is named for the family only.
