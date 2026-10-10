@@ -9,6 +9,7 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
@@ -49,15 +50,24 @@ import org.jboss.logging.Logger;
  * change to answer this — {@code Notification} maps to {@code WAITING} whether or not it is a
  * permission prompt, and {@code Stop} maps to {@code IDLE} whether or not a background task is
  * still running. The table: a {@code Stop} whose {@code background_tasks} and {@code
- * session_crons} are both present and both JSON arrays is {@code true} unless {@code
- * session_crons} is non-empty or {@code background_tasks} holds anything other than a plain
- * {@code "type": "shell"} object — a long-lived background shell (a dev server, a poller, {@code
- * tail -f}) does not count as in flight, by the owner's decision: it must not keep the agent read
- * as blocked on the user, and a waiting-on-build false block it would otherwise cause is cleared
- * by the task's own completion, which re-invokes the agent anyway. A subagent, a monitor, an
- * unknown or missing type, or a non-object element all still count as in flight and give {@code
- * false}. Either array absent or not a JSON array is {@code null} — an older harness that does
- * not report them, read as "unknown" rather than guessed. A {@code Notification}
+ * session_crons} are both present, both JSON arrays and both empty is {@code true}. One whose
+ * {@code session_crons} is empty and whose {@code background_tasks} holds only plain {@code
+ * "type": "shell"} objects is {@code false} <em>now</em> and {@code true} after a grace period
+ * ({@code qits.workspace-daemon.agent-waiting.background-shell-grace}, 25 minutes by default) in
+ * which no further hook arrives for that command — by the owner's decision. Read as waiting at
+ * once, a {@code Stop} that left a build or a test run going in the background would show the
+ * agent blocked on the user while it is about to be re-invoked by the shell's completion; never
+ * read as waiting, a long-lived shell (a dev server, a poller, {@code tail -f}) would hide a
+ * genuinely idle agent for as long as the shell lives. The grace is the line between the two:
+ * long enough for an ordinary build to finish and wake the agent, short enough that a forgotten
+ * dev server does not mask the wait for good. When it expires, a synthesized copy of the stored
+ * frame goes out with {@code awaitingInput} {@code true} and a fresh {@code at}, and replaces the
+ * stored one so a reconnect replays the verdict; the activity listener is not told again, because
+ * the state did not change. Any hook for the command — or a {@link #killed} frame — cancels the
+ * pending grace before doing its own work. A subagent, a monitor, an unknown or missing type, a
+ * non-object element, or a non-empty {@code session_crons} all count as in flight and give {@code
+ * false} with no grace. Either array absent or not a JSON array is {@code null} — an older
+ * harness that does not report them, read as "unknown" rather than guessed. A {@code Notification}
  * is {@code true} only for a {@code permission_prompt} or {@code elicitation_dialog} {@code
  * notification_type}; any other type is {@code null}, not {@code false} — a notification this
  * daemon does not recognise might still be one the user has to answer. {@code UserPromptSubmit} is
@@ -77,13 +87,24 @@ final class HookWebhook {
 
   static final String PATH = "/hooks/claude-code";
 
+  /** The default for {@code qits.workspace-daemon.agent-waiting.background-shell-grace}. */
+  static final Duration DEFAULT_BACKGROUND_SHELL_GRACE = Duration.ofMinutes(25);
+
   private final Vertx vertx;
   private final int port;
   private final Consumer<DaemonMessage> send;
   private final BiConsumer<String, String> activity;
+  private final Duration backgroundShellGrace;
 
   /** Last activity per qits command id; replayed by {@link #reportCurrent()}, evicted on end. */
   private final Map<String, AgentActivity> lastByCommand = new ConcurrentHashMap<>();
+
+  /**
+   * The pending background-shell grace timer per qits command id. A map rather than a field on the
+   * stored frame because the callback has to prove it is still the <em>current</em> timer for its
+   * command — a newer hook may have cancelled it and armed another between scheduling and firing.
+   */
+  private final Map<String, Long> graceTimers = new ConcurrentHashMap<>();
 
   private volatile HttpServer server;
 
@@ -97,10 +118,25 @@ final class HookWebhook {
    */
   HookWebhook(
       Vertx vertx, int port, Consumer<DaemonMessage> send, BiConsumer<String, String> activity) {
+    this(vertx, port, send, activity, DEFAULT_BACKGROUND_SHELL_GRACE);
+  }
+
+  /**
+   * @param backgroundShellGrace how long a {@code Stop} whose only in-flight work is background
+   *     shells waits, with no further hook for its command, before it reads as awaiting input — a
+   *     seam so a test can wait milliseconds rather than the production default
+   */
+  HookWebhook(
+      Vertx vertx,
+      int port,
+      Consumer<DaemonMessage> send,
+      BiConsumer<String, String> activity,
+      Duration backgroundShellGrace) {
     this.vertx = vertx;
     this.port = port;
     this.send = send;
     this.activity = activity;
+    this.backgroundShellGrace = backgroundShellGrace;
   }
 
   void start() {
@@ -135,13 +171,15 @@ final class HookWebhook {
    * drive the event→state mapping, the Notification override, and the reconnect replay without a
    * real HTTP fork (mirrors {@link GitStatusMonitor}'s {@code settle} seam). Uninteresting events
    * ({@code SubagentStop}, {@code PreToolUse}, …) and payloads with no command correlation are
-   * dropped.
+   * dropped. Every event that is not dropped first cancels the command's pending background-shell
+   * grace: it is newer news than the {@code Stop} that armed it.
    */
   void handle(String hookEvent, JsonObject body, String commandId) {
     String state = mapState(hookEvent);
     if (state == null || commandId == null || commandId.isBlank()) {
       return;
     }
+    cancelGrace(commandId);
     // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins). No
     // frame goes out on this path — see the class javadoc's "hold path" paragraph — so
     // awaitingInput is never computed for it; the Notification frame already sent carried true.
@@ -150,6 +188,7 @@ final class HookWebhook {
       forward(commandId, current.state());
       return;
     }
+    boolean onlyBackgroundShells = "Stop".equals(hookEvent) && onlyBackgroundShells(body);
     AgentActivity activity =
         new AgentActivity(
             commandId,
@@ -159,7 +198,7 @@ final class HookWebhook {
             body.getString("source"),
             body.getString("transcript_path"),
             System.currentTimeMillis(),
-            awaitingInput(hookEvent, body));
+            onlyBackgroundShells ? Boolean.FALSE : awaitingInput(hookEvent, body));
     if (AgentState.ENDED.equals(state)) {
       lastByCommand.remove(commandId);
     } else {
@@ -167,6 +206,61 @@ final class HookWebhook {
     }
     send.accept(activity);
     forward(commandId, state);
+    if (onlyBackgroundShells) {
+      armGrace(commandId);
+    }
+  }
+
+  /**
+   * Schedules the background-shell grace for {@code commandId}. The callback re-checks that its
+   * timer is still the command's current one ({@code remove(key, value)} is the atomic form of that
+   * check), so a timer a newer hook cancelled too late to stop it firing sends nothing. The id is
+   * recorded after {@code setTimer} returns, which is safe because hooks arrive on the event loop
+   * the timer fires on, so the callback cannot run in between.
+   */
+  private void armGrace(String commandId) {
+    long timer =
+        vertx.setTimer(
+            Math.max(1, backgroundShellGrace.toMillis()),
+            id -> {
+              if (graceTimers.remove(commandId, id)) {
+                graceExpired(commandId);
+              }
+            });
+    graceTimers.put(commandId, timer);
+  }
+
+  /**
+   * Relays the stored frame again with {@code awaitingInput} {@code true} and a fresh {@code at},
+   * and stores the copy so {@link #reportCurrent()} replays the verdict. The activity listener is
+   * deliberately not told: the state is the stored {@code IDLE} it already heard, and a second
+   * {@code IDLE} would re-trigger whatever it does on one.
+   */
+  private void graceExpired(String commandId) {
+    AgentActivity last = lastByCommand.get(commandId);
+    if (last == null) {
+      return; // evicted since the Stop — nothing left to call waiting
+    }
+    AgentActivity waiting =
+        new AgentActivity(
+            last.commandId(),
+            last.sessionId(),
+            last.state(),
+            "Stop",
+            last.source(),
+            last.transcriptPath(),
+            System.currentTimeMillis(),
+            Boolean.TRUE);
+    lastByCommand.put(commandId, waiting);
+    send.accept(waiting);
+  }
+
+  /** Cancels {@code commandId}'s pending background-shell grace, if it has one. */
+  private void cancelGrace(String commandId) {
+    Long timer = graceTimers.remove(commandId);
+    if (timer != null) {
+      vertx.cancelTimer(timer);
+    }
   }
 
   /**
@@ -176,11 +270,14 @@ final class HookWebhook {
    * this class owns the per-command replay: the killed command's last state is evicted exactly as a
    * {@code SessionEnd} evicts it, so a reconnect cannot replay a dead agent's {@code BUSY} or {@code
    * IDLE} over the truth. The session identity is carried from the last frame, when there was one.
+   * A pending background-shell grace is cancelled first, as any hook cancels it: a dead agent is
+   * not one to call waiting twenty-five minutes later.
    */
   void killed(String commandId, String hookEvent, int exitCode, String message) {
     if (commandId == null || commandId.isBlank()) {
       return;
     }
+    cancelGrace(commandId);
     AgentActivity last = lastByCommand.remove(commandId);
     AgentActivity activity =
         new AgentActivity(
@@ -218,7 +315,11 @@ final class HookWebhook {
     }
   }
 
+  /** Stops the listener and cancels every pending background-shell grace. */
   void close() {
+    for (String commandId : graceTimers.keySet()) {
+      cancelGrace(commandId);
+    }
     HttpServer s = server;
     if (s != null) {
       s.close();
@@ -260,14 +361,14 @@ final class HookWebhook {
   /**
    * {@code true} when a {@code Stop}'s {@code background_tasks} and {@code session_crons} are
    * both present and both JSON arrays, {@code session_crons} is empty, and every {@code
-   * background_tasks} element is a JSON object with {@code "type": "shell"} — a long-lived
-   * background shell (a dev server, a poller, {@code tail -f}) must not keep the agent from being
-   * read as waiting, because the shell's own completion re-invokes the agent, which clears a
-   * waiting-on-build false block anyway. {@code false} when {@code session_crons} holds anything,
-   * or when any {@code background_tasks} element is not such a shell object — a subagent, a
-   * monitor, an unknown or missing type, or a non-object element all still mean more output is
-   * coming on its own, unprompted. {@code null} when either key is absent or is not a JSON array
-   * — an older harness that does not report them — read as "unknown" rather than guessed.
+   * background_tasks} element is a JSON object with {@code "type": "shell"}. That includes the
+   * only-shells case, which {@link #handle} overrides to {@code false} and arms the grace for —
+   * see {@link #onlyBackgroundShells} — so this stays the verdict the payload alone supports, and
+   * the timing lives in one place. {@code false} when {@code session_crons} holds anything, or
+   * when any {@code background_tasks} element is not such a shell object — a subagent, a monitor,
+   * an unknown or missing type, or a non-object element all still mean more output is coming on
+   * its own, unprompted. {@code null} when either key is absent or is not a JSON array — an older
+   * harness that does not report them — read as "unknown" rather than guessed.
    */
   private static Boolean awaitingInputForStop(JsonObject body) {
     Object backgroundTasks = body.getValue("background_tasks");
@@ -286,6 +387,17 @@ final class HookWebhook {
       }
     }
     return Boolean.TRUE;
+  }
+
+  /**
+   * Whether a {@code Stop}'s only in-flight work is background shells: the payload alone says
+   * waiting, but a shell left running is as likely a build about to wake the agent as a dev server
+   * that never will, so the verdict waits out the grace (see the class javadoc). Empty {@code
+   * background_tasks} is not this case — nothing is running, so the agent is waiting at once.
+   */
+  private static boolean onlyBackgroundShells(JsonObject body) {
+    return Boolean.TRUE.equals(awaitingInputForStop(body))
+        && !body.getJsonArray("background_tasks").isEmpty();
   }
 
   /**

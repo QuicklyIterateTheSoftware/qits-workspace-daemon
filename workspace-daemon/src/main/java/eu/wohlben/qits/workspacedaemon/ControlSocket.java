@@ -266,6 +266,15 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.hooks-port", defaultValue = "13337")
   int hooksPort;
 
+  // How long a Stop whose only in-flight work is background shells waits, with no further hook for
+  // its command, before HookWebhook reports it as awaiting input (qits-895). Long enough for a
+  // build left running to finish and wake the agent; short enough that a forgotten dev server does
+  // not hide a genuinely idle agent for good. Read here because HookWebhook cannot read config.
+  @ConfigProperty(
+      name = "qits.workspace-daemon.agent-waiting.background-shell-grace",
+      defaultValue = "25m")
+  Duration backgroundShellGrace;
+
   // The web editor (openvscode-server), off unless the image carries one AND the host says so.
   // Injected as QITS_WORKSPACE_DAEMON_EDITOR_ENABLED / _PORT like every other daemon knob, and
   // read here because EditorSupervisor — framework-free, like every capability class — cannot read
@@ -592,7 +601,9 @@ public class ControlSocket {
     // reconnect-adopted (already-provisioned) container, and SessionStart drives session-lineage
     // which must be captured regardless. Its frames buffer in pendingOutbound until the socket is
     // up.
-    hooks = new HookWebhook(vertx, hooksPort, this::send, this::forwardActivity);
+    hooks =
+        new HookWebhook(
+            vertx, hooksPort, this::send, this::forwardActivity, backgroundShellGrace);
     hooks.start();
     // The web editor, on the same footing: independent of provisioning (it is a process, not a view
     // of the checkout) and silent when there is nothing to supervise. start() answering false is
