@@ -262,11 +262,11 @@ public class WorkspaceApi {
   static final String AGENTS_BLOCKED_PATH = "/agents/blocked";
 
   /**
-   * Tells this container what its entity is now — title, status, blocked — and renames every live
-   * session that can be renamed to the name those render ({@code [❗]<status square> <id> <title>}):
-   * the daemon-side twin of {@code AgentLaunchService.setEntity}. The successor of {@link
-   * #AGENTS_BLOCKED_PATH}, which carried the blocked flag alone and is still served for a host that
-   * predates this; reached by the same two hosts, the same way.
+   * Tells this container what its entity is now — title, status, blocked and why — and renames
+   * every live session that can be renamed to the name those render ({@code [❗|⁉️]<status square>
+   * <id> <title>}): the daemon-side twin of {@code AgentLaunchService.setEntity}. The successor of
+   * {@link #AGENTS_BLOCKED_PATH}, which carried the blocked flag alone and is still served for a
+   * host that predates this; reached by the same two hosts, the same way.
    */
   static final String AGENTS_ENTITY_PATH = "/agents/entity";
 
@@ -884,13 +884,19 @@ public class WorkspaceApi {
    * {@code text}. {@link AgentLaunchService#setBlocked} does the work and answers how many sessions
    * it renamed; that count is echoed back so the caller can tell a rename from a no-op without a
    * second round trip.
+   *
+   * <p>{@code blockSource} is optional, as on {@link #setEntity}.
    */
   private Reply setBlocked(String body) {
     JsonObject json = jsonBody(body);
     if (!(json.getValue("blocked") instanceof Boolean blocked)) {
       return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
     }
-    int renamed = agentLaunch.setBlocked(blocked);
+    Object blockSource = json.getValue("blockSource");
+    if (blockSource != null && !(blockSource instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("blockSource must be a string or null"));
+    }
+    int renamed = agentLaunch.setBlocked(blocked, (String) blockSource);
     return new Reply(200, AgentJson.blocked(blocked, renamed));
   }
 
@@ -905,6 +911,11 @@ public class WorkspaceApi {
    * status word is passed through untouched; the library decides which square it draws, and an
    * unknown word simply draws none. {@link AgentLaunchService#setEntity} answers how many sessions
    * will carry the new name, echoed back with the facts it stored.
+   *
+   * <p>{@code blockSource} — why the entity is blocked: {@code EXPLICIT}, {@code AGENT_WAITING} or
+   * {@code BOTH} — is a string, or null or absent for explicit, and is passed through untouched
+   * like the status word: the library alone decides that {@code AGENT_WAITING} names the session with
+   * {@code ⁉️} rather than {@code ❗}, and reads any other word as explicit.
    */
   private Reply setEntity(String body) {
     JsonObject json = jsonBody(body);
@@ -919,7 +930,12 @@ public class WorkspaceApi {
     if (status != null && !(status instanceof String)) {
       return new Reply(400, WorkspaceJson.error("status must be a string or null"));
     }
-    EntityFacts facts = new EntityFacts((String) title, (String) status, blocked);
+    Object blockSource = json.getValue("blockSource");
+    if (blockSource != null && !(blockSource instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("blockSource must be a string or null"));
+    }
+    EntityFacts facts =
+        new EntityFacts((String) title, (String) status, blocked, (String) blockSource);
     int renamed = agentLaunch.setEntity(facts);
     return new Reply(200, AgentJson.entity(facts, renamed));
   }

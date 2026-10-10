@@ -1109,6 +1109,78 @@ class AgentsApiTest {
   }
 
   @Test
+  void theEntityRoutePassesTheBlockSourceThroughAndAbsentIsExplicit() throws Exception {
+    Answer waiting =
+        post(
+            "/agents/entity",
+            new JsonObject()
+                .put("title", "A title")
+                .put("status", "IMPLEMENTING")
+                .put("blocked", true)
+                .put("blockSource", "AGENT_WAITING"));
+
+    assertEquals(200, waiting.status());
+    assertEquals("AGENT_WAITING", waiting.body().getString("blockSource"));
+    assertEquals(
+        new EntityFacts("A title", "IMPLEMENTING", true, "AGENT_WAITING"), launch.entity());
+    assertTrue(launch.entity().waitingOnAPerson());
+
+    Answer both =
+        post(
+            "/agents/entity",
+            new JsonObject()
+                .put("title", "A title")
+                .put("blocked", true)
+                .put("blockSource", "BOTH"));
+    assertEquals(200, both.status());
+    assertEquals(new EntityFacts("A title", null, true, "BOTH"), launch.entity());
+
+    Answer absent =
+        post("/agents/entity", new JsonObject().put("title", "A title").put("blocked", true));
+    assertEquals(200, absent.status());
+    assertTrue(absent.body().containsKey("blockSource"), "named, as null, like title and status");
+    assertNull(absent.body().getString("blockSource"));
+    assertEquals(new EntityFacts("A title", null, true, null), launch.entity());
+  }
+
+  @Test
+  void aNonStringBlockSourceIsAFourHundredAndMovesNothing() throws Exception {
+    post("/agents/entity", new JsonObject().put("title", "kept").put("blocked", false));
+
+    assertEquals(
+        400,
+        post("/agents/entity", new JsonObject().put("blocked", true).put("blockSource", 1))
+            .status());
+    assertEquals(
+        400,
+        post("/agents/blocked", new JsonObject().put("blocked", true).put("blockSource", true))
+            .status());
+
+    assertEquals(new EntityFacts("kept", null, false), launch.entity());
+  }
+
+  @Test
+  void theOlderBlockedRouteCarriesTheBlockSourceToo() throws Exception {
+    post(
+        "/agents/entity",
+        new JsonObject().put("title", "A title").put("status", "REFINED").put("blocked", false));
+
+    assertEquals(
+        200,
+        post(
+                "/agents/blocked",
+                new JsonObject().put("blocked", true).put("blockSource", "AGENT_WAITING"))
+            .status());
+    assertEquals(new EntityFacts("A title", "REFINED", true, "AGENT_WAITING"), launch.entity());
+
+    assertEquals(200, post("/agents/blocked", new JsonObject().put("blocked", true)).status());
+    assertEquals(
+        new EntityFacts("A title", "REFINED", true, null),
+        launch.entity(),
+        "absent is explicit, and replaces a derived source");
+  }
+
+  @Test
   void theEntityRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
     assertEquals(405, get("/agents/entity").status());
   }
