@@ -203,7 +203,7 @@ public final class Provisioner {
    * qits-artifacts, which stopped serving git at the byte-plane split. A guess at a host that
    * cannot answer buys nothing over saying the configuration is missing, and it costs the operator
    * a connection error pointing at the wrong service. An address with no derivable form fails
-   * loudly — the same rule {@code qits.actions-mcp.url} already follows.
+   * loudly.
    */
   static String gitBase(Env env, Consumer<DaemonMessage> emit) {
     String configured = env.gitBaseUrl();

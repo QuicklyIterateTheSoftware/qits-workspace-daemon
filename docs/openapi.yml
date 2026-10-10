@@ -1245,7 +1245,7 @@ components:
             properties:
               server:
                 type: string
-                description: "`repository`, `observability` or `actions`."
+                description: "`qits`, the central platform MCP server."
               readOnly:
                 type: boolean
                 description: Whether the url carried the `agentReadOnly=true` fence.

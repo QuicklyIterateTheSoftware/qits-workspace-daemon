@@ -100,13 +100,9 @@ public class ControlSocket {
   /**
    * Full dial-home URL the factory injected, e.g. {@code ws://qits:8080/workspaces/daemon/<id>}.
    *
-   * <p><b>This is the only address the container is handed, and it is one service's.</b> It reaches
-   * qits-workspaces' control socket. The daemon also needs a git host (qits-artifacts) and two MCP
-   * servers (qits-projects, qits-observability) — four hosts on {@code qits-net}. Everything below
-   * that names one of those is here because deriving it from this url would only be right if a
-   * single authority routed every segment, and whether the daemon is handed the gateway is not
-   * settled (migration-path-conventions.md §4 item 9). See {@link Provisioner} and {@link
-   * DaemonMcpEndpoints} for what each one falls back to when unset, and how loudly.
+   * <p>It reaches qits-workspaces' control socket and nothing else. The git host and the {@code qits}
+   * MCP server are other services, so they have their own keys and are never derived from it. See
+   * {@link Provisioner}.
    */
   @ConfigProperty(name = "qits.workspace-daemon.url")
   Optional<String> url;
@@ -274,30 +270,9 @@ public class ControlSocket {
   Optional<String> workspaceImageVersion;
 
   /**
-   * Explicit MCP base URLs, one per named server. Two jobs now: pointing an agent at a different
-   * qits instance (the original), and naming the server's host when it is not the control socket's
-   * — {@code repository} is qits-projects, {@code observability} is qits-observability.
-   *
-   * <p>{@code actions} has no derivable form at all: no service in the split serves it (the tools
-   * are still monolith-only, migration-plan.md §9 item 6), so an ACTIONS-scope launch fails with
-   * that message unless this key names one.
-   */
-  @ConfigProperty(name = "qits.actions-mcp.url")
-  Optional<String> actionsMcpUrl;
-
-  @ConfigProperty(name = "qits.repository-mcp.url")
-  Optional<String> repositoryMcpUrl;
-
-  @ConfigProperty(name = "qits.observability-mcp.url")
-  Optional<String> observabilityMcpUrl;
-
-  /**
-   * The central platform-access MCP server's base url (qits-630) — a wholly separate service from
-   * qits-workspaces, so unlike {@code repository}/{@code observability} there is no derivable
-   * fallback. Optional like {@code qits.actions-mcp.url}, but unlike it this server is attached by
-   * default on every surface the agent configuration document carries, so an unset value must not
-   * refuse every launch — see {@code DaemonMcpEndpoints.platformUrl()} and {@code
-   * WorkspaceMcpServers}.
+   * The url of the central platform-access {@code qits} MCP server (qits-630), the one platform
+   * server an agent gets. A separate service, so nothing derives it; unset means no server is
+   * attached. See {@link WorkspaceMcpServers}.
    */
   @ConfigProperty(name = "qits.platform-mcp.url")
   Optional<String> platformMcpUrl;
@@ -448,7 +423,8 @@ public class ControlSocket {
             .map(
                 path -> {
                   LOG.infof("Agent configuration document materialized at %s", path);
-                  return AgentSurfaceConfigurations.readFrom(path);
+                  return AgentConfigurationFile.withoutRetiredServers(
+                      AgentSurfaceConfigurations.readFrom(path));
                 })
             .orElseGet(
                 () -> {
@@ -665,16 +641,12 @@ public class ControlSocket {
    *
    * <p>Each agent gets its own {@link AgentLaunchService}, built by the factory below: its own
    * entity facts (so its own session name), its own checkout context (its wrapper branch and HEAD)
-   * and its own commands seam (its directory and credential). The transcript services, the auth
-   * probe and the MCP mapping are shared.
+   * and its own commands seam (its directory and credential). The transcript services and the auth
+   * probe are shared.
    *
    * <p>{@link #hooksPort} is the one to watch. {@link HookWebhook} binds it and {@link
    * AgentLaunchService} renders it into every hook {@code curl}; if those two ever read it separately
    * and disagree, launches still succeed and simply never report session lineage or activity.
-   *
-   * <p>A daemon with no {@code qits.workspace-daemon.url} cannot derive the MCP endpoints an agent
-   * would be launched with — but it also never connected, so it is not serving this API either. The
-   * agent surface is simply left unwired and answers 503.
    */
   private void wireAgents(
       AgentWorktrees worktrees,
@@ -684,20 +656,6 @@ public class ControlSocket {
       CommandRegistry commandRegistry,
       DaemonWorkspaceContext context) {
     DaemonAgentDefaults defaults = defaultsFor(null, null, null);
-    DaemonMcpEndpoints endpoints;
-    try {
-      endpoints =
-          new DaemonMcpEndpoints(
-              url.orElse(null),
-              projectId,
-              actionsMcpUrl,
-              repositoryMcpUrl,
-              observabilityMcpUrl,
-              platformMcpUrl);
-    } catch (IllegalStateException e) {
-      LOG.warnf("Coding agents stay unwired: %s", e.getMessage());
-      return;
-    }
     ProcessRunner processes = new LocalProcessExecutor();
     AgentTranscriptService transcripts =
         new AgentTranscriptService(
@@ -712,14 +670,12 @@ public class ControlSocket {
     this.transcriptTail = tail;
     AgentAuthStatus authStatus =
         new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
-    // The scope→server mapping is this daemon's, not the library's: the projects daemon attaches
-    // one server and this one attaches three, with different narrowing and different pre-approval.
+    // One platform server, qits, plus the image's browser. See WorkspaceMcpServers.
     // Only the sign-in terminal's service carries no token at all: it attaches no MCP server.
     // Every agent's carries the agent's own token (below), never the workspace's, so a harness
     // never holds the workspace credential.
     WorkspaceMcpServers mcpServers =
-        new WorkspaceMcpServers(
-            endpoints, repositoryId, workspaceId, endpoints.platformUrl(), Optional.empty());
+        new WorkspaceMcpServers(platformMcpUrl, Optional.empty());
     CommandsAgentCommands shared = new CommandsAgentCommands(commandService, commandRegistry, store);
     AgentRuntime runtime =
         new AgentRuntime(
@@ -734,8 +690,7 @@ public class ControlSocket {
                     transcripts,
                     tail,
                     defaultsFor(seat.wrapperBranch(), seat.entityId(), seat.entity()),
-                    WorkspaceMcpServers.forAgent(
-                        endpoints, repositoryId, workspaceId, endpoints.platformUrl(), seat),
+                    WorkspaceMcpServers.forAgent(platformMcpUrl, seat),
                     new DaemonWorkspaceContext(
                         repositoryId,
                         workspaceId,

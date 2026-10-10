@@ -20,7 +20,6 @@ import eu.wohlben.qits.agents.AgentTranscriptTailService;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.CommandsAgentCommands;
 import eu.wohlben.qits.agents.EntityFacts;
-import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.AgentSessionRef;
@@ -78,7 +77,6 @@ class AgentsApiTest {
 
   private static final String TOKEN = "s3cret-workspace-token";
   private static final String REPO = "11111111-1111-1111-1111-111111111111";
-  private static final String PROJECT = "22222222-2222-2222-2222-222222222222";
   private static final int HOOKS_PORT = 13337;
   private static final String IMAGE_VERSION = "2026.909.111643";
   private static final String BRANCH = "ticket/qits-1";
@@ -144,23 +142,7 @@ class AgentsApiTest {
         }
       };
 
-  private static final McpEndpoints ENDPOINTS =
-      new McpEndpoints() {
-        @Override
-        public String mcpUrl(String server) {
-          return switch (server) {
-            case "repository" -> "http://qits:8080/projects/mcp";
-            case "observability" -> "http://qits:8080/observability/mcp";
-            case "actions" -> "http://qits:8080/actions/mcp";
-            default -> throw new IllegalArgumentException("Unknown MCP server: " + server);
-          };
-        }
-
-        @Override
-        public String projectId() {
-          return PROJECT;
-        }
-      };
+  private static final String PLATFORM_MCP_URL = "http://dev-qits-platform-access-mcp-service:8080/mcp";
 
   private static final AgentDefaults DEFAULTS =
       new AgentDefaults() {
@@ -264,7 +246,7 @@ class AgentsApiTest {
     eu.wohlben.qits.agents.AgentAuthStatus auth =
         new eu.wohlben.qits.agents.AgentAuthStatus(processes, claudeMount.toString(), root);
     WorkspaceMcpServers mcp =
-        new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x", Optional.empty(), Optional.empty());
+        new WorkspaceMcpServers(Optional.of(PLATFORM_MCP_URL), Optional.empty());
     CommandsAgentCommands shared = new CommandsAgentCommands(commands, registry, store);
     launch =
         new AgentLaunchService(
@@ -283,8 +265,7 @@ class AgentsApiTest {
                     transcripts,
                     tail,
                     defaults,
-                    WorkspaceMcpServers.forAgent(
-                        ENDPOINTS, REPO, "feature-x", Optional.empty(), seat),
+                    WorkspaceMcpServers.forAgent(Optional.of(PLATFORM_MCP_URL), seat),
                     WORKSPACE,
                     claudeMount.toString(),
                     HOOKS_PORT),
@@ -356,10 +337,10 @@ class AgentsApiTest {
                         new JsonArray()
                             .add(
                                 new JsonObject()
-                                    .put("server", "repository")
+                                    .put("server", "qits")
                                     .put("narrowProject", false)
-                                    .put("narrowRepository", true)
-                                    .put("narrowWorkspace", true)
+                                    .put("narrowRepository", false)
+                                    .put("narrowWorkspace", false)
                                     .put("readOnly", false)
                                     .put("allowedTools", new JsonArray()))))
             .put("externalMcpServers", attached);

@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.agents.AgentMcpAttachment;
 import eu.wohlben.qits.agents.AgentSurface;
+import eu.wohlben.qits.agents.AgentSurfaceConfiguration;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.InvalidAgentConfigurationException;
@@ -99,6 +101,37 @@ class AgentConfigurationFileTest {
     assertEquals(
         AgentType.CLAUDE,
         configurations.resolve(AgentSurface.WORKSPACE_AGENT, AgentType.CLAUDE, true).harness());
+  }
+
+  @Test
+  void aRetiredMcpServerIsDroppedAndTheRestKept() {
+    // qits-1174: stored surfaces still attach the retired servers, and the pinned library would
+    // refuse every such launch. qits stays.
+    String document =
+        """
+        {"version":2,"generatedAt":"2026-09-09T10:00:00Z","surfaces":[
+          {"configuration":{
+             "surface":"epic.chat","harness":"KIMI","model":"","effort":"",
+             "remoteControl":true,"permissionMode":"SKIP_PERMISSIONS","activityTracking":true,
+             "systemPrompt":"","initialPrompt":"","mcpServers":[
+               {"server":"repository","readOnly":true},{"server":"observability"},
+               {"server":"actions"},{"server":"qits"}]},
+           "externalMcpServers":[]}]}""";
+    String path =
+        AgentConfigurationFile.materialize(
+                Optional.of(document), Optional.of(dir.resolve("c.json").toString()))
+            .orElseThrow();
+
+    AgentSurfaceConfigurations configurations =
+        AgentConfigurationFile.withoutRetiredServers(AgentSurfaceConfigurations.readFrom(path));
+
+    AgentSurfaceConfiguration chat =
+        configurations.resolve(AgentSurface.EPIC_CHAT, AgentType.CLAUDE, true);
+    assertEquals(
+        java.util.List.of("qits"),
+        chat.mcpServers().stream().map(AgentMcpAttachment::server).toList());
+    assertEquals(AgentType.KIMI, chat.harness(), "everything else is kept as it was");
+    assertTrue(configurations.documentPresent());
   }
 
   @Test

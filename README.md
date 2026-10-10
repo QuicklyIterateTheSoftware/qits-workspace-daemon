@@ -43,7 +43,7 @@ here would have preserved exactly the split that let them diverge. What stayed i
 | Here | Why |
 |---|---|
 | `WorkspaceContext` | The repository and workspace ids a workspace has beyond a branch and a commit. The library asks only for `CheckoutContext`; a daemon's own identity is its own business. |
-| `WorkspaceMcpServers` | Which MCP servers a scope attaches, narrowed, with their pre-approval lists. This daemon attaches three across three services; qits-projects-daemon attaches one. Neither is a default the other could fall back on. |
+| `WorkspaceMcpServers` | The MCP servers a launch attaches: the central `qits` server and the image's browser (qits-1174). |
 | `DaemonAgentDefaults` | The default harness, activity tracking and refinement model — plus the mounted configuration document and this container's ambient facts. |
 | `AgentConfigurationFile` | Writing the injected document to disk at boot, before anything starts. |
 | The route table | `WorkspaceApi`'s agent surface, `AgentJson`, and the hook webhook. |
@@ -243,7 +243,7 @@ top-level `comment`.
 
 ## What the daemon dials out to
 
-Four different services, on four hosts on `qits-net`. Every address follows
+Three different services, on three hosts on `qits-net`. Every address follows
 `/<segment>/(api|mcp|git|daemon)/…`, served by the owning service verbatim — through the gateway
 *and* when a container is dialled directly, so the prefix is never something to strip on the inside.
 
@@ -251,18 +251,12 @@ Four different services, on four hosts on `qits-net`. Every address follows
 |---|---|---|---|
 | the control socket | `/workspaces/daemon/{workspaceId}` | qits-workspaces | `qits.workspace-daemon.url`, injected — the whole url, dialled verbatim |
 | the self-clone origin | `/git/{projectId}/{repoName}` (or `/git/{repoId}` with the scope absent) | qits-githost | `qits.workspace-daemon.git-base-url`, injected — **no fallback** |
-| MCP `repository` | `/projects/mcp` | qits-projects | `qits.repository-mcp.url` if set, else **derived** |
-| MCP `observability` | `/observability/mcp` | qits-observability | `qits.observability-mcp.url` if set, else **derived** |
-| MCP `actions` | — | nobody | `qits.actions-mcp.url` only; unset ⇒ an ACTIONS launch fails saying so |
-| MCP `qits` | `/mcp` | qits-platform-access-mcp-service | `qits.platform-mcp.url` only; unset ⇒ `WorkspaceMcpServers` omits it rather than failing the launch (qits-630) |
+| MCP `qits` | `/mcp` | qits-platform-access-mcp-service | `qits.platform-mcp.url` only; unset ⇒ `WorkspaceMcpServers` omits it rather than failing the launch (qits-630). The only platform MCP server since qits-1174. |
 | MCP `browser` | stdio, in the container | the image's `qits-browser-mcp` (Playwright MCP on the base's Chromium) | always attached to Claude launches, every tool pre-approved; Kimi takes none (its ACP session carries url servers only) |
 
-**"Derived" means the authority of the control-socket url, and that is an assumption.** It is only
-right where one authority routes every segment — i.e. where the daemon was handed the gateway. So
-each derivation announces itself as a `WARN` at agent-wiring time. Nothing here silently invents a
-host and then fails as a 404 nobody sees.
+Nothing here derives a host from the control-socket url any more.
 
-**The git base is no longer among them.** It used to derive `<control-socket authority>/artifacts/git`
+**The git base was the last derivation.** It used to derive `<control-socket authority>/artifacts/git`
 with a `WARN`. That named a pre-split host which serves no git at all, so the derivation could only
 turn a missing setting into a connection error against the wrong service. Unset now fails the
 provision with a `DaemonLog` `WARN` naming the key.

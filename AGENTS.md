@@ -51,13 +51,14 @@ What stays here is what is genuinely this daemon's, and each of them is a seam t
 
 - `WorkspaceContext extends CheckoutContext` — the repository and workspace ids. The library asks
   only for a branch and a commit.
-- `WorkspaceMcpServers implements AgentMcpServers` — the scope→server mapping, the narrowing, and
-  the pre-approval lists. `serverFor(key, scope, narrowing)` is implemented rather than left on the
-  library's default, so `honoursNarrowing()` is true and a launch does not have to record that its
-  addressing was a guess. Refuse a narrowing you cannot satisfy; never drop it.
+- `WorkspaceMcpServers implements AgentMcpServers` — the MCP servers a launch attaches: the central
+  `qits` server (`QITS_PLATFORM_MCP_URL`, never derived) and the image's browser (qits-1174).
 - `DaemonAgentDefaults implements AgentDefaults` — the default harness, activity tracking, the
   refinement model, the mounted configuration document, and this container's ambient facts.
-- `AgentConfigurationFile` — writing the injected document to disk at boot.
+- `AgentConfigurationFile` — writing the injected document to disk at boot, and dropping
+  attachments of the retired `repository`, `observability` and `actions` servers that stored
+  surfaces still carry: the pinned library would refuse those launches. Remove that once the pinned
+  library is the qits-1174 release, which skips them itself.
 
 ## Module conventions
 
@@ -174,14 +175,9 @@ The rule when you add or move an address here:
 
 **Never derive one service's address from another service's.** Two classes used to: `httpBaseOf`
 took the control-socket url apart and appended `/mcp/<server>`, and `gitBase` did the same for
-`/git`. That was right in the monolith, where one process served everything. It is wrong now — MCP is
-qits-projects and qits-observability, git is qits-artifacts, the control socket is qits-workspaces —
-and it was wrong *before* the paths changed. The paths only made it visible.
-
-The MCP derivation survives as a **fallback**, because the container is still handed exactly one
-address and nobody has decided whether that address is the gateway. What is left open is a *topology*
-question — which host each segment belongs to — and inventing an answer here would be guessing. The
-git one is gone outright: see the list below.
+`/git`. That was right in the monolith, where one process served everything. It is wrong now, and
+both derivations are gone: the per-service MCP servers are retired (qits-1174) and the one MCP
+server left, `qits`, is configured outright; the git one is described below.
 
 The websocket half of it is **closed**, and this file used to say otherwise: there is no
 `SameOriginUpgradeCheck` in the Quarkus the gateway builds against and there never was. The shipped
@@ -193,84 +189,22 @@ that fails through the gateway, it is not an origin check.
 
 What is not allowed is deriving an address **silently**:
 
-- an explicit key exists for every derived address — `qits.repository-mcp.url`,
-  `qits.observability-mcp.url` — and wins outright when set;
-- taking the fallback says so, at the point it is taken: a logged `WARN` from `DaemonMcpEndpoints`;
 - an address with no derivable form at all **fails loudly** rather than being made up.
-  `qits.actions-mcp.url` is that case: no service in the split serves the `actions` MCP server
-  (`migration-plan.md` §9 item 6), so an ACTIONS-scope launch fails with that sentence instead of
-  handing the agent a URL that 404s. **`qits.workspace-daemon.git-base-url` joined it**: its
-  fallback derived `<control-socket authority>/artifacts/git`, a host that stopped serving git at
-  the byte-plane split, so the guess bought nothing over naming the missing key. Unset ⇒
-  `Provisioner` emits its `DaemonLog` `WARN` and reports `ProvisionFailed`.
+  **`qits.workspace-daemon.git-base-url`** is that case: its fallback derived
+  `<control-socket authority>/artifacts/git`, a host that stopped serving git at the byte-plane
+  split, so the guess bought nothing over naming the missing key. Unset ⇒ `Provisioner` emits its
+  `DaemonLog` `WARN` and reports `ProvisionFailed`.
 
 That last point is the shape of the whole rule. A wrong address here fails as a connection error or
 a 404, and a 404 from an MCP server surfaces to the user as *a tool that isn't there* — the launch
 looks like it worked. Failing loudly at the boundary is the only place it is legible.
 
-**The open question, stated so it is not lost:** none of the three non-control-socket hosts is
-injected today. qits-workspaces' `WorkspaceContainerFactory` sets fifteen `QITS_WORKSPACE_DAEMON_*`
-vars and none of them names qits-artifacts, qits-projects or qits-observability. So in a
-host-created container all three fall back to the control socket's authority, and the daemon is
-running on the assumption that one authority routes every segment. That is either correct (the url
-points at the gateway) or it is a bug the WARNs will name. **Whoever settles the gateway question
-settles this**: either the host injects the three keys, or it injects a gateway url and the
-derivations become sound. Do not quietly pick one by adding a default.
+**The MCP server names are a cross-repo contract.** The one platform server is `qits`, served by
+qits-platform-access-mcp-service; its tools are pre-approved as `mcp__qits__*` by the library. If you
+touch `WorkspaceMcpServers`, change the library's `WorkspaceHostMcpServers` fixture with it.
 
-**The MCP server names are a cross-repo contract.** `repository` is qits-projects; `observability`
-is qits-observability, renamed from `repository` for the reason that both services declaring that
-name meant this daemon could only ever address one of them. The telemetry allowlist entries moved
-with it (`mcp__observability__telemetry*`); under the old names they allowlisted tools no reachable
-server declared. If you touch `WorkspaceMcpServers`, the tool-name prefix and the server key have to
-move together — and so does the library's `WorkspaceHostMcpServers` fixture.
-
-**The pre-approval lists are reads, with three written-down exceptions.** `READ_ONLY_*` means what it
-says: a mutating tool is left out so Claude still prompts. Three named buckets break that, all
-concatenated onto `READ_ONLY_REPOSITORY_TOOLS` wherever the `repository` server is wired, and each
-one's javadoc carries its own reasoning — which is why they are three buckets and not one list:
-
-- `TICKET_THREAD_TOOLS` (`add_ticket_comment`, `update_ticket_comment`, `add_comment`,
-  `update_comment`) — commenting is additive and a comment stays editable, so the worst case is a
-  wrongly-worded note.
-- `TICKET_RESOLUTION_TOOLS` (`transition_ticket`) — added 2026-09-08 for one caller. qits-projects'
-  "Assign agent" tells the dispatched agent to resolve the ticket once its changes are released, and
-  on the kimi path an unlisted tool does not exist, so without this the instruction is a dead letter
-  rather than a prompt. It is acceptable because resolving is reversible through the same tool and
-  because the dispatch is a person pressing a button on a specific ticket.
-- `TASK_IMPLEMENTATION_TOOLS` (`mark_task_implemented`, `mark_task_implementing`,
-  `transition_task`) — the first two added 2026-09-08 for one caller too. qits-projects' "Start
-  implementation" stands a workspace on `epic/<slug>` and tells the dispatched agent to mark each
-  task implemented as the work lands. It is acceptable because it records a fact about work the
-  agent itself just did, because qits-projects only accepts it while the owning epic is in
-  IMPLEMENTATION, and because it moves a feature's or a task's *own status* rather than an epic's
-  plan or scope — the scope is frozen by then and this tool cannot touch it. It is an interim:
-  qits-projects means to derive the markers from merges, and this bucket goes when they arrive.
-  `mark_task_implementing` sits beside it, accepted while the owning epic is REFINED or
-  IMPLEMENTING and moving a REFINED epic to IMPLEMENTING, for the same reason: the start-of-work
-  half of the same marker. `transition_task` joined them once a feature or a task got a status of
-  its own on the same lifecycle as an epic or a ticket: it is `transition_ticket`'s counterpart for
-  that status, letting an agent move one task — to VERIFIED, say — without moving its epic or its
-  siblings, and it is refused the same way while the owning epic is REPORTED.
-
-The reads for that dispatch — `list_epics`, `get_epic` — are just reads and sit in
-`READ_ONLY_REPOSITORY_TOOLS` beside `list_tickets`/`get_ticket`. All of it lives in
-`WorkspaceMcpServers` now; the lists travelled with the mapping because they are policy about what
-*this* product's agents may do without asking, not a property of the harness.
-
-What stays out is the filing half — `create_ticket`, `update_ticket` — and the plan-changing half —
-`propose_epic`, `update_epic`, the feature and task edits. The projects-daemon front desk and the
-refinement surface are where those live. Keep any further exception in its own named bucket for the
-same reason: one smuggled into a `READ_ONLY_` list is one nobody has to read.
-
-No bucket is the fence that matters. An autonomous run marks its MCP urls `agentReadOnly=true`
-and qits-projects' `ReadOnlyRepositoryToolFilter` hides the ticket writes and
-`mark_task_implemented`/`mark_task_implementing`/`transition_task` behind it; nothing here can buy
-past that, so widening a bucket only ever widens chat and interactive launches.
-
-The asymmetry that makes these lists worth care: for Claude every launch is `--skipPermissions` and
-no `--allowedTools` is ever emitted, so the lists are a *latent* pre-approval story. For the kimi ACP
-path they are the hard `enabledTools` set — a tool not listed does not exist for that session.
-Dropping an entry costs Claude nothing and costs kimi the tool.
+The fence is the library's: an autonomous run, or a surface marked `readOnly`, marks the `qits` url
+`agentReadOnly=true`, and the central server then lists and runs only commands marked as reads.
 
 ## The agent configuration a container is born with
 

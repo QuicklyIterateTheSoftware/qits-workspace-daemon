@@ -13,7 +13,6 @@ import eu.wohlben.qits.agents.AgentTranscriptTailService;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.CommandsAgentCommands;
 import eu.wohlben.qits.agents.HarnessCapabilities;
-import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.ActionResolver;
@@ -113,23 +112,6 @@ final class ProviderStates implements AutoCloseable {
         }
       };
 
-  private static final McpEndpoints ENDPOINTS =
-      new McpEndpoints() {
-        @Override
-        public String mcpUrl(String server) {
-          return switch (server) {
-            case "repository" -> "http://qits:8080/projects/mcp";
-            case "observability" -> "http://qits:8080/observability/mcp";
-            default -> throw new IllegalArgumentException("Unknown MCP server: " + server);
-          };
-        }
-
-        @Override
-        public String projectId() {
-          return PROJECT_ID;
-        }
-      };
-
   private static final AgentDefaults DEFAULTS =
       new AgentDefaults() {
         @Override
@@ -195,8 +177,7 @@ final class ProviderStates implements AutoCloseable {
             transcripts,
             tail,
             DEFAULTS,
-            new WorkspaceMcpServers(
-                ENDPOINTS, REPOSITORY_ID, WORKSPACE_ID, Optional.empty(), Optional.empty()),
+            new WorkspaceMcpServers(Optional.empty(), Optional.empty()),
             WORKSPACE,
             claudeMount.toString(),
             HOOKS_PORT);
@@ -213,8 +194,7 @@ final class ProviderStates implements AutoCloseable {
                     transcripts,
                     tail,
                     DEFAULTS,
-                    WorkspaceMcpServers.forAgent(
-                        ENDPOINTS, REPOSITORY_ID, WORKSPACE_ID, Optional.empty(), seat),
+                    WorkspaceMcpServers.forAgent(Optional.empty(), seat),
                     WORKSPACE,
                     claudeMount.toString(),
                     HOOKS_PORT),

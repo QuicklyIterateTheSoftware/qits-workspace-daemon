@@ -12,11 +12,11 @@ import eu.wohlben.qits.commands.CheckoutContext;
  * answered four about a project (project id, wrapper repository, branch, commit). Only two of the
  * eight were the same question, and only those two were ever read by the shared code — a command
  * records the branch and commit it ran at. The other two were read here, by this module's own
- * response bodies and its own MCP narrowing.
+ * response bodies.
  *
  * <p>So the split is exactly that: {@link CheckoutContext} keeps what the library asks, and the two
- * ids a workspace has beyond it stay here, where the only readers are {@link CommandJson}, {@link
- * AgentJson} and {@link WorkspaceMcpServers}. That is what lets the library stop being able to tell
+ * ids a workspace has beyond it stay here, where the only readers are {@link CommandJson} and {@link
+ * AgentJson}. That is what lets the library stop being able to tell
  * a workspace container from a project one, which is the point of unifying it.
  *
  * <p>On the host every launch carried {@code repoId} and {@code workspaceId} as arguments and then
