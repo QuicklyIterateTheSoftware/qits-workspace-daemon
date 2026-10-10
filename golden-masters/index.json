@@ -1,0 +1,133 @@
+{
+  "formatVersion": 1,
+  "provider": "qits-workspace-daemon",
+  "states": [
+    {
+      "name": "a workspace daemon with a chat agent running",
+      "slug": "a-workspace-daemon-with-a-chat-agent-running",
+      "params": {
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "deliverAgentTurn",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agents/turn",
+          "body": {
+            "text": "Carry on."
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-chat-agent-running/deliverAgentTurn.json",
+          "frozen": {
+            "ids": [
+              "$.commandId"
+            ],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listCommands",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/commands",
+          "query": {
+            "status": "RUNNING"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-chat-agent-running/listCommands.json",
+          "frozen": {
+            "ids": [
+              "$.entries[*].command.id",
+              "$.entries[*].command.repoId",
+              "$.entries[*].command.agentSessions[*].sessionId"
+            ],
+            "instants": [
+              "$.entries[*].command.launchedAt",
+              "$.entries[*].command.agentSessions[*].recordedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "setAgentBlocked",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agents/blocked",
+          "body": {
+            "blocked": true
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-chat-agent-running/setAgentBlocked.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "setAgentEntity",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agents/entity",
+          "body": {
+            "title": "Fix the login",
+            "status": "IMPLEMENTING",
+            "blocked": false
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-chat-agent-running/setAgentEntity.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with no agent running",
+      "slug": "a-workspace-daemon-with-no-agent-running",
+      "params": {
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "launchAgent",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agents",
+          "body": {
+            "scope": "REPOSITORY",
+            "surface": "ticket.dispatch",
+            "mode": "CHAT",
+            "initialContext": "Work the ticket.",
+            "deliverTaskPrompt": false
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-no-agent-running/launchAgent.json",
+          "frozen": {
+            "ids": [
+              "$.command.id",
+              "$.command.repoId",
+              "$.command.agentSessions[*].sessionId"
+            ],
+            "instants": [
+              "$.command.launchedAt",
+              "$.command.agentSessions[*].recordedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    }
+  ]
+}
