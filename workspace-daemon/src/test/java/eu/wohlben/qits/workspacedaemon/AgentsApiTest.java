@@ -238,6 +238,8 @@ class AgentsApiTest {
         printf '%s\\n' "$*" >> "$QITS_FAKE_LOG.args"
         pwd >> "$QITS_FAKE_LOG.cwd"
         printf '%s\\n' "$QITS_TOKEN" >> "$QITS_FAKE_LOG.token"
+        printf 'api=%s secret=%s\\n' "${QITS_WORKSPACE_DAEMON_API_TOKEN-unset}" \\
+          "${QITS_COMMISSIONED_CLIENT_SECRET-unset}" >> "$QITS_FAKE_LOG.secrets"
         exec cat >> "$QITS_FAKE_LOG.stdin"
         """);
     Files.setPosixFilePermissions(claude, PosixFilePermissions.fromString("rwxr-xr-x"));
@@ -279,7 +281,8 @@ class AgentsApiTest {
                     transcripts,
                     tail,
                     defaults,
-                    mcp,
+                    WorkspaceMcpServers.forAgent(
+                        ENDPOINTS, REPO, "feature-x", Optional.empty(), seat),
                     WORKSPACE,
                     claudeMount.toString(),
                     HOOKS_PORT),
@@ -1174,6 +1177,62 @@ class AgentsApiTest {
     assertEquals("s-switched", list().getJsonObject(0).getString("sessionId"));
     AgentActivity foreign = new AgentActivity("not-an-agent", null, "IDLE", "Stop", null, null, 1L);
     assertNull(((AgentActivity) runtime.tag(foreign)).agentId(), "the sign-in terminal, say");
+  }
+
+  // --- the security pass ------------------------------------------------------------------------
+
+  @Test
+  @Timeout(60)
+  void theHarnessHoldsNoSecretOfTheWorkspaceAndItsMcpCarriesTheAgentsToken() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    // Blanked, not merely absent here: the commands layer can only lay values over the daemon's
+    // environment, so the daemon's API token and commissioned client become empty strings.
+    awaitContains(fakeLog.resolveSibling("harness.secrets"), "api= secret=");
+    awaitContains(fakeLog.resolveSibling("harness.args"), "Bearer agent-token");
+  }
+
+  @Test
+  void aSymbolicLinkPlantedAsAgentJsonIsReplacedNeverWrittenThrough() throws Exception {
+    Path outside = estateDir.resolve("outside.txt");
+    Files.writeString(outside, "untouched\n");
+    worktrees.ensure("agent-1", BRANCH);
+    Path metadata = worktrees.agentDir("agent-1").resolve(AgentRuntime.METADATA_FILE);
+    Files.createSymbolicLink(metadata, outside);
+
+    post("/agent-worktrees", start("agent-1"));
+
+    assertEquals("untouched\n", Files.readString(outside));
+    assertFalse(Files.isSymbolicLink(metadata));
+    assertFalse(Files.readString(metadata).contains("agent-token"));
+  }
+
+  @Test
+  void aSessionIdThatIsNotAPlainNameIsRefused() throws Exception {
+    assertEquals(
+        400, post("/agent-worktrees", start("agent-1").put("sessionId", "../../x")).status());
+    assertFalse(worktrees.exists("agent-1"));
+  }
+
+  @Test
+  void anAgentWhoseWorktreeWasSwappedForALinkServesNoFilesAndCannotBeRemoved() throws Exception {
+    post("/agent-worktrees", start("agent-2").put("wrapperBranch", "ticket/qits-2"));
+    worktrees.ensure("agent-1", BRANCH);
+    AgentWorktrees.deleteTree(agentDir("agent-1"));
+    Files.createSymbolicLink(agentDir("agent-1"), agentDir("agent-2"));
+
+    assertEquals(404, get("/agent-worktrees/agent-1/files/content?path=README.md").status());
+    assertEquals(404, get("/agent-worktrees/agent-1/cleanup-check").status());
+    assertEquals(404, delete("/agent-worktrees/agent-1?force=true").status());
+    assertTrue(worktrees.exists("agent-2"), "agent 2 is left as it was");
+  }
+
+  @Test
+  void anAgentIdThatIsNotAPlainNameReachesNoRoute() throws Exception {
+    for (String id : new String[] {"..", "%2e%2e", "..%2Fx", "-rf"}) {
+      assertEquals(404, get("/agent-worktrees/" + id + "/cleanup-check").status(), id);
+      assertEquals(404, delete("/agent-worktrees/" + id).status(), id);
+    }
   }
 
   // --- helpers ----------------------------------------------------------------------------------

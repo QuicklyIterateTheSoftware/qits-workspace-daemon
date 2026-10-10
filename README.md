@@ -105,7 +105,17 @@ starts its harness there unless it runs — resuming the session id it is handed
 files are still on the harness volume. Its `env` (the agent's credential) reaches the harness
 process and the agent's pushes, and is never written to disk. `DELETE` refuses while work would be
 lost (uncommitted, or commits no remote branch has) and answers the cleanup check; `force=true`
-removes anyway. Removed with the single checkout (qits-1152): the checkout-wide file routes, parent
+removes anyway.
+
+**Which credential each process carries.** No git process the daemon starts inherits a secret of
+the workspace (its token, commissioned client, API token, agent configuration), and every one runs
+with hooks and fsmonitor off, because agents share the OS user and the repositories' config. A
+fetch carries the workspace's git credential; a push of an agent's branch carries that agent's
+`QITS_TOKEN` and nothing else, and only from the worktree the daemon made for that agent. Neither
+runs in a repository whose own config carries a key the daemon never writes (`credential.*`,
+`url.*`, `http.*`, a changed `remote.origin.url`, …; see `GitConfigGuard`). A harness gets the
+workspace's secrets blanked and its own `env` laid over them; its MCP headers carry its own token.
+Removed with the single checkout (qits-1152): the checkout-wide file routes, parent
 integration, `POST /agents` and the per-workspace turn/entity/blocked routes, declared actions
 (`POST /commands`, `/commands/actions`) and the bootstrap chain.
 

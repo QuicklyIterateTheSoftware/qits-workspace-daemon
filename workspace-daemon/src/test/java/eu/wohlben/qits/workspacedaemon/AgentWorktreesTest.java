@@ -214,4 +214,65 @@ class AgentWorktreesTest {
     assertTrue(worktrees.exists("agent-2"), "another agent is left alone");
     assertEquals(List.of("agent-2"), worktrees.agentIds());
   }
+
+  // --- path confinement (security pass) ----------------------------------------------------------
+
+  @Test
+  void anAgentDirectoryThatIsASymbolicLinkIsNoAgentAndIsNeverMadeInto() throws Exception {
+    Path elsewhere = Files.createDirectories(tmp.resolve("elsewhere"));
+    Files.createDirectories(estate.agents());
+    Files.createSymbolicLink(estate.agents().resolve("agent-9"), elsewhere);
+
+    assertFalse(worktrees.exists("agent-9"));
+    assertEquals(
+        409,
+        assertThrows(
+                AgentWorktrees.AgentWorktreeException.class,
+                () -> worktrees.ensure("agent-9", BRANCH))
+            .status());
+    assertEquals(0, Files.list(elsewhere).count(), "nothing was written through the link");
+  }
+
+  @Test
+  void aWrapperWorktreeSwappedForALinkToAnotherAgentIsNotThatAgentsAnyMore() throws Exception {
+    Path other = worktrees.ensure("agent-2", "ticket/qits-2");
+    Path dir = worktrees.ensure("agent-1", BRANCH);
+    AgentWorktrees.deleteTree(dir);
+    Files.createSymbolicLink(dir, other);
+
+    assertFalse(worktrees.exists("agent-1"));
+    assertTrue(worktrees.exists("agent-2"));
+  }
+
+  @Test
+  void removingFollowsNoSymbolicLinkOutOfTheAgentsDirectory() throws Exception {
+    Path outside = Files.createDirectories(tmp.resolve("outside"));
+    Files.writeString(outside.resolve("keep.txt"), "keep\n");
+    Path dir = worktrees.ensure("agent-1", BRANCH);
+    Files.createSymbolicLink(dir.resolve("escape"), outside);
+    Files.createSymbolicLink(worktrees.agentDir("agent-1").resolve("escape"), outside);
+
+    worktrees.remove("agent-1");
+
+    assertTrue(Files.exists(outside.resolve("keep.txt")));
+    assertFalse(Files.exists(worktrees.agentDir("agent-1")));
+  }
+
+  @Test
+  void aSubmodulePathThatCouldLeaveTheWorktreeIsRefused() {
+    assertTrue(AgentWorktrees.confined("libs/child"));
+    assertFalse(AgentWorktrees.confined("../escape"));
+    assertFalse(AgentWorktrees.confined("libs/../../escape"));
+    assertFalse(AgentWorktrees.confined("/abs"));
+    assertFalse(AgentWorktrees.confined("-c"));
+    assertFalse(AgentWorktrees.confined("a//b"));
+  }
+
+  @Test
+  void anAgentIdIsADirectoryNameAndNothingMore() {
+    assertTrue(AgentWorktrees.validAgentId("3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
+    for (String bad : new String[] {"..", ".", "../x", "a/b", "-rf", "", "a\\b", "x\n"}) {
+      assertFalse(AgentWorktrees.validAgentId(bad), bad);
+    }
+  }
 }

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -48,8 +49,12 @@ final class AgentWorktrees {
    */
   private static final Pattern AGENT_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
 
-  /** One repository of the base clone: the wrapper ({@code path} empty) or a submodule. */
-  record Repo(String path, String name, String defaultBranch) {
+  /**
+   * One repository of the base clone: the wrapper ({@code path} empty) or a submodule. {@code
+   * originUrl} is the origin the daemon set, read before any agent existed; {@link GitConfigGuard}
+   * refuses to talk to the git host once it has changed.
+   */
+  record Repo(String path, String name, String defaultBranch, String originUrl) {
     boolean wrapper() {
       return path.isEmpty();
     }
@@ -122,7 +127,31 @@ final class AgentWorktrees {
 
   /** Whether the agent's wrapper worktree exists. */
   boolean exists(String agentId) {
-    return validAgentId(agentId) && Files.exists(wrapperDir(agentId).resolve(".git"));
+    return validAgentId(agentId)
+        && contained(agentId)
+        && Files.exists(wrapperDir(agentId).resolve(".git"), LinkOption.NOFOLLOW_LINKS);
+  }
+
+  /**
+   * Whether the agent's directory and wrapper worktree are where they should be: real directories,
+   * not symbolic links, under the agents root. Agents share the OS user and could replace either
+   * with a link to somewhere else; every route that reads or removes an agent's files asks this.
+   */
+  boolean contained(String agentId) {
+    Path agentDir = agentDir(agentId);
+    Path wrapper = wrapperDir(agentId);
+    if (Files.isSymbolicLink(agentDir) || Files.isSymbolicLink(wrapper)) {
+      return false;
+    }
+    if (!Files.isDirectory(wrapper, LinkOption.NOFOLLOW_LINKS)) {
+      return false;
+    }
+    try {
+      Path root = agentsRoot.toRealPath();
+      return wrapper.toRealPath().equals(root.resolve(agentId).resolve(wrapperName));
+    } catch (IOException e) {
+      return false;
+    }
   }
 
   /** The agents that have a directory under the agents root, whatever this process remembers. */
@@ -162,7 +191,7 @@ final class AgentWorktrees {
 
   private List<Repo> readRepositories() {
     List<Repo> out = new ArrayList<>();
-    out.add(new Repo("", wrapperName, defaultBranch(base)));
+    out.add(new Repo("", wrapperName, defaultBranch(base), originUrl(base)));
     GitExec.Out status = GitExec.git(base, "submodule", "status", "--recursive");
     List<String> paths = new ArrayList<>();
     for (String raw : status.stdout().split("\n")) {
@@ -171,7 +200,7 @@ final class AgentWorktrees {
         continue;
       }
       String[] parts = raw.substring(1).strip().split(" ");
-      if (parts.length >= 2 && !parts[1].isBlank()) {
+      if (parts.length >= 2 && confined(parts[1])) {
         paths.add(parts[1]);
       }
     }
@@ -180,11 +209,36 @@ final class AgentWorktrees {
             .thenComparing(Comparator.naturalOrder()));
     for (String path : paths) {
       Path dir = base.resolve(path);
-      GitExec.Out url = GitExec.git(dir, "remote", "get-url", "origin");
-      String name = url.ok() ? Provisioner.basename(url.line()) : path;
-      out.add(new Repo(path, name, defaultBranch(dir)));
+      String url = originUrl(dir);
+      String name = url == null ? path : Provisioner.basename(url);
+      out.add(new Repo(path, name, defaultBranch(dir), url));
     }
     return List.copyOf(out);
+  }
+
+  /**
+   * The configured origin, as written — not {@code remote get-url}, which applies {@code insteadOf}
+   * rewrites a planted config could add.
+   */
+  private static String originUrl(Path repository) {
+    GitExec.Out url = GitExec.git(repository, "config", "--get", "remote.origin.url");
+    return url.ok() && !url.line().isEmpty() ? url.line() : null;
+  }
+
+  /**
+   * Whether a submodule path stays inside the worktree it is resolved against: relative, no {@code
+   * ..} segment. It comes from the wrapper's {@code .gitmodules}.
+   */
+  static boolean confined(String path) {
+    if (path == null || path.isBlank() || path.startsWith("/") || path.startsWith("-")) {
+      return false;
+    }
+    for (String segment : path.split("/")) {
+      if (segment.isEmpty() || segment.equals("..") || segment.equals(".")) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** {@code origin/HEAD}'s branch, else {@code main}. */
@@ -228,11 +282,15 @@ final class AgentWorktrees {
           "wrapperBranch must not be the default branch '" + wrapper.defaultBranch() + "'");
     }
     try {
+      Files.createDirectories(agentsRoot);
+      if (Files.isSymbolicLink(dir.getParent()) || Files.isSymbolicLink(dir)) {
+        throw new AgentWorktreeException(409, "the agent's directory is a symbolic link");
+      }
       Files.createDirectories(dir.getParent());
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
-    if (!Files.exists(dir.resolve(".git"))) {
+    if (!Files.exists(dir.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
       addWrapper(dir, wrapperBranch, wrapper);
     }
     for (Repo repo : repos.subList(1, repos.size())) {
@@ -244,13 +302,20 @@ final class AgentWorktrees {
   private void addWrapper(Path dir, String wrapperBranch, Repo wrapper) {
     GitExec.git(base, "worktree", "prune");
     // Best effort: the periodic fetch may not have seen a branch pushed a moment ago. Absent on the
-    // remote is the ordinary case and fails this quietly.
-    GitExec.git(
-        base,
-        "fetch",
-        "--quiet",
-        "origin",
-        "+refs/heads/" + wrapperBranch + ":refs/remotes/origin/" + wrapperBranch);
+    // remote is the ordinary case and fails this quietly. The workspace's own credential, and only
+    // from a config nobody tampered with.
+    List<String> tampered = GitConfigGuard.violations(base, wrapper.originUrl());
+    if (tampered.isEmpty()) {
+      GitExec.network(
+          base,
+          GitExec.workspaceCredential(),
+          "fetch",
+          "--quiet",
+          "origin",
+          "+refs/heads/" + wrapperBranch + ":refs/remotes/origin/" + wrapperBranch);
+    } else {
+      LOG.warnf("Not fetching %s: the base clone's config carries %s", wrapperBranch, tampered);
+    }
     GitExec.Out added;
     if (hasRef(base, "refs/heads/" + wrapperBranch)) {
       added = GitExec.git(base, "worktree", "add", dir.toString(), wrapperBranch);

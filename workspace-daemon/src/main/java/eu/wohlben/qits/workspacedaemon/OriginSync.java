@@ -61,6 +61,12 @@ final class OriginSync {
     FATAL
   }
 
+  /**
+   * The one name an agent's credential is read from in its start's {@code env}: the agent's own
+   * token. Nothing else from that map reaches a git process of the daemon's.
+   */
+  static final String AGENT_CREDENTIAL = "QITS_TOKEN";
+
   /** One worktree of a repository, as {@code git worktree list --porcelain} reports it. */
   record Worktree(Path path, String head, String branch) {}
 
@@ -189,8 +195,18 @@ final class OriginSync {
   int fetchAll() {
     int failures = 0;
     for (AgentWorktrees.Repo repo : worktrees.repositories()) {
+      Path dir = worktrees.dirOf(repo);
+      List<String> tampered = GitConfigGuard.violations(dir, repo.originUrl());
+      if (!tampered.isEmpty()) {
+        failures++;
+        warnOnce(
+            "fetch:" + repo.path(),
+            "Not fetching " + where(repo) + ": its config carries " + tampered);
+        continue;
+      }
       GitExec.Out fetched =
-          GitExec.git(worktrees.dirOf(repo), "fetch", "--prune", "--quiet", "origin");
+          GitExec.network(
+              dir, GitExec.workspaceCredential(), "fetch", "--prune", "--quiet", "origin");
       if (!fetched.ok()) {
         failures++;
         LOG.debugf(
@@ -222,6 +238,14 @@ final class OriginSync {
           continue;
         }
         String agentId = agentsRoot.relativize(path).getName(0).toString();
+        // Only the worktree the daemon made for this agent counts. Agents share the OS user, so one
+        // could add a worktree of its own under another agent's directory; its branch must never be
+        // pushed with that other agent's credential.
+        if (!AgentWorktrees.validAgentId(agentId)
+            || !worktrees.contained(agentId)
+            || !path.equals(expectedWorktree(agentId, repo))) {
+          continue;
+        }
         AgentBranchPushed done = pushIfNew(repository, repo, agentId, worktree);
         if (done != null) {
           pushed.add(done);
@@ -245,15 +269,23 @@ final class OriginSync {
       handled.put(key, worktree.head());
       return null;
     }
-    Optional<Map<String, String>> env = agentEnvironment.apply(agentId);
-    if (env.isEmpty()) {
-      // Not handled: the branch is pushed once the host starts the agent again.
+    String token =
+        agentEnvironment.apply(agentId).map(env -> env.get(AGENT_CREDENTIAL)).orElse(null);
+    if (token == null || token.isBlank()) {
+      // Not handled: the branch is pushed once the host starts the agent again with its credential.
+      // Never with the workspace's, and never with another agent's.
       LOG.debugf(
-          "not pushing %s for agent %s: its credential is not known yet",
-          worktree.branch(), agentId);
+          "not pushing %s for agent %s: its credential is not known", worktree.branch(), agentId);
       return null;
     }
-    PushOutcome outcome = push(repository, env.get(), worktree.branch());
+    List<String> tampered = GitConfigGuard.violations(repository, repo.originUrl());
+    if (!tampered.isEmpty()) {
+      warnOnce(
+          "push:" + repo.path(),
+          "Not pushing in " + where(repo) + ": its config carries " + tampered);
+      return null;
+    }
+    PushOutcome outcome = push(repository, Map.of(AGENT_CREDENTIAL, token), worktree.branch());
     if (outcome != PushOutcome.RETRY_LATER) {
       handled.put(key, worktree.head());
     }
@@ -263,11 +295,11 @@ final class OriginSync {
   }
 
   /** Push one branch with retry. Package-private so a test can drive the classification. */
-  PushOutcome push(Path repository, Map<String, String> env, String branch) {
+  PushOutcome push(Path repository, Map<String, String> credential, String branch) {
     long backoff = backoffInitialMs;
     String refspec = "refs/heads/" + branch + ":refs/heads/" + branch;
     for (int attempt = 1; attempt <= maxAttempts && !closed; attempt++) {
-      GitExec.Out result = GitExec.git(repository, env, "push", "origin", refspec);
+      GitExec.Out result = GitExec.network(repository, credential, "push", "origin", refspec);
       if (result.ok()) {
         return PushOutcome.PUSHED;
       }
@@ -349,6 +381,24 @@ final class OriginSync {
       Thread.currentThread().interrupt();
     }
   }
+
+  private Path expectedWorktree(String agentId, AgentWorktrees.Repo repo) {
+    Path wrapper = worktrees.wrapperDir(agentId).toAbsolutePath().normalize();
+    return repo.wrapper() ? wrapper : wrapper.resolve(repo.path()).normalize();
+  }
+
+  private static String where(AgentWorktrees.Repo repo) {
+    return repo.path().isEmpty() ? "the wrapper" : repo.path();
+  }
+
+  /** Warn once per subject, so a tampered repository does not flood the log every cycle. */
+  private void warnOnce(String subject, String message) {
+    if (warned.add(subject)) {
+      LOG.warn(message);
+    }
+  }
+
+  private final java.util.Set<String> warned = ConcurrentHashMap.newKeySet();
 
   void close() {
     closed = true;

@@ -709,10 +709,12 @@ public class ControlSocket {
         new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
     // The scope→server mapping is this daemon's, not the library's: the projects daemon attaches
     // one server and this one attaches three, with different narrowing and different pre-approval.
-    // The MCP header is the workspace's own token, as before: Kimi writes its MCP config to a
-    // temporary file, and the agent credential must never reach disk (D18).
+    // Only the sign-in terminal's service carries no token at all: it attaches no MCP server.
+    // Every agent's carries the agent's own token (below), never the workspace's, so a harness
+    // never holds the workspace credential.
     WorkspaceMcpServers mcpServers =
-        new WorkspaceMcpServers(endpoints, repositoryId, workspaceId, endpoints.platformUrl(), token);
+        new WorkspaceMcpServers(
+            endpoints, repositoryId, workspaceId, endpoints.platformUrl(), Optional.empty());
     CommandsAgentCommands shared = new CommandsAgentCommands(commandService, commandRegistry, store);
     AgentRuntime runtime =
         new AgentRuntime(
@@ -727,7 +729,8 @@ public class ControlSocket {
                     transcripts,
                     tail,
                     defaultsFor(seat.wrapperBranch(), seat.entityId(), seat.entity()),
-                    mcpServers,
+                    WorkspaceMcpServers.forAgent(
+                        endpoints, repositoryId, workspaceId, endpoints.platformUrl(), seat),
                     new DaemonWorkspaceContext(
                         repositoryId,
                         workspaceId,

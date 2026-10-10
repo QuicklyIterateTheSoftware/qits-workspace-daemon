@@ -259,6 +259,21 @@ final class WorkspaceMcpServers implements AgentMcpServers {
     this.platformHeaders = headersFor(token);
   }
 
+  /**
+   * The servers one agent's harness is wired with: the platform headers carry the agent's own token
+   * ({@link AgentRuntime.Seat#credential()}), never the workspace's, so a harness never holds the
+   * workspace credential (qits-1152). No token, no header.
+   */
+  static WorkspaceMcpServers forAgent(
+      McpEndpoints endpoints,
+      String repoId,
+      String workspaceId,
+      Optional<String> platformMcpUrl,
+      AgentRuntime.Seat seat) {
+    return new WorkspaceMcpServers(
+        endpoints, repoId, workspaceId, platformMcpUrl, seat.credential());
+  }
+
   private static Map<String, String> headersFor(Optional<String> token) {
     return token == null
         ? Map.of()

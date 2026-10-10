@@ -183,4 +183,95 @@ class OriginSyncTest {
     assertEquals(baseHead, line(baseChild, "rev-parse", "HEAD"), "the base clone never moves");
     assertEquals(released, line(child, "rev-parse", "origin/main"), "and agents see it at once");
   }
+
+  // --- credential separation (security pass) ---------------------------------------------------
+
+  private Path committedOnBranch() throws Exception {
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "work");
+    return child;
+  }
+
+  @Test
+  void anAgentWhoseEnvHoldsNoTokenOfItsOwnIsNeverPushed() throws Exception {
+    committedOnBranch();
+    // Something in the env, but not the agent's token: there is nothing to push as.
+    credential.set(Optional.of(Map.of("QITS_COMMISSIONED_CLIENT_SECRET", "not-a-token")));
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-fix"));
+  }
+
+  @Test
+  void aCredentialHelperPlantedInTheSharedConfigStopsThePush() throws Exception {
+    committedOnBranch();
+    Path stolen = tmp.resolve("stolen");
+    git(
+        estate.base().resolve(CHILD),
+        "config",
+        "credential.helper",
+        "!f() { cat > " + stolen + "; }; f");
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-fix"));
+    assertFalse(Files.exists(stolen));
+  }
+
+  @Test
+  void aRedirectedOriginOrAProxyStopsThePushAndTheFetch() throws Exception {
+    committedOnBranch();
+    Path elsewhere = tmp.resolve("elsewhere.git");
+    git(tmp, "init", "--quiet", "--bare", elsewhere.toString());
+    Path child = estate.base().resolve(CHILD);
+    git(child, "config", "remote.origin.url", elsewhere.toString());
+
+    assertTrue(sync.pushCycle().isEmpty(), "never pushed where an agent pointed the origin");
+    assertEquals("", git(elsewhere, "branch", "--list"));
+    assertEquals(1, sync.fetchAll(), "nor fetched from there with the workspace's credential");
+
+    git(child, "config", "remote.origin.url", estate.childOrigin().toString());
+    git(child, "config", "http.proxy", "http://127.0.0.1:9");
+    assertTrue(sync.pushCycle().isEmpty());
+    git(child, "config", "--unset", "http.proxy");
+    git(child, "config", "url." + elsewhere + ".pushInsteadOf", estate.childOrigin().toString());
+    assertTrue(sync.pushCycle().isEmpty());
+
+    git(child, "config", "--remove-section", "url." + elsewhere);
+    assertEquals(1, sync.pushCycle().size(), "a clean config pushes again");
+  }
+
+  @Test
+  void aPrePushHookPlantedInTheSharedRepositoryNeverRunsWithTheAgentsCredential() throws Exception {
+    committedOnBranch();
+    Path ran = tmp.resolve("ran");
+    Path hook = estate.base().resolve(".git/modules/child/hooks/pre-push");
+    Files.createDirectories(hook.getParent());
+    Files.writeString(hook, "#!/bin/sh\nenv > " + ran + "\n");
+    hook.toFile().setExecutable(true);
+
+    assertEquals(1, sync.pushCycle().size());
+    assertFalse(Files.exists(ran));
+  }
+
+  @Test
+  void aWorktreeAnotherAgentAddedUnderThisAgentsDirectoryIsNotPushedAsThisAgent() throws Exception {
+    worktrees.ensure("agent-1", BRANCH);
+    // Agents share the OS user: agent 2 could add a worktree of its own inside agent 1's
+    // directory. Only the worktree the daemon made for agent 1 is pushed with agent 1's token.
+    Path planted = estate.agents().resolve("agent-1").resolve("planted");
+    git(
+        estate.base().resolve(CHILD),
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        BRANCH + "-smuggled",
+        planted.toString(),
+        "origin/main");
+    git(planted, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "smuggled");
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-smuggled"));
+  }
 }

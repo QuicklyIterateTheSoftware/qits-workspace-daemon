@@ -159,6 +159,20 @@ public final class Provisioner {
               "INFO",
               workspaceDir.getPath()
                   + " already checked out — skipping root clone, re-checking submodules."));
+      // Agents share the OS user and could have written the base clone's config while the last
+      // container ran. A config that could turn the workspace's credential against it stops the
+      // boot's git work here; the base clone is still used, and the origin sync refuses the same
+      // repositories.
+      List<String> tampered = GitConfigGuard.violationsUnder(new File(workspaceDir, ".git").toPath());
+      if (!tampered.isEmpty()) {
+        emit.accept(
+            new DaemonLog(
+                "WARN",
+                "the base clone's git config carries settings the daemon never writes, so it is not"
+                    + " re-checked: "
+                    + tampered));
+        return null;
+      }
       if (!alignExistingCheckoutOrigin(workspaceDir, gitBase, env, emit)) {
         return "could not align the existing checkout with its project-scoped origin";
       }
@@ -452,7 +466,7 @@ public final class Provisioner {
    * {@code CommandExit} (a provision is not a command round-trip).
    */
   static int runStreaming(List<String> argv, Consumer<DaemonMessage> emit) {
-    ProcessBuilder builder = new ProcessBuilder(argv);
+    ProcessBuilder builder = guarded(new ProcessBuilder(safe(argv)));
     if (WORKSPACE_DIR.isDirectory()) {
       builder.directory(WORKSPACE_DIR);
     }
@@ -504,11 +518,32 @@ public final class Provisioner {
 
   private record Captured(int exitCode, String stdout) {}
 
+  /** Hooks and fsmonitor off for every git call here, as {@link GitExec} has it. */
+  private static List<String> safe(List<String> argv) {
+    if (argv.isEmpty() || !"git".equals(argv.get(0))) {
+      return argv;
+    }
+    List<String> out = new ArrayList<>(argv.size() + 4);
+    out.add("git");
+    out.addAll(List.of("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"));
+    out.addAll(argv.subList(1, argv.size()));
+    return out;
+  }
+
+  /** The daemon's environment without its secrets, plus the workspace's git credential only. */
+  private static ProcessBuilder guarded(ProcessBuilder builder) {
+    java.util.Map<String, String> env =
+        GitExec.environment(builder.environment(), GitExec.workspaceCredential());
+    builder.environment().clear();
+    builder.environment().putAll(env);
+    return builder;
+  }
+
   /** Run a short git read in {@code /workspace}, returning its exit + stdout ("" on failure). */
   private static Captured capture(List<String> argv) {
     try {
       ProcessBuilder builder =
-          new ProcessBuilder(argv).redirectError(ProcessBuilder.Redirect.DISCARD);
+          guarded(new ProcessBuilder(safe(argv))).redirectError(ProcessBuilder.Redirect.DISCARD);
       if (WORKSPACE_DIR.isDirectory()) {
         builder.directory(WORKSPACE_DIR);
       }

@@ -91,7 +91,10 @@ final class AgentRuntime {
       String sessionId,
       List<AgentWorktrees.RepoState> repositories) {}
 
-  /** What a launch service is built from: everything per agent, nothing shared. */
+  /**
+   * What a launch service is built from: everything per agent, nothing shared. {@code credential}
+   * is the agent's own token, for the platform MCP servers' header — never the workspace's.
+   */
   record Seat(
       String agentId,
       String workId,
@@ -99,7 +102,18 @@ final class AgentRuntime {
       String wrapperBranch,
       Path directory,
       EntityFacts entity,
-      AgentCommands commands) {}
+      AgentCommands commands,
+      Optional<String> credential) {}
+
+  /** A session id reaches a path and an argv: it is held to a safe shape. */
+  private static final java.util.regex.Pattern SESSION_ID =
+      java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+
+  /** The agent's own token, from its start's {@code env}; empty when it carried none. */
+  static Optional<String> credential(Map<String, String> env) {
+    String token = env == null ? null : env.get(OriginSync.AGENT_CREDENTIAL);
+    return token == null || token.isBlank() ? Optional.empty() : Optional.of(token);
+  }
 
   /** Builds an agent's launch service; {@link ControlSocket} holds the shared parts. */
   @FunctionalInterface
@@ -163,6 +177,11 @@ final class AgentRuntime {
     if (request.workId() == null || request.workId().isBlank()) {
       throw new AgentWorktrees.AgentWorktreeException("workId is required");
     }
+    if (request.sessionId() != null
+        && !request.sessionId().isBlank()
+        && !SESSION_ID.matcher(request.sessionId()).matches()) {
+      throw new AgentWorktrees.AgentWorktreeException("Invalid sessionId");
+    }
     Path directory = worktrees.ensure(request.agentId(), request.wrapperBranch());
     Agent agent = agents.computeIfAbsent(request.agentId(), Agent::new);
     Optional<JsonObject> stored = readMetadata(request.agentId());
@@ -170,6 +189,7 @@ final class AgentRuntime {
     agent.entityId = request.entityId();
     agent.wrapperBranch = request.wrapperBranch();
     agent.directory = directory;
+    Optional<String> previousCredential = credential(agent.env);
     agent.env = request.env() == null ? Map.of() : Map.copyOf(request.env());
     if (request.surface() != null) {
       agent.surface = request.surface();
@@ -188,7 +208,10 @@ final class AgentRuntime {
     } else if (agent.sessionId == null) {
       agent.sessionId = stored.map(m -> m.getString("sessionId")).orElse(null);
     }
-    if (agent.launch == null) {
+    // The launch service carries the agent's token in its MCP headers, so a new token needs a new
+    // service. A running harness keeps the one it started with until it stops.
+    if (agent.launch == null
+        || (!credential(agent.env).equals(previousCredential) && running(agent) == null)) {
       agent.launch = factory.create(seat(agent, request.entity()));
     }
     if (request.entity() != null) {
@@ -218,7 +241,8 @@ final class AgentRuntime {
         agent.wrapperBranch,
         agent.directory,
         entity,
-        scoped);
+        scoped,
+        credential(agent.env));
   }
 
   /**
@@ -460,7 +484,7 @@ final class AgentRuntime {
 
   private Optional<JsonObject> readMetadata(String agentId) {
     Path file = worktrees.agentDir(agentId).resolve(METADATA_FILE);
-    if (!Files.isRegularFile(file)) {
+    if (!Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
       return Optional.empty();
     }
     try {
@@ -480,9 +504,23 @@ final class AgentRuntime {
             .put("wrapperBranch", agent.wrapperBranch)
             .put("harness", agent.harness == null ? null : agent.harness.name())
             .put("sessionId", agent.sessionId);
+    // Written beside and moved over, so a symbolic link an agent put in its place is replaced,
+    // never
+    // followed: the daemon writes this file and no other.
+    Path dir = worktrees.agentDir(agent.agentId);
+    Path temporary = dir.resolve(METADATA_FILE + ".tmp");
     try {
+      Files.deleteIfExists(temporary);
       Files.writeString(
-          worktrees.agentDir(agent.agentId).resolve(METADATA_FILE), json.encodePrettily());
+          temporary,
+          json.encodePrettily(),
+          java.nio.file.StandardOpenOption.CREATE_NEW,
+          java.nio.file.StandardOpenOption.WRITE);
+      Files.move(
+          temporary,
+          dir.resolve(METADATA_FILE),
+          java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+          java.nio.file.StandardCopyOption.ATOMIC_MOVE);
     } catch (IOException e) {
       LOG.warnf(
           "could not write %s for agent %s: %s", METADATA_FILE, agent.agentId, e.getMessage());

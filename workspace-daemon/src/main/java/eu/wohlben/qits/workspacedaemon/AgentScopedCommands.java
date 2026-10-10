@@ -26,7 +26,7 @@ import java.util.function.Supplier;
  *       wrapper worktree, so the harness runs there and its session files are keyed by that path.
  *   <li><b>Its own credential, in its own process only.</b> The agent's environment is laid under
  *       the launch's own; it reaches the harness process and nothing else, and is never written to
- *       disk (D18).
+ *       disk (D18). The workspace's secrets are blanked, so the harness never holds them.
  *   <li><b>Its own sessions across restarts.</b> The command store does not outlive the container,
  *       so it cannot vouch for a session started before a restart. The host can: it stores the
  *       agent's session id and hands it back. So a session the agent is known to own is resumable
@@ -68,9 +68,28 @@ final class AgentScopedCommands implements AgentCommands {
     return "cd -- " + quote(workingDirectory.toString()) + " || exit 1\n" + script;
   }
 
-  /** The agent's environment under the launch's own: the library's {@code HOME} still wins. */
+  /**
+   * The harness's environment: every workspace secret blanked, then the agent's own environment,
+   * then the launch's (the library's {@code HOME} still wins).
+   *
+   * <p>The commands layer lays this map over the daemon's environment and cannot remove a name, so
+   * a secret is set to the empty string instead. That keeps the workspace token, the commissioned
+   * client and the daemon's API token out of the harness: without the API token a harness cannot
+   * drive another agent through this daemon's routes, and without the workspace token its git can
+   * push only with the agent's own (an empty {@code QITS_TOKEN} reads as absent to the image's
+   * credential helper). Package-private for the test.
+   */
   Map<String, String> environmentFor(Map<String, String> launch) {
-    Map<String, String> merged = new HashMap<>(environment.get());
+    Map<String, String> merged = new HashMap<>();
+    for (String name : System.getenv().keySet()) {
+      if (GitExec.secret(name)) {
+        merged.put(name, "");
+      }
+    }
+    for (String name : GitExec.SECRETS) {
+      merged.put(name, "");
+    }
+    merged.putAll(environment.get());
     if (launch != null) {
       merged.putAll(launch);
     }
