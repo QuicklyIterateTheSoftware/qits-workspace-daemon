@@ -2,10 +2,12 @@ package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.agents.AgentCommands;
 import eu.wohlben.qits.agents.AgentDefaults;
+import eu.wohlben.qits.agents.AgentLaunchMode;
 import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.agents.AgentPluginService;
 import eu.wohlben.qits.agents.AgentSessionQueryService;
 import eu.wohlben.qits.agents.AgentSessionStore;
+import eu.wohlben.qits.agents.AgentSurface;
 import eu.wohlben.qits.agents.AgentTranscriptService;
 import eu.wohlben.qits.agents.AgentTranscriptTailService;
 import eu.wohlben.qits.agents.AgentType;
@@ -15,10 +17,6 @@ import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.ActionResolver;
-import eu.wohlben.qits.commands.AgentSessionRef;
-import eu.wohlben.qits.commands.AgentSessionSource;
-import eu.wohlben.qits.commands.ChatProtocol;
-import eu.wohlben.qits.commands.ChatWire;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandLogService;
@@ -31,7 +29,6 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -42,26 +39,29 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 /**
- * <b>The provider states this daemon records and verifies</b> (ticket qits-1149): one real {@link
- * WorkspaceApi} per state, on an ephemeral loopback port, mounted under the base path
+ * <b>The provider states this daemon records and verifies</b> (tickets qits-1149, qits-1152): one
+ * real {@link WorkspaceApi} per state, on an ephemeral loopback port, mounted under the base path
  * qits-workspaces injects ({@code /workspaces/container/<row id>}), wired the way {@link
- * AgentsApiTest} wires it.
+ * AgentsApiTest} wires it: real git origins ({@link GitFixtures}), real agent worktrees, a real
+ * {@link AgentRuntime}.
  *
- * <p>Every state answers one param, {@code workspaceRowId}: the row id qits-workspaces keys the
- * container on and puts in the path. It is always {@value #WORKSPACE_ROW_ID}.
+ * <p>Every state answers two params: {@code workspaceRowId}, the row id qits-workspaces keys the
+ * container on and puts in the path, always {@value #WORKSPACE_ROW_ID}; and {@code agentId}, the
+ * agent the host names in {@code /agent-worktrees/{agentId}}, always {@value #AGENT_ID}.
  *
- * <p><b>No real harness ever starts.</b> A running chat agent is a real {@code CHAT} command that
- * sleeps, with a recorded agent session, and a chat protocol that only counts the turns it is
- * handed — as {@code AgentsApiTest} does. A launch goes through {@link StubHarness}, which swaps
- * the harness script for a stub. What is under contract is the route and the answer, not the
- * harness.
+ * <p><b>No real harness ever starts.</b> Every launch goes through {@link StubHarness}, which swaps
+ * the harness script for a stub that reads its input and stays up. What is under contract is the
+ * route and the answer, not the harness.
  *
  * <p>Close it after each interaction: it terminates what it launched and stops its Vert.x.
  */
 final class ProviderStates implements AutoCloseable {
 
-  static final String A_CHAT_AGENT_RUNNING = "a workspace daemon with a chat agent running";
-  static final String NO_AGENT_RUNNING = "a workspace daemon with no agent running";
+  /** No agent yet, and the harness signed in: a start launches. */
+  static final String SIGNED_IN = "a workspace daemon with a signed-in harness";
+
+  /** {@link #AGENT_ID} started, its interactive harness running in its worktree. */
+  static final String AGENT_RUNNING = "a workspace daemon with an agent running";
 
   /** The row id qits-workspaces keys the container on. */
   static final String WORKSPACE_ROW_ID = "1";
@@ -72,11 +72,17 @@ final class ProviderStates implements AutoCloseable {
   /** The daemon token; every request carries it, the way qits-workspaces' proxy sends it. */
   static final String TOKEN = "contract-daemon-token";
 
-  /** The running chat command's id, already in frozen form. */
-  static final String CHAT_COMMAND_ID = "00000000-0000-4000-8000-000000000001";
+  /** The agent every state names, already in frozen form. */
+  static final String AGENT_ID = "00000000-0000-4000-8000-0000000000a1";
 
-  /** The running chat's recorded session, already in frozen form. */
-  static final String CHAT_SESSION_ID = "00000000-0000-4000-8000-000000000002";
+  /** The agent's work item, already in frozen form. */
+  static final String WORK_ID = "00000000-0000-4000-8000-000000000001";
+
+  static final String ENTITY_ID = "contract-00000001-10";
+  static final String WRAPPER_BRANCH = "ticket/contract-00000001-10";
+
+  /** Where a real daemon's volume is; the temporary one is frozen to it. */
+  static final String VOLUME = "/workspace";
 
   static final String REPOSITORY_ID = "00000000-0000-4000-8000-000000000003";
   static final String PROJECT_ID = "00000000-0000-4000-8000-000000000004";
@@ -147,19 +153,25 @@ final class ProviderStates implements AutoCloseable {
       (command, cwd, env, timeout) -> new ProcessRunner.Result(0, "", "", false);
 
   private final Path dir;
+  private final Path volume;
   private final Vertx vertx;
   private final WorkspaceApi api;
   private final CommandService commands;
+  private final AgentRuntime runtime;
 
   private ProviderStates(Path dir) throws Exception {
     this.dir = dir;
-    Path root = Files.createDirectories(dir.resolve("workspace"));
+    GitFixtures.Estate estate = GitFixtures.estate(dir);
+    volume = estate.base().getParent();
     Path claudeMount = Files.createDirectories(dir.resolve("claude"));
+    AgentWorktrees worktrees =
+        new AgentWorktrees(estate.base(), estate.agents(), GitFixtures.WRAPPER);
+    worktrees.installGuards();
     vertx = Vertx.vertx();
     api = new WorkspaceApi();
     api.vertx = vertx;
     api.apiBasePath = Optional.of(BASE_PATH + "/");
-    api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "contract-marker")
+    api.listen(vertx, "127.0.0.1", 0, TOKEN, worktrees, List::of)
         .toCompletionStage()
         .toCompletableFuture()
         .get(30, TimeUnit.SECONDS);
@@ -168,34 +180,59 @@ final class ProviderStates implements AutoCloseable {
     CommandLogService logs = new CommandLogService(store, null);
     CommandLifecycleService lifecycle = new CommandLifecycleService(store, null);
     AgentSessionStore sessions = new AgentSessionStore();
-    CommandRegistry registry = new CommandRegistry(root, 2_000);
+    CommandRegistry registry = new CommandRegistry(volume, 2_000);
     commands = new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(store, logs, sessions, claudeMount.toString(), null);
-    AgentCommands agentCommands =
-        new StubHarness(new CommandsAgentCommands(commands, registry, store));
+    AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
+    eu.wohlben.qits.agents.AgentAuthStatus auth =
+        new eu.wohlben.qits.agents.AgentAuthStatus(PROCESSES, claudeMount.toString(), volume);
+    AgentCommands shared = new StubHarness(new CommandsAgentCommands(commands, registry, store));
     AgentLaunchService launch =
         new AgentLaunchService(
-            agentCommands,
-            new eu.wohlben.qits.agents.AgentAuthStatus(PROCESSES, claudeMount.toString(), root),
+            shared,
+            auth,
             transcripts,
-            new AgentTranscriptTailService(transcripts, logs),
+            tail,
             DEFAULTS,
             new WorkspaceMcpServers(
                 ENDPOINTS, REPOSITORY_ID, WORKSPACE_ID, Optional.empty(), Optional.empty()),
             WORKSPACE,
             claudeMount.toString(),
-            13337);
+            HOOKS_PORT);
+    runtime =
+        new AgentRuntime(
+            worktrees,
+            store,
+            registry,
+            shared,
+            seat ->
+                new AgentLaunchService(
+                    seat.commands(),
+                    auth,
+                    transcripts,
+                    tail,
+                    DEFAULTS,
+                    WorkspaceMcpServers.forAgent(
+                        ENDPOINTS, REPOSITORY_ID, WORKSPACE_ID, Optional.empty(), seat),
+                    WORKSPACE,
+                    claudeMount.toString(),
+                    HOOKS_PORT),
+            claudeMount.toString());
     api.wireCommands(commands, registry, WORKSPACE);
     api.wireAgents(
+        runtime,
         launch,
         new AgentSessionQueryService(store, sessions),
-        new AgentPluginService(PROCESSES, claudeMount.toString(), root, DEFAULTS),
-        new PromptRefinementService(PROCESSES, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
+        new AgentPluginService(PROCESSES, claudeMount.toString(), volume, DEFAULTS),
+        new PromptRefinementService(
+            PROCESSES, WORKSPACE, DEFAULTS, claudeMount.toString(), volume),
         DEFAULTS,
         "contract",
         () -> List.of(HarnessCapabilities.shipped(AgentType.CLAUDE, "not probed here")));
   }
+
+  private static final int HOOKS_PORT = 13337;
 
   /** A daemon in no state yet, listening. */
   static ProviderStates start() {
@@ -207,12 +244,13 @@ final class ProviderStates implements AutoCloseable {
   }
 
   static Set<String> names() {
-    return Set.of(A_CHAT_AGENT_RUNNING, NO_AGENT_RUNNING);
+    return Set.of(SIGNED_IN, AGENT_RUNNING);
   }
 
   /** The params every state answers, sorted by name. */
   static Map<String, String> params() {
     Map<String, String> params = new TreeMap<>();
+    params.put("agentId", AGENT_ID);
     params.put("workspaceRowId", WORKSPACE_ROW_ID);
     return params;
   }
@@ -220,8 +258,8 @@ final class ProviderStates implements AutoCloseable {
   /** Puts this daemon into {@code state} and answers its params. */
   Map<String, String> setUp(String state) {
     switch (state) {
-      case A_CHAT_AGENT_RUNNING -> launchChat();
-      case NO_AGENT_RUNNING -> {}
+      case AGENT_RUNNING -> startAgent();
+      case SIGNED_IN -> {}
       default -> throw new IllegalArgumentException("No provider state named '" + state + "'");
     }
     return params();
@@ -231,26 +269,26 @@ final class ProviderStates implements AutoCloseable {
     return api.actualPort();
   }
 
-  private void launchChat() {
-    commands.launchChat(
-        "Chat",
-        "sleep 120",
-        Map.of(),
-        CHAT_COMMAND_ID,
-        new AgentSessionRef(CHAT_SESSION_ID, AgentSessionSource.PINNED, null, null, Instant.EPOCH),
-        (id, code, killed) -> {},
-        process ->
-            new ChatProtocol() {
-              @Override
-              public void start(ChatWire wire, Runnable onClose) {}
+  /** The temporary volume's path, which {@link #VOLUME} stands for in a recording. */
+  Path volume() {
+    return volume;
+  }
 
-              @Override
-              public void sendUser(String text) {}
-
-              @Override
-              public void close() {}
-            },
-        "CLAUDE");
+  /** The agent started as qits-workspaces starts it: interactive, on the dispatch surface. */
+  private void startAgent() {
+    runtime.start(
+        new AgentRuntime.Start(
+            AGENT_ID,
+            WORK_ID,
+            ENTITY_ID,
+            WRAPPER_BRANCH,
+            AgentType.CLAUDE,
+            null,
+            Map.of(),
+            "Work the ticket.",
+            AgentSurface.TICKET_DISPATCH,
+            AgentLaunchMode.INTERACTIVE,
+            null));
   }
 
   @Override
@@ -263,6 +301,7 @@ final class ProviderStates implements AutoCloseable {
       }
     }
     api.close();
+    runtime.close();
     try {
       vertx.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
     } catch (Exception e) {

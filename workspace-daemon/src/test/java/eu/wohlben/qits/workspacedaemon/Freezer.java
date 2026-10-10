@@ -24,6 +24,8 @@ import java.util.regex.Pattern;
  *   <li><b>Instants.</b> Every ISO-8601 instant becomes {@value #FROZEN_INSTANT}. Listed in {@link
  *       #instantPaths}.
  *   <li><b>Strings carrying an id</b> get it replaced in place. Listed in {@link #stringPaths}.
+ *   <li><b>Strings carrying a temporary path</b> get it replaced by the path it stands for, as
+ *       the state names it ({@link #Freezer(Map)}). Listed in {@link #stringPaths} too.
  * </ul>
  */
 final class Freezer {
@@ -38,10 +40,21 @@ final class Freezer {
 
   static final String FROZEN_INSTANT = "2026-01-01T00:00:00Z";
 
+  /** Literal text to replace, and what replaces it: a state's temporary paths. */
+  private final Map<String, String> literals;
+
   private final Map<String, String> ids = new HashMap<>();
   private final Set<String> idPaths = new LinkedHashSet<>();
   private final Set<String> instantPaths = new LinkedHashSet<>();
   private final Set<String> stringPaths = new LinkedHashSet<>();
+
+  Freezer() {
+    this(Map.of());
+  }
+
+  Freezer(Map<String, String> literals) {
+    this.literals = Map.copyOf(literals);
+  }
 
   Object freeze(Object value) {
     return freeze(value, "$");
@@ -90,6 +103,9 @@ final class Freezer {
       return freezeIds(value);
     }
     String result = freezeIds(value);
+    for (Map.Entry<String, String> literal : literals.entrySet()) {
+      result = result.replace(literal.getKey(), literal.getValue());
+    }
     if (!result.equals(value)) {
       stringPaths.add(path);
     }

@@ -105,14 +105,14 @@ class ConsumerPactVerificationTest {
     }
   }
 
-  @State(ProviderStates.A_CHAT_AGENT_RUNNING)
-  Map<String, String> aChatAgentRunning() {
-    return daemon.setUp(ProviderStates.A_CHAT_AGENT_RUNNING);
+  @State(ProviderStates.SIGNED_IN)
+  Map<String, String> signedIn() {
+    return daemon.setUp(ProviderStates.SIGNED_IN);
   }
 
-  @State(ProviderStates.NO_AGENT_RUNNING)
-  Map<String, String> noAgentRunning() {
-    return daemon.setUp(ProviderStates.NO_AGENT_RUNNING);
+  @State(ProviderStates.AGENT_RUNNING)
+  Map<String, String> anAgentRunning() {
+    return daemon.setUp(ProviderStates.AGENT_RUNNING);
   }
 
   /** The daemon's loopback port, with the daemon token on every request. */

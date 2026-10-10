@@ -66,37 +66,45 @@ class GoldenMasterRecordingTest {
       JsonObject body,
       int status) {}
 
+  /** Where everything about one agent sits. */
+  static final String AGENT = PREFIX + "/agent-worktrees/{agentId}";
+
+  /**
+   * The calls qits-workspaces' {@code DaemonAgentClient} makes (qits-1152), with the bodies it
+   * sends. The SPA's own calls go through the container proxy and are not recorded here.
+   */
   static final List<Interaction> INTERACTIONS =
       List.of(
           new Interaction(
-              ProviderStates.A_CHAT_AGENT_RUNNING,
-              "listCommands",
-              "GET",
-              PREFIX + "/commands",
-              Map.of("status", "RUNNING"),
-              null,
+              ProviderStates.SIGNED_IN,
+              "startAgentWorktree",
+              "POST",
+              PREFIX + "/agent-worktrees",
+              Map.of(),
+              new JsonObject()
+                  .put("agentId", ProviderStates.AGENT_ID)
+                  .put("workId", ProviderStates.WORK_ID)
+                  .put("entityId", ProviderStates.ENTITY_ID)
+                  .put("wrapperBranch", ProviderStates.WRAPPER_BRANCH)
+                  .put("harness", "CLAUDE")
+                  .put("env", new JsonObject())
+                  .put("surface", "ticket.dispatch")
+                  .put("mode", "INTERACTIVE")
+                  .put("instruction", "Work the ticket."),
               200),
           new Interaction(
-              ProviderStates.A_CHAT_AGENT_RUNNING,
+              ProviderStates.AGENT_RUNNING,
               "deliverAgentTurn",
               "POST",
-              PREFIX + "/agents/turn",
+              AGENT + "/turn",
               Map.of(),
               new JsonObject().put("text", "Carry on."),
               200),
           new Interaction(
-              ProviderStates.A_CHAT_AGENT_RUNNING,
-              "setAgentBlocked",
-              "POST",
-              PREFIX + "/agents/blocked",
-              Map.of(),
-              new JsonObject().put("blocked", true),
-              200),
-          new Interaction(
-              ProviderStates.A_CHAT_AGENT_RUNNING,
+              ProviderStates.AGENT_RUNNING,
               "setAgentEntity",
               "POST",
-              PREFIX + "/agents/entity",
+              AGENT + "/entity",
               Map.of(),
               new JsonObject()
                   .put("title", "Fix the login")
@@ -104,17 +112,28 @@ class GoldenMasterRecordingTest {
                   .put("blocked", false),
               200),
           new Interaction(
-              ProviderStates.NO_AGENT_RUNNING,
-              "launchAgent",
-              "POST",
-              PREFIX + "/agents",
+              ProviderStates.AGENT_RUNNING,
+              "agentCleanupCheck",
+              "GET",
+              AGENT + "/cleanup-check",
               Map.of(),
-              new JsonObject()
-                  .put("scope", "REPOSITORY")
-                  .put("surface", "ticket.dispatch")
-                  .put("mode", "CHAT")
-                  .put("initialContext", "Work the ticket.")
-                  .put("deliverTaskPrompt", false),
+              null,
+              200),
+          new Interaction(
+              ProviderStates.AGENT_RUNNING,
+              "yieldAgent",
+              "POST",
+              AGENT + "/yield",
+              Map.of(),
+              new JsonObject(),
+              200),
+          new Interaction(
+              ProviderStates.AGENT_RUNNING,
+              "removeAgentWorktree",
+              "DELETE",
+              AGENT,
+              Map.of(),
+              null,
               200));
 
   private static final Pattern TEMPLATE_PARAM = Pattern.compile("\\{([^}]+)}");
@@ -247,7 +266,8 @@ class GoldenMasterRecordingTest {
                 + ": "
                 + response.body());
       }
-      Freezer freezer = new Freezer();
+      Freezer freezer =
+          new Freezer(Map.of(daemon.volume().toString(), ProviderStates.VOLUME));
       return new Recorded(freezer.freeze(new JsonObject(response.body())), params, freezer);
     }
   }

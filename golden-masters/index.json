@@ -3,22 +3,79 @@
   "provider": "qits-workspace-daemon",
   "states": [
     {
-      "name": "a workspace daemon with a chat agent running",
-      "slug": "a-workspace-daemon-with-a-chat-agent-running",
+      "name": "a workspace daemon with a signed-in harness",
+      "slug": "a-workspace-daemon-with-a-signed-in-harness",
       "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
         "workspaceRowId": "1"
       },
       "dependsOn": [],
       "operations": [
         {
+          "operationId": "startAgentWorktree",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees",
+          "body": {
+            "agentId": "00000000-0000-4000-8000-0000000000a1",
+            "workId": "00000000-0000-4000-8000-000000000001",
+            "entityId": "contract-00000001-10",
+            "wrapperBranch": "ticket/contract-00000001-10",
+            "harness": "CLAUDE",
+            "env": {},
+            "surface": "ticket.dispatch",
+            "mode": "INTERACTIVE",
+            "instruction": "Work the ticket."
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/startAgentWorktree.json",
+          "frozen": {
+            "ids": [
+              "$.agentId",
+              "$.commandId",
+              "$.sessionId"
+            ],
+            "instants": [],
+            "strings": [
+              "$.path"
+            ],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent running",
+      "slug": "a-workspace-daemon-with-an-agent-running",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "agentCleanupCheck",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/cleanup-check",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/agentCleanupCheck.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "deliverAgentTurn",
           "method": "POST",
-          "path": "/workspaces/container/{workspaceRowId}/agents/turn",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/turn",
           "body": {
             "text": "Carry on."
           },
           "status": 200,
-          "file": "a-workspace-daemon-with-a-chat-agent-running/deliverAgentTurn.json",
+          "file": "a-workspace-daemon-with-an-agent-running/deliverAgentTurn.json",
           "frozen": {
             "ids": [
               "$.commandId"
@@ -30,40 +87,15 @@
           }
         },
         {
-          "operationId": "listCommands",
-          "method": "GET",
-          "path": "/workspaces/container/{workspaceRowId}/commands",
-          "query": {
-            "status": "RUNNING"
-          },
+          "operationId": "removeAgentWorktree",
+          "method": "DELETE",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
           "status": 200,
-          "file": "a-workspace-daemon-with-a-chat-agent-running/listCommands.json",
+          "file": "a-workspace-daemon-with-an-agent-running/removeAgentWorktree.json",
           "frozen": {
             "ids": [
-              "$.entries[*].command.id",
-              "$.entries[*].command.repoId",
-              "$.entries[*].command.agentSessions[*].sessionId"
+              "$.agentId"
             ],
-            "instants": [
-              "$.entries[*].command.launchedAt",
-              "$.entries[*].command.agentSessions[*].recordedAt"
-            ],
-            "strings": [],
-            "numbers": [],
-            "listFilteredTo": null
-          }
-        },
-        {
-          "operationId": "setAgentBlocked",
-          "method": "POST",
-          "path": "/workspaces/container/{workspaceRowId}/agents/blocked",
-          "body": {
-            "blocked": true
-          },
-          "status": 200,
-          "file": "a-workspace-daemon-with-a-chat-agent-running/setAgentBlocked.json",
-          "frozen": {
-            "ids": [],
             "instants": [],
             "strings": [],
             "numbers": [],
@@ -73,14 +105,14 @@
         {
           "operationId": "setAgentEntity",
           "method": "POST",
-          "path": "/workspaces/container/{workspaceRowId}/agents/entity",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/entity",
           "body": {
             "title": "Fix the login",
             "status": "IMPLEMENTING",
             "blocked": false
           },
           "status": 200,
-          "file": "a-workspace-daemon-with-a-chat-agent-running/setAgentEntity.json",
+          "file": "a-workspace-daemon-with-an-agent-running/setAgentEntity.json",
           "frozen": {
             "ids": [],
             "instants": [],
@@ -88,40 +120,19 @@
             "numbers": [],
             "listFilteredTo": null
           }
-        }
-      ]
-    },
-    {
-      "name": "a workspace daemon with no agent running",
-      "slug": "a-workspace-daemon-with-no-agent-running",
-      "params": {
-        "workspaceRowId": "1"
-      },
-      "dependsOn": [],
-      "operations": [
+        },
         {
-          "operationId": "launchAgent",
+          "operationId": "yieldAgent",
           "method": "POST",
-          "path": "/workspaces/container/{workspaceRowId}/agents",
-          "body": {
-            "scope": "REPOSITORY",
-            "surface": "ticket.dispatch",
-            "mode": "CHAT",
-            "initialContext": "Work the ticket.",
-            "deliverTaskPrompt": false
-          },
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/yield",
+          "body": {},
           "status": 200,
-          "file": "a-workspace-daemon-with-no-agent-running/launchAgent.json",
+          "file": "a-workspace-daemon-with-an-agent-running/yieldAgent.json",
           "frozen": {
             "ids": [
-              "$.command.id",
-              "$.command.repoId",
-              "$.command.agentSessions[*].sessionId"
+              "$.agentId"
             ],
-            "instants": [
-              "$.command.launchedAt",
-              "$.command.agentSessions[*].recordedAt"
-            ],
+            "instants": [],
             "strings": [],
             "numbers": [],
             "listFilteredTo": null
