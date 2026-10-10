@@ -167,14 +167,15 @@ final class AgentJson {
   /**
    * {@code POST /agents/entity} — the facts this call left standing, and how many live sessions
    * will carry the name they render. {@code title} and {@code status} are always present, null when
-   * not known, so a caller reads "cleared" rather than "omitted"; {@code renamed} always present for
-   * the reason {@link #blocked} gives.
+   * not known, so a caller reads "cleared" rather than "omitted"; {@code blockSource} the same,
+   * null for explicit; {@code renamed} always present for the reason {@link #blocked} gives.
    */
   static JsonObject entity(EntityFacts facts, int renamed) {
     return new JsonObject()
         .put("title", facts.title())
         .put("status", facts.status())
         .put("blocked", facts.blocked())
+        .put("blockSource", facts.blockSource())
         .put("renamed", renamed);
   }
 
