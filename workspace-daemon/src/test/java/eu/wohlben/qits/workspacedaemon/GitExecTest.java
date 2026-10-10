@@ -2,7 +2,6 @@ package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -74,8 +73,10 @@ class GitExecTest {
             "var",
             "GIT_EDITOR");
 
-    assertTrue(out.ok(), out.message());
-    assertFalse(out.line().contains("planted-editor"), out.line());
+    // With no editor installed (a CI image) git refuses instead of printing one; either way the
+    // planted value must not show.
+    String shown = out.ok() ? out.line() : out.message();
+    assertFalse(shown.contains("planted-editor"), shown);
   }
 
   @Test
