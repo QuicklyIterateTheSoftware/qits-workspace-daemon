@@ -206,6 +206,11 @@ public class ControlSocket {
       defaultValue = "25m")
   Duration backgroundShellGrace;
 
+  // How long a turn for an interactive harness waits for the harness's SessionStart hook before it
+  // is typed anyway (qits-1152, TerminalTurnGate).
+  @ConfigProperty(name = "qits.workspace-daemon.agent-ready-timeout", defaultValue = "60s")
+  Duration agentReadyTimeout;
+
   /**
    * Where the shared agent-credential volume is mounted in this container. Read here and nowhere
    * else: the launch service overlays it as the agent's HOME and the transcript service resolves
@@ -738,7 +743,8 @@ public class ControlSocket {
                         () -> head(seat.directory())),
                     claudeMount,
                     hooksPort),
-            claudeMount);
+            claudeMount,
+            agentReadyTimeout);
     agents = runtime;
     // The sign-in terminal is nobody's agent: a launch service of the workspace's own serves it.
     AgentLaunchService workspaceLaunch =
@@ -1192,6 +1198,10 @@ public class ControlSocket {
     HookWebhook h = hooks;
     if (h != null) {
       h.close();
+    }
+    AgentRuntime runtime = agents;
+    if (runtime != null) {
+      runtime.close();
     }
     DaemonStreamTunnel tun = tunnel;
     if (tun != null) {

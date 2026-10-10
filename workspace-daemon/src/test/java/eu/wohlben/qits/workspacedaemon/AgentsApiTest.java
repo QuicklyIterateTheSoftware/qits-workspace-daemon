@@ -214,6 +214,7 @@ class AgentsApiTest {
       }
     }
     api.close();
+    runtime.close();
     if (client != null) {
       client.close();
     }
@@ -789,6 +790,34 @@ class AgentsApiTest {
     JsonObject command = get("/commands/" + answer.body().getString("commandId")).body();
     assertEquals("TERMINAL", command.getString("kind"));
     assertEquals(true, command.getBoolean("interactive"));
+  }
+
+  @Test
+  @Timeout(60)
+  void aTurnForAnInteractiveHarnessWaitsForItsSessionStartAndIsTypedOnOneLine() throws Exception {
+    String commandId =
+        post("/agent-worktrees", start("agent-1").put("mode", "INTERACTIVE"))
+            .body()
+            .getString("commandId");
+    awaitRunning(commandId);
+    Path stdin = fakeLog.resolveSibling("harness.stdin");
+
+    Answer answer =
+        post(
+            "/agent-worktrees/agent-1/turn",
+            new JsonObject().put("text", "first line\nsecond line"));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals(true, answer.body().getBoolean("delivered"));
+    assertEquals("TERMINAL", answer.body().getString("kind"));
+    Thread.sleep(300);
+    assertFalse(
+        Files.exists(stdin) && Files.readString(stdin).contains("first line"),
+        "nothing is typed before the harness has started");
+
+    runtime.tag(new AgentActivity(commandId, null, "IDLE", "SessionStart", "startup", null, 1L));
+
+    awaitContains(stdin, "first line\\nsecond line");
   }
 
   @Test

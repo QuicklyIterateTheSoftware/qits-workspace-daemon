@@ -37,7 +37,11 @@
              shared harness code is released there first and arrives here as a version bump. A
              daemon runs the library version it was built against, so "the library is fixed" and
              "this daemon has the fix" are two different moments. -->
-        <qits.coding-agents.version>2026.1010.72418</qits.coding-agents.version>
+        <!-- PLACEHOLDER (qits-1152): live transcript tail and one-line typed turns for interactive
+             sessions are on qits-coding-agents' qits-1152-agent-worktrees branch and not released
+             yet. Its first release that has them moves this pin; until then a build needs a
+             locally installed jar. -->
+        <qits.coding-agents.version>0-qits1152-SNAPSHOT</qits.coding-agents.version>
         <!-- Where that coordinate is resolved from; mirrored by .qits-maven-settings.xml's
              `qits-maven` entry onto $QITS_MAVEN_REPOSITORY_URL inside a CI step or a build
              container. Spelled as a property so a deployment can point it elsewhere without

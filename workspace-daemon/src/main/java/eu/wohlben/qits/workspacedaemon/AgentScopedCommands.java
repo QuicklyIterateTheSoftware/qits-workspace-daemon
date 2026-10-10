@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
+import java.util.function.BiPredicate;
 import java.util.function.Supplier;
 
 /**
@@ -32,6 +33,9 @@ import java.util.function.Supplier;
  *       agent's session id and hands it back. So a session the agent is known to own is resumable
  *       here even though the store has never seen it (D5).
  * </ul>
+ *
+ * <p>A turn the library types into the agent's terminal goes through {@code typed}, so the daemon
+ * can hold it until the harness has started ({@link TerminalTurnGate}).
  */
 final class AgentScopedCommands implements AgentCommands {
 
@@ -41,13 +45,9 @@ final class AgentScopedCommands implements AgentCommands {
   private final Supplier<String> ownedSession;
   private final Supplier<String> harness;
   private final BiConsumer<String, Command> launched;
+  private final BiPredicate<String, String> typed;
 
-  /**
-   * @param ownedSession the session id the host stored for this agent, or null
-   * @param harness the harness that session was driven with, or null
-   * @param launched told {@code (commandId, null)} before a spawn, so a hook that fires before the
-   *     launch returns already finds its agent, and {@code (commandId, command)} after it
-   */
+  /** Types turns straight into the delegate; for tests that type nothing. */
   AgentScopedCommands(
       AgentCommands delegate,
       Path workingDirectory,
@@ -55,12 +55,39 @@ final class AgentScopedCommands implements AgentCommands {
       Supplier<String> ownedSession,
       Supplier<String> harness,
       BiConsumer<String, Command> launched) {
+    this(
+        delegate,
+        workingDirectory,
+        environment,
+        ownedSession,
+        harness,
+        launched,
+        (commandId, text) -> delegate.sendKeystrokes(commandId, text));
+  }
+
+  /**
+   * @param ownedSession the session id the host stored for this agent, or null
+   * @param harness the harness that session was driven with, or null
+   * @param launched told {@code (commandId, null)} before a spawn, so a hook that fires before the
+   *     launch returns already finds its agent, and {@code (commandId, command)} after it
+   * @param typed types a turn into a terminal, {@code (commandId, text)}; false when it is not
+   *     running
+   */
+  AgentScopedCommands(
+      AgentCommands delegate,
+      Path workingDirectory,
+      Supplier<Map<String, String>> environment,
+      Supplier<String> ownedSession,
+      Supplier<String> harness,
+      BiConsumer<String, Command> launched,
+      BiPredicate<String, String> typed) {
     this.delegate = delegate;
     this.workingDirectory = workingDirectory;
     this.environment = environment;
     this.ownedSession = ownedSession;
     this.harness = harness;
     this.launched = launched;
+    this.typed = typed;
   }
 
   /** The script, run from the agent's wrapper worktree. Package-private for the test. */
@@ -162,7 +189,7 @@ final class AgentScopedCommands implements AgentCommands {
 
   @Override
   public boolean sendKeystrokes(String commandId, String text) {
-    return delegate.sendKeystrokes(commandId, text);
+    return typed.test(commandId, text);
   }
 
   @Override

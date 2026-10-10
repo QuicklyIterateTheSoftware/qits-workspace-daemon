@@ -15,9 +15,9 @@ import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentState;
 import io.vertx.core.json.JsonObject;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -46,8 +46,13 @@ import org.jboss.logging.Logger;
  * harness, session id — is written beside its worktree as {@code agent.json}, so a restarted daemon
  * can still list and clean up an agent the host has not started again. The host's row is the
  * authority; the file is a cache of it.
+ *
+ * <p><b>Turns into a terminal.</b> An interactive harness takes typed turns only once it is up, so
+ * every turn typed into one goes through a {@link TerminalTurnGate}: held until the harness's first
+ * {@code SessionStart} hook, then typed in order. That covers the host's turns and a launch's
+ * second opening turn alike. The library types each turn on one line ({@code TerminalTurns}).
  */
-final class AgentRuntime {
+final class AgentRuntime implements AutoCloseable {
 
   private static final Logger LOG = Logger.getLogger(AgentRuntime.class);
 
@@ -147,6 +152,7 @@ final class AgentRuntime {
   private final AgentCommands commands;
   private final LaunchFactory factory;
   private final String claudeMount;
+  private final TerminalTurnGate terminalTurns;
 
   private final Map<String, Agent> agents = new ConcurrentHashMap<>();
 
@@ -160,12 +166,41 @@ final class AgentRuntime {
       AgentCommands commands,
       LaunchFactory factory,
       String claudeMount) {
+    this(
+        worktrees,
+        store,
+        registry,
+        commands,
+        factory,
+        claudeMount,
+        TerminalTurnGate.DEFAULT_TIMEOUT);
+  }
+
+  /**
+   * @param readyTimeout how long a turn for an interactive harness waits for its {@code
+   *     SessionStart} before it is typed anyway
+   */
+  AgentRuntime(
+      AgentWorktrees worktrees,
+      CommandStore store,
+      CommandRegistry registry,
+      AgentCommands commands,
+      LaunchFactory factory,
+      String claudeMount,
+      java.time.Duration readyTimeout) {
     this.worktrees = worktrees;
     this.store = store;
     this.registry = registry;
     this.commands = commands;
     this.factory = factory;
     this.claudeMount = claudeMount;
+    this.terminalTurns = new TerminalTurnGate(commands::sendKeystrokes, readyTimeout);
+  }
+
+  /** Stops the gate's timer; the harnesses are the commands layer's to stop. */
+  @Override
+  public void close() {
+    terminalTurns.close();
   }
 
   /**
@@ -233,7 +268,8 @@ final class AgentRuntime {
             () -> harnessEnvironment(agent),
             () -> agent.sessionId,
             () -> agent.harness == null ? null : agent.harness.name(),
-            (commandId, command) -> commandAgents.put(commandId, agent.agentId));
+            (commandId, command) -> commandAgents.put(commandId, agent.agentId),
+            terminalTurns::type);
     return new Seat(
         agent.agentId,
         agent.workId,
@@ -313,7 +349,8 @@ final class AgentRuntime {
 
   /**
    * Deliver a user turn. A stopped harness is started again with its session first, with the turn
-   * as its opening turn.
+   * as its opening turn. A turn for a running interactive harness is typed once it has started
+   * ({@link TerminalTurnGate}).
    */
   synchronized Turn turn(String agentId, String text) {
     Agent agent = known(agentId);
@@ -322,7 +359,7 @@ final class AgentRuntime {
       boolean delivered =
           running.kind() == CommandKind.CHAT
               ? registry.chatSend(running.id(), text)
-              : registry.input(running.id(), (text + "\r").getBytes(StandardCharsets.UTF_8));
+              : terminalTurns.type(running.id(), text);
       if (delivered) {
         return new Turn(true, running.id(), running.kind().name(), false);
       }
@@ -416,6 +453,9 @@ final class AgentRuntime {
     return commandId == null ? null : commandAgents.get(commandId);
   }
 
+  /** The hook that says a harness has started and takes typed turns. */
+  static final String SESSION_START = "SessionStart";
+
   /** The agent's credential, while this process knows it. */
   Optional<Map<String, String>> environment(String agentId) {
     Agent agent = agents.get(agentId);
@@ -425,7 +465,8 @@ final class AgentRuntime {
   /**
    * Name the agent on an {@link AgentActivity} frame, and keep the agent's session id current: a
    * Kimi session's id is learned from its first hook, and an in-session {@code /resume} switches
-   * it.
+   * it. A {@code SessionStart} also releases the turns held for an interactive harness, and an end
+   * forgets them.
    */
   DaemonMessage tag(DaemonMessage message) {
     if (!(message instanceof AgentActivity activity) || activity.agentId() != null) {
@@ -434,6 +475,11 @@ final class AgentRuntime {
     String agentId = agentOf(activity.commandId());
     if (agentId == null) {
       return message;
+    }
+    if (SESSION_START.equals(activity.hookEvent())) {
+      terminalTurns.started(activity.commandId());
+    } else if (AgentState.ENDED.equals(activity.state())) {
+      terminalTurns.forget(activity.commandId());
     }
     Agent agent = agents.get(agentId);
     if (agent != null

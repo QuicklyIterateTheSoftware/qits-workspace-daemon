@@ -337,6 +337,12 @@ session's files are on the harness volume (`/claude-home`, shared and persistent
 `ownsSession` check would refuse a session the container has not seen; `AgentScopedCommands`
 vouches for the session the host handed back, which is what makes a resume after a restart work.
 
+An interactive harness (`mode: INTERACTIVE`, a TUI on a PTY) takes typed turns only once it is up.
+`TerminalTurnGate` holds every turn typed into one — the host's turns and a launch's second opening
+turn — until the harness's first `SessionStart` hook, then types them in order. If no hook comes
+within `qits.workspace-daemon.agent-ready-timeout` (60 s) it types them anyway and logs a WARN. The
+library types each turn on one line: real newlines become a literal `\n`, and one `\r` submits.
+
 The tests for this run real git: `GitFixtures` builds a wrapper and a submodule with bare origins and
 a base clone, and `AgentsApiTest` puts a fake `claude` on the login shell's `PATH` (through
 `~/.bash_profile` on the temporary credential volume) to prove where the harness runs, with which
