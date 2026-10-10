@@ -60,7 +60,7 @@
         <!-- The consumer side of the contracts (ticket qits-1149), test scope only: the shared
              golden-master reader, and the recorded answers of each provider this daemon calls.
              Released coordinates, exact pins; the maintenance bump moves them. -->
-        <qits.pact-consumer.version>2026.1010.140259</qits.pact-consumer.version>
+        <qits.pact-consumer.version>2026.1010.141817</qits.pact-consumer.version>
         <qits.idp-golden-masters.version>2026.1010.134259</qits.idp-golden-masters.version>
     </properties>
 
