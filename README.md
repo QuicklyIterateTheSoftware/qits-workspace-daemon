@@ -115,6 +115,9 @@ fetch carries the workspace's git credential; a push of an agent's branch carrie
 runs in a repository whose own config carries a key the daemon never writes (`credential.*`,
 `url.*`, `http.*`, a changed `remote.origin.url`, …; see `GitConfigGuard`). A harness gets the
 workspace's secrets blanked and its own `env` laid over them; its MCP headers carry its own token.
+The daemon also sets `QITS_AGENT_ID` and `QITS_WORK_ID` in every harness (qits-1153), so a CLI run
+inside it — `qits wait` — can name the agent it speaks for. They are not secret, are also in
+`agent.json`, and win over a host-supplied value of the same name.
 Removed with the single checkout (qits-1152): the checkout-wide file routes, parent
 integration, `POST /agents` and the per-workspace turn/entity/blocked routes, declared actions
 (`POST /commands`, `/commands/actions`) and the bootstrap chain.

@@ -230,7 +230,7 @@ final class AgentRuntime {
         new AgentScopedCommands(
             commands,
             agent.directory,
-            () -> agent.env,
+            () -> harnessEnvironment(agent),
             () -> agent.sessionId,
             () -> agent.harness == null ? null : agent.harness.name(),
             (commandId, command) -> commandAgents.put(commandId, agent.agentId));
@@ -243,6 +243,26 @@ final class AgentRuntime {
         entity,
         scoped,
         credential(agent.env));
+  }
+
+  /** The name the harness learns its agent id from (qits-1153: {@code qits wait}). Not secret. */
+  static final String AGENT_ID_VARIABLE = "QITS_AGENT_ID";
+
+  /** The name the harness learns its work item from. Not secret. */
+  static final String WORK_ID_VARIABLE = "QITS_WORK_ID";
+
+  /**
+   * The agent's {@code env} plus who it is: {@code QITS_AGENT_ID} and {@code QITS_WORK_ID}, so a
+   * CLI run inside the harness can name the agent it speaks for. The daemon's values win over a
+   * host-supplied one of the same name.
+   */
+  private static Map<String, String> harnessEnvironment(Agent agent) {
+    Map<String, String> env = new java.util.HashMap<>(agent.env);
+    env.put(AGENT_ID_VARIABLE, agent.agentId);
+    if (agent.workId != null) {
+      env.put(WORK_ID_VARIABLE, agent.workId);
+    }
+    return env;
   }
 
   /**

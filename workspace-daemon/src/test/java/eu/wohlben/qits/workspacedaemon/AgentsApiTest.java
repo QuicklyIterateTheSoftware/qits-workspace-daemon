@@ -238,6 +238,7 @@ class AgentsApiTest {
         printf '%s\\n' "$*" >> "$QITS_FAKE_LOG.args"
         pwd >> "$QITS_FAKE_LOG.cwd"
         printf '%s\\n' "$QITS_TOKEN" >> "$QITS_FAKE_LOG.token"
+        printf 'agent=%s work=%s\\n' "$QITS_AGENT_ID" "$QITS_WORK_ID" >> "$QITS_FAKE_LOG.identity"
         printf 'api=%s secret=%s\\n' "${QITS_WORKSPACE_DAEMON_API_TOKEN-unset}" \\
           "${QITS_COMMISSIONED_CLIENT_SECRET-unset}" >> "$QITS_FAKE_LOG.secrets"
         exec cat >> "$QITS_FAKE_LOG.stdin"
@@ -1177,6 +1178,17 @@ class AgentsApiTest {
     assertEquals("s-switched", list().getJsonObject(0).getString("sessionId"));
     AgentActivity foreign = new AgentActivity("not-an-agent", null, "IDLE", "Stop", null, null, 1L);
     assertNull(((AgentActivity) runtime.tag(foreign)).agentId(), "the sign-in terminal, say");
+  }
+
+  @Test
+  @Timeout(60)
+  void theHarnessKnowsWhichAgentAndWorkItemItIs() throws Exception {
+    post("/agent-worktrees", start("agent-1").put("env", new JsonObject()
+        .put("QITS_TOKEN", "agent-token")
+        .put("QITS_FAKE_LOG", fakeLog.toString())
+        .put("QITS_AGENT_ID", "someone-else")));
+
+    awaitContains(fakeLog.resolveSibling("harness.identity"), "agent=agent-1 work=qits-1");
   }
 
   // --- the security pass ------------------------------------------------------------------------
