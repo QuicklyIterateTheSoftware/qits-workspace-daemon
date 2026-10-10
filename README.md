@@ -3,10 +3,11 @@
 Everything qits runs **inside** a workspace container. One binary, one workspace, one container
 lifetime.
 
-A workspace is a branch ref in a repository's bare origin plus a container that clones that branch
-into `/workspace`. This binary is that container's PID-1 child. It provisions the checkout, keeps it
-synced with its origin, runs its bootstrap chain, serves the working tree, and runs
-the commands and coding agents the user drives from the browser. Everything on the host's side of the
+A workspace is a container that hosts agents (qits-1152). It keeps one base clone of its wrapper at
+`/workspace/base`, and each agent works in its own agent worktree made from it, at
+`/workspace/agents/<agentId>/<repoName>`. This binary is that container's PID-1 child. It makes the
+base clone, keeps it fetched, makes and removes agent worktrees, pushes the agents' branches, serves
+each agent's files, and starts, stops and resumes each agent's harness. Everything on the host's side of the
 boundary belongs to
 [qits-workspaces-service](https://github.com/QuicklyIterateTheSoftware/qits-workspaces-service).
 
@@ -19,7 +20,7 @@ boundary belongs to
 | `workspace-daemon-protocol/` | The control-plane wire contract: message records + a codec over a plain `Map`. Depends on nothing. **Released**, as `eu.wohlben.qits:qits-workspace-daemon-protocol` — it also carries `WorkspaceImage`, the version of the image and daemon binary this release produced, which is how qits-workspaces pins them. |
 | `workspace-daemon-files/` | Reading the checkout: file listing, content, lazy directories, gitignore. |
 | `workspace-daemon-detection/` | Framework detection and the component map, over `workspace-daemon-files`. |
-| `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, provisioning, git, the bootstrap chain and web-editor supervision. Wires every module above by hand. |
+| `workspace-daemon/` | The Quarkus application: the control socket, the HTTP API, the hook webhook, the base clone, agent worktrees, origin sync and the agents' harnesses. Wires every module above by hand. |
 
 The first three are **framework-free**: no Quarkus, no CDI, no JAX-RS, no Jackson. They are plain
 jars with plain constructors that `ControlSocket` news up. That is not stylistic — it is what keeps
@@ -61,8 +62,8 @@ declares a `<repositories>` block. Inside CI and the Dockerfile's builder stage,
 ## The two channels
 
 **The control socket** — the daemon dials `ws://<host>/workspaces/daemon/{workspaceId}` on boot and
-keeps it open. Provisioning progress, bootstrap steps, working-tree status,
-agent activity and change nudges all ride it. Message shapes live in `workspace-daemon-protocol`;
+keeps it open. Provisioning progress, agent activity (each frame naming its agent), each branch the
+daemon pushed for an agent (`AgentBranchPushed`) and change nudges all ride it. Message shapes live in `workspace-daemon-protocol`;
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.
 
@@ -72,9 +73,8 @@ handshake. The four values — the client pair, token URL and audience — are a
 set keeps the clone-alone/local topology anonymous, while a partial set fails closed and retries
 rather than silently dropping authentication.
 
-**The HTTP API** — a bearer-authenticated server on `127.0.0.1:13338` serving the working tree, the
-commands surface, the coding-agent surface, the bootstrap surface, and the two
-interactive websockets. It **does not bind** without `qits.workspace-daemon.api-token`: it serves an
+**The HTTP API** — a bearer-authenticated server on `127.0.0.1:13338` serving the agent worktrees and
+their files, the commands surface, the coding-agent surface, and the two interactive websockets. It **does not bind** without `qits.workspace-daemon.api-token`: it serves an
 untrusted checkout, so it is never served anonymously.
 
 **The reverse tunnel** — how qits reaches that loopback server at all. On an `OpenStream`, the daemon
@@ -85,51 +85,42 @@ endpoint costs nothing on the wire. It also carries the request line verbatim, w
 of why nothing rewrites a path: there is no hop in this chain that *could* rewrite one without parsing
 and re-emitting HTTP.
 
-`OpenStream.target` is a **name** (`API`, `EDITOR`), never a port. A port on the wire would hand a
-container-supplied integer straight to `connect()` — the same thing the refusal of a non-host-relative
-`path` exists to prevent, pointed at loopback instead of at the network — so the host names what it
-wants and the daemon alone knows where that is. Absent ⇒ `API`, and `API` is not encoded at all, so
-an ordinary stream is byte-identical to the frame that shipped before targets existed. A name the
-daemon has no listener for is refused and logged, never served by the other one.
-
-**The web editor** — a workspace image that carries openvscode-server at `/opt/openvscode-server` has
-it supervised by the daemon, on `127.0.0.1:13339` (`qits.workspace-daemon.editor-port`) and reached
-only through the tunnel's `EDITOR` target. Loopback for the API's reason: on `qits-net` an editor is
-an unauthenticated shell over someone else's untrusted checkout, and that bind is also what makes
-`--without-connection-token` safe — a token would defend a port that does not exist, and sharing it
-with the host is the arrangement the tunnel replaced.
-
-The daemon reports the editor's lifecycle as `EditorState` (`STARTING` / `RUNNING` / `ENDED`), once
-per control-socket connect and once per transition, which is what the host gates its proxy and splash
-on. **A workspace whose image has no editor sends the frame never** — the absence is the capability
-announcement, so there is one signal rather than a flag and a state that can disagree, and a plain
-workspace behaves exactly as it did before an editor existed.
+`OpenStream.target` is a **name** (`API`, the only one since the web editor went), never a port. A
+port on the wire would hand a container-supplied integer straight to `connect()` — the same thing the
+refusal of a non-host-relative `path` exists to prevent, pointed at loopback instead of at the
+network — so the host names what it wants and the daemon alone knows where that is. Absent ⇒ `API`,
+and `API` is not encoded at all, so an ordinary stream is byte-identical to the frame that shipped
+before targets existed. A name the daemon has no listener for is refused and logged.
 
 | | |
 |---|---|
-| `GET /files`, `/files/content`, `/detection`, `/component-map` | the checkout |
-| `POST /fast-forward`, `/update-from-parent` | parent integration |
-| `GET·POST /commands`, `GET /commands/actions`, `GET /commands/{id}`, `GET /commands/{id}/log`, `POST /commands/{id}/terminate` | commands |
-| `POST /agents`, `GET /agents/available`, `GET /agent-sessions`, `GET·POST /agent-plugins`, `POST /prompt-refinements` | coding agents |
-| `GET /bootstrap-commands`, `POST /bootstrap-commands/run`, `POST /bootstrap-commands/{name}/run` | the bootstrap chain |
+| `GET·POST /agent-worktrees`, `GET·DELETE /agent-worktrees/{agentId}`, `POST …/{agentId}/yield`, `/turn`, `/entity`, `/blocked`, `GET …/{agentId}/cleanup-check` | agent worktrees |
+| `GET /agent-worktrees/{agentId}/files`, `…/files/content`, `…/detection`, `…/component-map` | one agent's files |
+| `GET /commands`, `GET /commands/{id}`, `GET /commands/{id}/log`, `POST /commands/{id}/terminate` | commands |
+| `POST /agents/sign-in`, `GET /agents/available`, `GET /agent-sessions`, `GET·POST /agent-plugins`, `POST /prompt-refinements` | coding agents |
 | `WS /terminal/commands/{id}`, `WS /chat/commands/{id}` | the interactive half |
 
-Every write on the bootstrap chain answers **202**, not 200. It is long-running — a bootstrap step
-is bounded only by `bootstrap-timeout-ms`, an hour by default — and already reports itself on the
-control socket, as the `BootstrapStep`/`BootstrapOutcome`/`Bootstrapped` sequence. Answering with a second, synchronous account of an outcome the caller is
-already subscribed to would be two sources of one truth.
+`POST /agent-worktrees` is idempotent: it makes the agent's worktrees where they are missing and
+starts its harness there unless it runs — resuming the session id it is handed when the session's
+files are still on the harness volume. Its `env` (the agent's credential) reaches the harness
+process and the agent's pushes, and is never written to disk. `DELETE` refuses while work would be
+lost (uncommitted, or commits no remote branch has) and answers the cleanup check; `force=true`
+removes anyway. Removed with the single checkout (qits-1152): the checkout-wide file routes, parent
+integration, `POST /agents` and the per-workspace turn/entity/blocked routes, declared actions
+(`POST /commands`, `/commands/actions`) and the bootstrap chain.
 
 No `{repoId}/{workspaceId}` prefix in any of those paths: this daemon serves exactly one workspace,
 so those segments would be a constant the caller has to get right. The response bodies carry both
 ids back.
 
-**The checkout's config is re-read on `SIGHUP`, not watched.** Actions, the bootstrap chain and the
-`frameworks:` hints come from `/workspace/.config/qits/repository.yml` (legacy
-`/workspace/.qits-config.yml`), read once after the self-clone. After editing it, run
+**The base clone's config is re-read on `SIGHUP`, not watched.** The `frameworks:` hints and the
+agent defaults come from `/workspace/base/.config/qits/repository.yml` (legacy
+`/workspace/base/.qits-config.yml`), read once after the base clone. The base clone's working tree
+is never moved, so this is the wrapper's config as of the clone. After editing it, run
 `kill -HUP 1`: docker-init/tini at PID 1 forwards the signal to the daemon, which runs as the same
 uid. (`pkill -x qits-workspace-daemon` matches nothing — the kernel truncates `comm` to 15
 characters.) A file that no longer parses keeps the last good config, and its warning shows up in
-the config view. A reload never re-runs the bootstrap chain; that is `POST /bootstrap-commands/run`.
+the config view.
 
 **The full contract is `docs/openapi.yml`**, hand-written — there is nothing annotation-shaped here
 to generate one from. It covers every route above, every field of every body, and both socket
@@ -142,7 +133,8 @@ The paths above are what the daemon *serves*; they are not the whole URL a calle
 proxies to this API and **forwards the caller's path untouched** — no hop rewrites anything — so the
 daemon is told where it is mounted instead, as `qits.workspace-daemon.api-base-path`
 (`QITS_WORKSPACE_DAEMON_API_BASE_PATH`, injected as `/workspaces/container/{workspaceId}/`). With a
-base configured, `GET /files` is served at `GET /workspaces/container/12/files` and *only* there.
+base configured, `GET /agent-worktrees` is served at `GET /workspaces/container/12/agent-worktrees`
+and *only* there.
 
 Told, never derived. The daemon matches no shape and strips no leading segment — the same property
 the control-socket url has, handed over whole and dialled verbatim. A hop that rewrote the path
@@ -165,21 +157,24 @@ owns the workspace row and the container lifecycle, so it proxies at
 socket the daemon already holds open. Nothing else may reach a daemon.
 
 That closes `migration-plan.md` §9 item 16 (no route, no token injected — so the server did not bind)
-and item 21's first half. The `bootstrap-commands` routes above came back here for the
-same reason: their host-side routes were deleted when the conventions landed, so the capability had
-stayed and only the addressability was missing.
+and item 21's first half.
 
 ## What the daemon does not keep
 
-**Nothing outlives the container.** There is no datasource, no Hibernate, no Panache, no Flyway. The
-command list, the command logs, the agent-session index and the transcript aggregates are all
-in-memory maps, and a container recreate starts them empty.
+**Nothing but the volumes outlives the container.** There is no datasource, no Hibernate, no
+Panache, no Flyway. The command list, the command logs, the agent-session index and the transcript
+aggregates are all in-memory maps, and a container recreate starts them empty. What survives is on
+disk: the base clone and every agent worktree on `/workspace`, each agent's `agent.json` (work item,
+wrapper branch, harness, session id — never its credential), and the harness's session files on
+`/claude-home`.
 
 This is the deliberate scope of moving commands and agents inside, and it costs:
 
 - the Commands list and its logs are **empty** for a workspace whose container was recreated;
-- resuming or forking an agent session from a previous container is **refused** — it fails closed,
-  because the store that would vouch for the session did not survive;
+- forking, or resuming any other session, from a previous container is **refused** — it fails
+  closed, because the store that would vouch for the session did not survive. The one exception is
+  an agent's own session: the host hands its id back with `POST /agent-worktrees`, and the agent
+  resumes it when its files are still there (qits-1152);
 - token and message-count aggregates are lost.
 
 Transcripts themselves are safe: the harness writes them under `/claude-home`, a volume shared
@@ -267,7 +262,7 @@ decided here — only made visible and overridable.
 ## Configuration
 
 Everything is `qits.workspace-daemon.*`, injected per container as `QITS_WORKSPACE_DAEMON_*`. The
-identity values (`workspace-id`, `repository-id`, `branch`, `parent`, `project-id`, `repo-name`) are
+identity values (`workspace-id`, `repository-id`, `project-id`, `repo-name`) are
 `Optional<String>` deliberately: SmallRye treats an empty default as "no value" and fails to resolve
 a plain `String` when the env is absent.
 
@@ -277,24 +272,18 @@ in particular: the hook webhook binds one and the agent launch renders it into e
 two independent reads that disagree would leave agents running fine and silently never reporting
 lineage or activity.
 
-`projects` is the estate a container carries beside — or instead of — its own checkout:
-`<projectId>/<repoName>` wrappers, comma- or whitespace-separated, each cloned to
-`/workspace/<repoName>` by the `Provisioner` as one more step of the same sequence that clones a
-single wrapper. The **shared editor container** is what gets a list, and that is the whole of the
-"one editor for the platform" change on this side: same git base, same `qits:agent` token, same
-forked `git`, one clone per project. A wrapper's repository name is the directory, because a project
-id is a uuid and a sidebar of uuids helps nobody. One project failing to clone is a `WARN` and the
-rest still land; the terminal event is emitted either way. A project added later arrives with the
-next container **recreate** — nothing polls. An ordinary workspace is handed no list and provisions
-exactly as before, and a container with no repository of its own skips the root clone only when it
-does have a list. The cost is deliberate and unfought: first-boot clone time and disk grow with the
-estate, and an agent's `grep` now crosses every project.
+The origin sync has three knobs: `base-sync.interval-ms` (default 60000) is how often the base
+clone and every submodule fetch all heads, besides the fetch a `PullBranch` hint asks for;
+`auto-push.poll-ms` (default 10000) is how often every agent branch is checked for commits to push,
+besides the push each harness hook nudges (coalesced over `auto-push.coalesce-ms`, 500);
+`auto-push-enabled` (default `true`) turns pushing off and leaves fetching on. A push that git
+rejects as a lock or connection problem is retried (`auto-push.max-attempts`,
+`auto-push.backoff-initial-ms`, `auto-push.backoff-max-ms`); a non-fast-forward is never forced.
 
-`editor-enabled` (default `false`) and `editor-port` (default `13339`) are the web editor's pair, and
-the default is the contract for every image without one: nothing spawned, nothing announced, and the
-tunnel's `EDITOR` target refused. The switch alone does not conjure a binary — supervision also
-requires `/opt/openvscode-server/bin/openvscode-server` to be there — so an image that sets it and
-does not carry the editor is silent on the wire and says so in the container log.
+Removed with qits-1152, because a workspace no longer has a branch, an editor or a bootstrap chain:
+`branch`, `parent`, `entity-id`, `entity-blocked`, `entity-title`, `entity-status` (each agent's
+facts arrive in its start), `projects`, `editor-enabled`, `editor-port`, `bootstrap-autorun`,
+`bootstrap-timeout-ms`, `git-status.coalesce-ms` and `git-status.max-wait-ms`.
 
 ## The image
 

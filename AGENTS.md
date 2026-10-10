@@ -294,14 +294,10 @@ with no runtime dependency on the store.
 
 ## The surface, and the sign-in door
 
-A launch body carries `surface` — where in the product the session was started from. **This is the
-daemon where it earns its keep**: `epic.chat`, `epic.agent`, `workspace.chat` and `workspace.agent`
-send byte-identical requests today, so nothing downstream could tell one from another. It is
-**required**: a missing surface is a 400 from the library and an unknown one a 400 from
-`AgentSurface.of`, so the answer says which mistake was made. (It used to be guessed from the
-request's shape when missing — a dated crutch so frontends could ship after the daemon; that guess
-is gone, and it had to be, because it collapsed `epic.chat` onto `workspace.chat`.) It comes back on
-the command as `agentSurface`, which is what lets a caller stop matching a display string.
+A start body (`POST /agent-worktrees`) may carry `surface` — where in the product the session was
+started from. Absent means `ticket.dispatch`, the surface every dispatched agent runs on; an unknown
+one is a 400 from `AgentSurface.of`, never a silent default. It comes back on the command as
+`agentSurface`, which is what lets a caller stop matching a display string.
 
 Beside it comes `agentLaunchRecord` — **what the session actually ran with**: surface, harness,
 model, effort, permission mode, remote control, activity tracking, the platform MCP servers it
@@ -312,8 +308,8 @@ sign-in terminal, and any session launched before the record existed. **No crede
 it**: external servers are recorded by key, never by url or header value, and the rendered command
 line beside it is stored already redacted.
 
-An unauthenticated harness used to make `POST /agents` silently answer a login terminal instead of
-the session asked for. The library removed that substitution, so two things live here:
+An unauthenticated harness used to make a launch silently answer a login terminal instead of the
+session asked for. The library removed that substitution, so two things live here:
 
 - **`POST /agents/sign-in`** — the login terminal as a deliberate door, answering the ordinary
   `{command: …}` envelope. Without it the terminal would be unreachable and an unauthenticated
@@ -322,6 +318,29 @@ the session asked for. The library removed that substitution, so two things live
   The `error` key is the contract and the sentence is **not**: matching prose is the same mistake as
   the `" (tickets desk)"` string match this epic exists to delete. Falling into the generic 500 arm
   would show "Internal error" for a state one click fixes.
+
+## Agent worktrees (qits-1152)
+
+A workspace no longer has one checkout. `Provisioner` makes a **base clone** of the wrapper at
+`/workspace/base` (all submodules), and nobody works in it. Each agent gets an **agent worktree**
+from it (`AgentWorktrees`): the wrapper at `/workspace/agents/<agentId>/<repoName>` on the agent's
+wrapper branch, and each submodule a detached worktree at its own `origin/main`. Objects are shared;
+nothing is cloned twice. `OriginSync` fetches every head into the base clone (timer, plus a
+`PullBranch` hint) and pushes every agent branch that has commits no remote has, with that agent's
+credential, reporting each push as `AgentBranchPushed`. `CommitGuard` installs a `pre-commit` hook
+in each repository's common git dir that refuses commits on the default branch or a detached HEAD.
+
+`AgentRuntime` holds the agents: one launch service each (its own entity name, its own context),
+one shared commands layer. Several agents can run at once; whether only one does is the host's
+decision. Yield stops the harness; a turn or a start resumes it with the stored session id when the
+session's files are on the harness volume (`/claude-home`, shared and persistent). The library's
+`ownsSession` check would refuse a session the container has not seen; `AgentScopedCommands`
+vouches for the session the host handed back, which is what makes a resume after a restart work.
+
+The tests for this run real git: `GitFixtures` builds a wrapper and a submodule with bare origins and
+a base clone, and `AgentsApiTest` puts a fake `claude` on the login shell's `PATH` (through
+`~/.bash_profile` on the temporary credential volume) to prove where the harness runs, with which
+credential, and that it resumes.
 
 ## Things that look wrong and are not
 
@@ -339,12 +358,16 @@ that wrote it runs from an untrusted checkout.
 **`KimiCodeAgent.start()` does not `exec`.** The symlink-farm prelude installs an `EXIT` trap to clean
 up its temp home; `exec` would replace the shell and the trap would never fire.
 
-**The web editor runs `--without-connection-token`.** It looks like the auth was left off. The token
-would be defending `127.0.0.1:13339`, a port no peer container can reach — the same bind, and the
-same reasoning, as `WorkspaceApi`'s — and to be of any use it would have to be handed to the host,
-which is the shared-secret arrangement `DaemonStreamTunnel` exists to have replaced. The boundary is
-the bind and the tunnel's nonce; a token here would be a second copy of a secret and no second
-boundary. `EditorSupervisor`'s javadoc has it in full.
+**A `cd` in front of every harness script.** `AgentScopedCommands` prefixes it, because the
+commands layer runs every command from one root (`/workspace`) and the harness library takes no
+working directory. That `cd` is what puts each agent's harness — and so its Claude session files,
+keyed by the working directory — in its own worktree, without a library change.
+
+**`env` from the start body is never written down.** It is the agent's credential: it reaches the
+harness process and the pushes `OriginSync` makes for that agent, and nothing else. `agent.json`
+beside the worktree holds everything about the agent but it. After a restart the daemon therefore
+does not know it, and an agent's branches wait until the host starts the agent again rather than
+being pushed as the workspace.
 
 **`Json.parse` never throws.** That is what lets the ported transcript readers drop their try/catch —
 a truncated tail line or a stray write in a JSONL file just reads as absent. See the class javadoc for
