@@ -1,6 +1,5 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.commands.ActionResolver;
 import eu.wohlben.qits.commands.AgentSessionRef;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandLogLine;
@@ -132,24 +131,6 @@ final class CommandJson {
     putIfPresent(body, "forkedFromSessionId", session.forkedFromSessionId());
     putIfPresent(body, "transcriptPath", session.transcriptPath());
     return body;
-  }
-
-  /**
-   * {@code GET /commands/actions} — what this checkout declares, and therefore what {@code POST
-   * /commands} will accept. New: the host had no equivalent, because actions lived in its own
-   * featureflow tables and it already knew them. Now they come from the checkout's
-   * {@code .qits-config.yml}, which only the daemon reads.
-   */
-  static JsonObject actions(List<ActionResolver.ResolvedAction> actions) {
-    JsonArray entries = new JsonArray();
-    for (ActionResolver.ResolvedAction action : actions) {
-      entries.add(
-          new JsonObject()
-              .put("id", action.id())
-              .put("name", action.name())
-              .put("interactive", action.interactive()));
-    }
-    return new JsonObject().put("actions", entries);
   }
 
   /**

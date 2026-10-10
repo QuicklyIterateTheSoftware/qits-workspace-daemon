@@ -9,6 +9,7 @@ import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentTranscriptService;
 import eu.wohlben.qits.agents.AgentTranscriptTailService;
 import eu.wohlben.qits.agents.CommandsAgentCommands;
+import eu.wohlben.qits.agents.EntityFacts;
 import eu.wohlben.qits.agents.HarnessCapabilities;
 import eu.wohlben.qits.agents.HarnessCapabilityService;
 import eu.wohlben.qits.agents.LocalProcessExecutor;
@@ -19,9 +20,10 @@ import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.commands.ActionResolver;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
-import eu.wohlben.qits.workspacedaemon.protocol.Bootstrapped;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentBranchPushed;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
@@ -29,14 +31,12 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol;
 import eu.wohlben.qits.workspacedaemon.protocol.Describe;
 import eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig;
-import eu.wohlben.qits.workspacedaemon.protocol.GitStatus;
 import eu.wohlben.qits.workspacedaemon.protocol.Heartbeat;
 import eu.wohlben.qits.workspacedaemon.protocol.Hello;
 import eu.wohlben.qits.workspacedaemon.protocol.OpenStream;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
-import eu.wohlben.qits.workspacedaemon.protocol.RunBootstrap;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import io.vertx.core.Context;
@@ -91,11 +91,9 @@ public class ControlSocket {
   @Inject Vertx vertx;
 
   /**
-   * The network-reachable read API over the checkout (file listing, file content, detection,
-   * component map) — the transport for the two capability modules that moved off the host. Injected
-   * rather than constructed because, unlike {@link HookWebhook}, it carries its own config knobs;
-   * started from {@link #startGitStatusMonitor} once the checkout exists and the monitor's marker
-   * is available to key its caches on.
+   * The HTTP API: agent worktrees, their files, commands and the agent surface. Injected rather
+   * than constructed because, unlike {@link HookWebhook}, it carries its own config knobs; started
+   * from {@link #startWorkspace} once the base clone exists.
    */
   @Inject WorkspaceApi workspaceApi;
 
@@ -151,38 +149,6 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.repository-id")
   Optional<String> repositoryIdConfig;
 
-  @ConfigProperty(name = "qits.workspace-daemon.branch")
-  Optional<String> branchConfig;
-
-  // The qualified ticket/epic id (<project-slug>-<number>) this container was created for, injected
-  // by the host only when it is known — qits-workspaces for a workspace container, qits-projects for
-  // a refinement one. Absent for an ad-hoc workspace, the editor, or a container older than this.
-  // See DaemonAgentDefaults.entityId for why this is not folded into ambientFacts.
-  @ConfigProperty(name = "qits.workspace-daemon.entity-id")
-  Optional<String> entityIdConfig;
-
-  // Whether the entity above was BLOCKED when this container booted — the seed for
-  // AgentLaunchService's blocked flag, which POST /agents/entity (or the older /agents/blocked)
-  // moves from then on. A primitive
-  // boolean, unlike the identity values above: the SmallRye "empty default is no value" trap is a
-  // String problem, and absent here is an ordinary, meaningful false (not-blocked), not a value to
-  // distinguish from "unset".
-  @ConfigProperty(name = "qits.workspace-daemon.entity-blocked", defaultValue = "false")
-  boolean entityBlocked;
-
-  // The entity's title and status word when this container booted — the rest of the session name
-  // `[❗]<status square> <id> <title>`, seeded here and moved from then on by POST /agents/entity.
-  // Optional<String> for the same SmallRye reason as the identity values; absent for a container
-  // whose host does not inject them yet, which renders the id alone. See DaemonAgentDefaults.
-  @ConfigProperty(name = "qits.workspace-daemon.entity-title")
-  Optional<String> entityTitleConfig;
-
-  @ConfigProperty(name = "qits.workspace-daemon.entity-status")
-  Optional<String> entityStatusConfig;
-
-  @ConfigProperty(name = "qits.workspace-daemon.parent")
-  Optional<String> parentConfig;
-
   // The project-scoped address the daemon self-clones from (<gitBase>/<projectId>/<repoName>), so
   // committed relative submodule urls resolve against the project's siblings
   // (docs/epics/qits-workspace-daemon/ Part 1). BOTH halves are needed: either one blank ⇒ the
@@ -192,17 +158,6 @@ public class ControlSocket {
 
   @ConfigProperty(name = "qits.workspace-daemon.repo-name")
   Optional<String> repoNameConfig;
-
-  // The estate this container carries beside (or instead of) its own checkout:
-  // `<projectId>/<repoName>`
-  // wrappers, comma- or whitespace-separated, each cloned into its own directory under /workspace
-  // by
-  // the Provisioner. The shared editor container is what gets a list; every ordinary workspace is
-  // handed none and provisions exactly as before. Same two halves as project-id/repo-name above,
-  // same
-  // git base, same injected qits:agent token — the clone coordinates widened, not a new surface.
-  @ConfigProperty(name = "qits.workspace-daemon.projects")
-  Optional<String> projectsConfig;
 
   // The git host the self-clone reads from: qits-githost, serving /git/<projectId>/<repoName>.
   // Unset ⇒ the Provisioner refuses to clone and says so, because the git host's address is not
@@ -222,11 +177,6 @@ public class ControlSocket {
 
   private String workspaceId = "";
   private String repositoryId = "";
-  private String branch = "";
-  private String entityId = "";
-  private String entityTitle = "";
-  private String entityStatus = "";
-  private String parent = "";
   private String projectId = "";
   private String repoName = "";
 
@@ -235,25 +185,6 @@ public class ControlSocket {
 
   @ConfigProperty(name = "qits.workspace-daemon.reconnect-max-backoff-ms", defaultValue = "30000")
   long maxBackoffMs;
-
-  // Trailing-debounce quiet period: the tree must fall silent this long before one marker check +
-  // at-most-one GitStatus report. Short (1.5s) so the dirty→clean badge flips promptly after a
-  // commit. It can be short because the monitor runs `git status`/`git diff` with
-  // --no-optional-locks (GitStatusMonitor.settleFromGit), so the recompute never takes
-  // .git/index.lock and can't race a commit for it — the 20s window that once had to swallow the
-  // whole commit burst is no longer needed (see resolved 2026-07-25 index.lock-contention issue).
-  // Each inotify event re-arms the timer, so the window now just coalesces a commit's write burst
-  // into one non-flickering settle.
-  @ConfigProperty(name = "qits.workspace-daemon.git-status.coalesce-ms", defaultValue = "1500")
-  long gitStatusCoalesceMs;
-
-  // Upper bound on the debounce above: under sustained churn the resetting timer would never fire,
-  // so force a settle at most this long after a burst's first event. Far longer than any commit
-  // burst, so it keeps the badge alive without reintroducing the index.lock contention. <=0
-  // disables
-  // the ceiling (pure trailing debounce).
-  @ConfigProperty(name = "qits.workspace-daemon.git-status.max-wait-ms", defaultValue = "120000")
-  long gitStatusMaxWaitMs;
 
   // Loopback port the in-container coding-agent lifecycle hooks POST to (the daemon's only inbound
   // listener; see HookWebhook). Must match the port AgentLaunchService renders into the hook curl —
@@ -275,24 +206,6 @@ public class ControlSocket {
       defaultValue = "25m")
   Duration backgroundShellGrace;
 
-  // The web editor (openvscode-server), off unless the image carries one AND the host says so.
-  // Injected as QITS_WORKSPACE_DAEMON_EDITOR_ENABLED / _PORT like every other daemon knob, and
-  // read here because EditorSupervisor — framework-free, like every capability class — cannot read
-  // configuration itself. Default false: a plain workspace image has no editor to supervise and
-  // must behave exactly as it did before one existed.
-  @ConfigProperty(name = "qits.workspace-daemon.editor-enabled", defaultValue = "false")
-  boolean editorEnabled;
-
-  // Loopback like the API and the hook sink, and for the API's reason: an editor on qits-net is an
-  // unauthenticated shell over someone else's untrusted checkout. Own port so the two surfaces stay
-  // separable at the tunnel's target allow-list.
-  @ConfigProperty(name = "qits.workspace-daemon.editor-port", defaultValue = "13339")
-  int editorPort;
-
-  // Auto-push kill switch (host's qits.workspace.auto-push.enabled, injected as
-  // QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED). When false the daemon never pushes committed work on
-  // its own; incoming pulls (host-triggered) are unaffected
-  // (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
   /**
    * Where the shared agent-credential volume is mounted in this container. Read here and nowhere
    * else: the launch service overlays it as the agent's HOME and the transcript service resolves
@@ -301,7 +214,7 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace.claude-mount", defaultValue = "/claude-home")
   String claudeMount;
 
-  /** The harness a launch uses when neither the request nor the checkout's config names one. */
+  /** The harness a launch uses when neither the request nor the base clone's config names one. */
   @ConfigProperty(name = "qits.agent.default-type")
   Optional<String> agentDefaultType;
 
@@ -384,13 +297,26 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.platform-mcp.url")
   Optional<String> platformMcpUrl;
 
+  // Auto-push kill switch (host's qits.workspace.auto-push.enabled, injected as
+  // QITS_WORKSPACE_DAEMON_AUTO_PUSH_ENABLED). When false the daemon never pushes an agent's branch;
+  // the base clone's fetch is unaffected.
   @ConfigProperty(name = "qits.workspace-daemon.auto-push-enabled", defaultValue = "true")
   boolean autoPushEnabled;
 
-  // How long a burst of working-tree reports is coalesced before one push cycle (a rapid
-  // commit+edit shouldn't push twice).
+  // How long a burst of harness hooks is coalesced before one push cycle (a turn's last hooks
+  // should push once, not once each).
   @ConfigProperty(name = "qits.workspace-daemon.auto-push.coalesce-ms", defaultValue = "500")
   long autoPushCoalesceMs;
+
+  // The push cycle's poll: how often every agent branch is checked for commits to push, besides the
+  // nudge each harness hook gives. One `git worktree list` per repository finds every agent at once.
+  @ConfigProperty(name = "qits.workspace-daemon.auto-push.poll-ms", defaultValue = "10000")
+  long autoPushPollMs;
+
+  // How often the base clone and its submodules fetch every branch head from the git host (D8),
+  // besides the fetch each PullBranch hint asks for. <= 0 fetches on a hint only.
+  @ConfigProperty(name = "qits.workspace-daemon.base-sync.interval-ms", defaultValue = "60000")
+  long baseSyncIntervalMs;
 
   // Push-conflict retry bounds: a push rejected by origin's ref lock (a concurrent host push) is
   // retried up to max-attempts with exponential backoff between backoff-initial and backoff-max.
@@ -402,17 +328,6 @@ public class ControlSocket {
 
   @ConfigProperty(name = "qits.workspace-daemon.auto-push.backoff-max-ms", defaultValue = "5000")
   long autoPushBackoffMaxMs;
-
-  // The provision-time bootstrap kill switch (host's qits.bootstrap.autorun-enabled, injected as
-  // QITS_WORKSPACE_DAEMON_BOOTSTRAP_AUTORUN). When false the daemon skips the chain and reports a
-  // benign Bootstrapped{ok:true} so the host's await still completes; manual re-run stays
-  // available (docs/epics/qits-workspace-daemon/ Part 3).
-  @ConfigProperty(name = "qits.workspace-daemon.bootstrap-autorun", defaultValue = "true")
-  boolean bootstrapAutorun;
-
-  // Per-step (check/execute) timeout; a step that overruns it is terminated and reported FAILED.
-  @ConfigProperty(name = "qits.workspace-daemon.bootstrap-timeout-ms", defaultValue = "3600000")
-  long bootstrapTimeoutMs;
 
   /** Off-event-loop pool for blocking process/git work; one thread per in-flight request. */
   private final ExecutorService workers =
@@ -430,14 +345,6 @@ public class ControlSocket {
   private volatile Context socketContext;
 
   /**
-   * Watches {@code /workspace} and reports working-tree cleanliness ({@link
-   * eu.wohlben.qits.workspacedaemon.protocol.GitStatus}) — the in-daemon successor to the host's
-   * {@code WorkspaceWatchService}. Created once the checkout is provisioned; re-reports on
-   * reconnect.
-   */
-  private volatile GitStatusMonitor gitStatus;
-
-  /**
    * The loopback HTTP listener the in-container coding agent's lifecycle hooks POST to; relays
    * {@link eu.wohlben.qits.workspacedaemon.protocol.AgentActivity} home. Started unconditionally in
    * {@link #start()} (not gated on provisioning — a hook can fire in a reconnect-adopted container,
@@ -447,12 +354,12 @@ public class ControlSocket {
   private volatile HookWebhook hooks;
 
   /**
-   * The launch service {@link #wireAgents} built, or null before it ran (or when the agent surface
-   * stayed unwired). {@link HookWebhook} is started before it exists, so the webhook is handed a
-   * listener that reads this field rather than the service itself — a hook that fires first is
-   * simply not forwarded, which {@code AgentLaunchService.onActivity} would ignore anyway.
+   * The agents this workspace hosts, or null before {@link #wireAgents} ran (or when the agent
+   * surface stayed unwired). {@link HookWebhook} is started before it exists, so the webhook is
+   * handed listeners that read this field — a hook that fires first is sent untagged and not
+   * forwarded, which no agent would have acted on anyway.
    */
-  private volatile AgentLaunchService agentLaunch;
+  private volatile AgentRuntime agents;
 
   /**
    * The reverse tunnel {@link WorkspaceApi} is reached through, now that it binds loopback and has
@@ -461,17 +368,8 @@ public class ControlSocket {
   private volatile DaemonStreamTunnel tunnel;
 
   /**
-   * The workspace's web editor, when the image carries one and the switch is on — otherwise null,
-   * and then nothing about this daemon changes: no frame is sent and the tunnel refuses the {@code
-   * EDITOR} target. Re-reports on reconnect like every other in-daemon reporter.
-   */
-  private volatile EditorSupervisor editor;
-
-  /**
-   * Keeps the checkout and its origin ref in sync both ways: auto-pushes committed work as the
-   * {@link GitStatusMonitor} observes it, and applies host-triggered incoming {@link PullBranch}
-   * pulls (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md).
-   * Created alongside the monitor once the checkout is provisioned.
+   * Fetches the base clone and pushes agents' branches ({@link OriginSync}); created once the base
+   * clone is provisioned.
    */
   private volatile OriginSync originSync;
 
@@ -481,19 +379,6 @@ public class ControlSocket {
    */
   private volatile CommandRegistry commands;
 
-  /** Timeout (seconds) for a single auto-push/incoming-pull git invocation. */
-  private static final long GIT_SYNC_TIMEOUT_SECONDS = 300;
-
-  /**
-   * The live sync for this workspace, or null before the checkout is provisioned. Exposed for
-   * {@link WorkspaceApi}'s parent-integration routes, which need the same serialized git access the
-   * auto-pusher uses — a fast-forward that raced a push would be exactly the interleaving {@link
-   * OriginSync} exists to prevent. Null means "not ready yet", which the API answers as 503.
-   */
-  OriginSync originSync() {
-    return originSync;
-  }
-
   /**
    * Ensures the autonomous self-provision (clone on boot) runs at most once per daemon lifetime.
    */
@@ -501,20 +386,21 @@ public class ControlSocket {
       new java.util.concurrent.atomic.AtomicBoolean();
 
   /**
-   * The checkout's parsed config ({@code .config/qits/repository.yml}, legacy {@code
-   * .qits-config.yml}), read in-container right after the self-clone and re-read on {@code SIGHUP}
-   * ({@code kill -HUP 1} — docker-init/tini at PID 1 forwards it here); see {@link #reloadConfig}.
-   * Every consumer — {@link DescribeConfig} replies, action resolution, the bootstrap chain, the
-   * frameworks hint, agent defaults — reads it through a supplier, so a reload reaches all of them.
+   * The base clone's parsed config ({@code .config/qits/repository.yml}, legacy {@code
+   * .qits-config.yml}), read right after the base clone and re-read on {@code SIGHUP} ({@code kill
+   * -HUP 1} — docker-init/tini at PID 1 forwards it here); see {@link #reloadConfig}. Every consumer
+   * — {@link DescribeConfig} replies, the frameworks hint, agent defaults — reads it through a
+   * supplier, so a reload reaches all of them.
    * Starts as the empty config so a describe that races ahead of provisioning gets a benign empty
    * answer rather than null.
    */
   private final ConfigHolder configState = ConfigHolder.forCheckout();
 
-  /**
-   * Where the daemon runs the self-clone, config read, and bootstrap chain (image {@code WORKDIR}).
-   */
+  /** The workspace volume (image {@code WORKDIR}): the commands layer's root. */
   private static final java.io.File WORKSPACE_DIR = new java.io.File("/workspace");
+
+  /** Where agent worktrees live, one directory per agent (qits-1152). */
+  private static final java.nio.file.Path AGENTS_DIR = WORKSPACE_DIR.toPath().resolve("agents");
 
   /**
    * Frames emitted before the socket first connects (the boot self-clone can begin, and finish,
@@ -543,11 +429,6 @@ public class ControlSocket {
   public void start() {
     workspaceId = workspaceIdConfig.orElse("");
     repositoryId = repositoryIdConfig.orElse("");
-    branch = branchConfig.orElse("");
-    entityId = entityIdConfig.orElse("");
-    entityTitle = entityTitleConfig.orElse("");
-    entityStatus = entityStatusConfig.orElse("");
-    parent = parentConfig.orElse("");
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
     // THE AGENT CONFIGURATION DOCUMENT, BEFORE ANYTHING ELSE STARTS. The host hands it over as
@@ -580,16 +461,6 @@ public class ControlSocket {
               + " alive, docker exec paths unaffected).");
       return;
     }
-    // Wired here rather than beside the file/detection wiring in startGitStatusMonitor, because it
-    // needs no provisioned checkout to answer: the bootstrap chain is read from the config the
-    // ConfigReader already holds. WorkspaceApi does not bind until start() runs anyway, so an early
-    // wire only means the routes are ready the moment it does.
-    workspaceApi.wireBootstrap(
-        workspaceId,
-        () -> configState.config().bootstrap(),
-        WORKSPACE_DIR,
-        bootstrapTimeoutMs,
-        this::send);
     // Autonomous self-provision: clone /workspace + materialize submodules from env, on boot, off
     // the
     // event loop — independent of whether the socket is up yet (its results buffer until it is).
@@ -603,30 +474,12 @@ public class ControlSocket {
     // up.
     hooks =
         new HookWebhook(
-            vertx, hooksPort, this::send, this::forwardActivity, backgroundShellGrace);
+            vertx, hooksPort, this::sendTagged, this::forwardActivity, backgroundShellGrace);
     hooks.start();
-    // The web editor, on the same footing: independent of provisioning (it is a process, not a view
-    // of the checkout) and silent when there is nothing to supervise. start() answering false is
-    // what keeps a plain workspace unchanged — no EditorState is ever sent, and the tunnel below is
-    // handed no editor port, so the EDITOR target is refused rather than dialled into nothing.
-    EditorSupervisor supervisor =
-        new EditorSupervisor(
-            EditorSupervisor.DEFAULT_INSTALL_DIR,
-            WORKSPACE_DIR,
-            editorPort,
-            editorEnabled,
-            this::send);
-    editor = supervisor.start() ? supervisor : null;
     // The reverse tunnel qits reaches WorkspaceApi through. Independent of provisioning for the
     // same reason the hook webhook is: it only needs the url and the port, and a stream requested
     // before the API is up simply fails to connect to loopback and answers nothing.
-    tunnel =
-        new DaemonStreamTunnel(
-            vertx,
-            url.get(),
-            bearer(),
-            workspaceApi.apiPort(),
-            editor == null ? 0 : editor.port());
+    tunnel = new DaemonStreamTunnel(vertx, url.get(), bearer(), workspaceApi.apiPort());
     tunnel.start();
     client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
@@ -636,9 +489,9 @@ public class ControlSocket {
   }
 
   /**
-   * Re-read the checkout's config on {@code SIGHUP}, so an agent's edit to {@code
-   * .config/qits/repository.yml} reaches actions, frameworks and the config view without a
-   * container restart. The handler only hands off to the worker pool: a signal-dispatch thread is
+   * Re-read the base clone's config on {@code SIGHUP}, so an edit to its {@code
+   * .config/qits/repository.yml} reaches the frameworks hint, the agent defaults and the config view
+   * without a container restart. The handler only hands off to the worker pool: a signal-dispatch thread is
    * no place for file IO and YAML parsing.
    *
    * <p>Native image needs nothing extra for this. {@code sun.misc.Signal.handle} with a Java
@@ -663,104 +516,86 @@ public class ControlSocket {
           });
     } catch (IllegalArgumentException e) {
       LOG.warnf(
-          "Could not install the SIGHUP handler (%s); checkout config edits need a container"
+          "Could not install the SIGHUP handler (%s); config edits need a container"
               + " restart",
           e.getMessage());
     }
   }
 
   /**
-   * Re-read the checkout's config and swap it in; a broken file keeps the last good config and only
-   * replaces the warning. Never runs the bootstrap chain — that stays a fresh-clone boot step (see
-   * {@link ConfigHolder}).
+   * Re-read the base clone's config and swap it in; a broken file keeps the last good config and
+   * only replaces the warning.
    */
   void reloadConfig() {
     configState.reload();
   }
 
-  /** Kick off the boot self-clone on the worker pool, at most once. */
+  /** Kick off the base clone on the worker pool, at most once. */
   private void startProvisioning() {
     if (provisionStarted.compareAndSet(false, true)) {
       Provisioner.Env env =
           new Provisioner.Env(
-              workspaceId,
-              repositoryId,
-              branch,
-              projectId,
-              repoName,
-              gitBaseUrlConfig.orElse(""),
-              projectsConfig.orElse(""));
+              workspaceId, repositoryId, projectId, repoName, gitBaseUrlConfig.orElse(""));
       workers.execute(
           () -> {
-            // A fresh clone (vs. a reconnect into an already-provisioned container) is the trigger
-            // for the one-shot bootstrap chain — captured before the clone materializes /workspace.
-            boolean freshClone = !new java.io.File(WORKSPACE_DIR, ".git").exists();
             boolean provisioned = Provisioner.provision(env, this::send);
-            // Clone → config-read: the next step of the daemon's own startup sequence. Read the
-            // checkout's config even if the clone failed (absent file ⇒ empty), so a DescribeConfig
-            // always has an answer. Part 3 runs the bootstrap chain from this same held state. The
-            // same holder SIGHUP reloads, so boot is simply the first read (no last good to keep).
+            // Clone → config read: read the base clone's config even if the clone failed (absent
+            // file ⇒ empty), so a DescribeConfig always has an answer. The same holder SIGHUP
+            // reloads, so boot is simply the first read.
             configState.reload();
-            runBootstrapOnBoot(freshClone, provisioned);
-            startGitStatusMonitor(provisioned);
+            if (provisioned) {
+              startWorkspace();
+            }
           });
     }
   }
 
   /**
-   * Start the working-tree watcher once the checkout exists (both a fresh clone and a reconnect
-   * into an already-provisioned container). Its {@link GitStatusMonitor#start()} emits the boot
-   * report and begins watching. A failed provision means the host is tearing the workspace down, so
-   * there is no tree to watch.
+   * Bring the workspace up over its base clone: the agent worktrees, the origin sync, the API, and
+   * the commands and agents surfaces. A failed provision means the host is tearing the workspace
+   * down, so this runs only after a {@code Provisioned}.
    */
-  private void startGitStatusMonitor(boolean provisioned) {
-    if (!provisioned) {
-      return;
-    }
+  private void startWorkspace() {
+    AgentWorktrees worktrees =
+        new AgentWorktrees(Provisioner.BASE_DIR.toPath(), AGENTS_DIR, wrapperName());
+    worktrees.installGuards();
     OriginSync sync =
         new OriginSync(
-            workspaceId,
-            branch,
-            GitRunner.forking(WORKSPACE_DIR, GIT_SYNC_TIMEOUT_SECONDS),
+            worktrees,
+            agentId -> {
+              AgentRuntime runtime = agents;
+              return runtime == null ? Optional.empty() : runtime.environment(agentId);
+            },
+            this::send,
             autoPushEnabled,
+            baseSyncIntervalMs,
+            autoPushPollMs,
             autoPushCoalesceMs,
             autoPushMaxAttempts,
             autoPushBackoffInitialMs,
             autoPushBackoffMaxMs);
     originSync = sync;
-    // Every GitStatus the monitor emits means its working-tree marker moved — which includes every
-    // commit — so nudge the auto-pusher off the same signal. It cheaply no-ops when the branch has
-    // nothing unpushed (a content-only edit), and pushes right away when a commit ran.
-    GitStatusMonitor monitor =
-        new GitStatusMonitor(
-            workspaceId,
-            repositoryId,
-            branch,
-            parent,
-            message -> {
-              send(message);
-              if (message instanceof GitStatus) {
-                sync.onWorkingTreeSettled();
-              }
-            },
-            gitStatusCoalesceMs,
-            gitStatusMaxWaitMs);
-    gitStatus = monitor;
-    monitor.start();
-    // The read API goes up last in this sequence, and only here: every one of its endpoints runs
-    // `git ls-files` over the checkout, so binding it before the clone landed would publish a port
-    // that answers nothing but 500s. `monitor.start()` above has already settled the first marker,
-    // so its caches key on a real value from the first request. The frameworks supplier reads the
-    // held `configState`, so an agent's edit to the checkout's own `frameworks:` block is picked
-    // up once the config is reloaded on SIGHUP (`kill -HUP 1`; tini at PID 1 forwards it).
+    sync.start();
+    // The API goes up only now: its file routes read agent worktrees, which are made from the base
+    // clone. The frameworks supplier reads the held configState, so a SIGHUP reload reaches it.
     workspaceApi.start(
-        WORKSPACE_DIR.toPath(),
+        worktrees,
         () ->
             configState.config().frameworks().stream()
                 .map(f -> new DeclaredFramework(f.kind(), f.root()))
-                .toList(),
-        monitor::marker);
-    wireCommands(monitor);
+                .toList());
+    wireCommands(worktrees);
+  }
+
+  /**
+   * The wrapper's name: its directory under each agent, and the {@code repository} reported for it.
+   * The project-scoped name when the container was given one, else the repository id.
+   */
+  private String wrapperName() {
+    if (repoName != null && !repoName.isBlank() && AgentWorktrees.validAgentId(repoName)) {
+      return repoName;
+    }
+    return repositoryId == null || repositoryId.isBlank() ? "wrapper" : repositoryId;
   }
 
   /**
@@ -768,23 +603,21 @@ public class ControlSocket {
    *
    * <p>The module is framework-free by design — no CDI, like {@code workspace-daemon-files} and
    * {@code workspace-daemon-detection} — so its objects are constructed here rather than injected.
-   * That is also why the wiring is explicit about the two seams: {@link DaemonWorkspaceContext}
-   * answers the identity questions the host used to resolve with a database read and a {@code
-   * docker exec}, and {@link ConfigActionResolver} answers action lookup from the checkout's own
-   * config instead of the host's featureflow tables.
+   * One store, one registry and one command service serve every agent: a command id is unique
+   * across them, so the command routes and sockets need no agent in their path. The registry's root
+   * is the workspace volume; each agent's harness runs in its own worktree ({@link
+   * AgentScopedCommands}).
    *
-   * <p>The branch and commit are read through the monitor rather than captured, so a command
-   * launched after an agent switches branch records what was actually checked out.
+   * <p>No declared actions: the checkout's {@code actions} went with the Actions tab (qits-1152).
    *
    * <p>{@code commandsChanged} rides the control socket as a {@link WorkspaceChanged} frame, the
-   * generic nudge added at {@code CAPABILITY_VERSION} 3. Before it existed this listener was wired
-   * to null and the browser refetched the Commands list on its own cadence; the transcript sweep
-   * uses the same callback, so a finished agent session's conversation appears when it lands rather
-   * than at the next poll.
+   * generic nudge added at {@code CAPABILITY_VERSION} 3; the transcript sweep uses the same
+   * callback, so a finished agent session's conversation appears when it lands rather than at the
+   * next poll.
    */
-  private void wireCommands(GitStatusMonitor monitor) {
+  private void wireCommands(AgentWorktrees worktrees) {
     DaemonWorkspaceContext context =
-        new DaemonWorkspaceContext(repositoryId, workspaceId, () -> branch, monitor::head);
+        new DaemonWorkspaceContext(repositoryId, workspaceId, () -> "", () -> "");
     CommandStore store = new CommandStore();
     CommandLogService logs = new CommandLogService(store, null);
     AgentKillWatch kills =
@@ -799,17 +632,25 @@ public class ControlSocket {
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
     commands = commandRegistry;
     CommandService commandService =
-        new CommandService(
-            store,
-            commandRegistry,
-            lifecycle,
-            logs,
-            context,
-            new ConfigActionResolver(() -> configState.config()));
+        new CommandService(store, commandRegistry, lifecycle, logs, context, NO_ACTIONS);
     workspaceApi.wireCommands(commandService, commandRegistry, context);
     LOG.infof("workspace-daemon commands API wired for workspace %s", workspaceId);
-    wireAgents(store, logs, commandService, commandRegistry, context);
+    wireAgents(worktrees, store, logs, commandService, commandRegistry, context);
   }
+
+  /** The checkout declares no actions any more; the commands layer still asks. */
+  private static final ActionResolver NO_ACTIONS =
+      new ActionResolver() {
+        @Override
+        public Optional<ResolvedAction> resolve(String actionId) {
+          return Optional.empty();
+        }
+
+        @Override
+        public List<ResolvedAction> actions() {
+          return List.of();
+        }
+      };
 
   /**
    * Assemble {@code qits-coding-agents} on top of the commands wiring and hand it to {@link
@@ -817,35 +658,27 @@ public class ControlSocket {
    * framework-free and cannot read configuration itself, which is why every setting it needs is a
    * {@code @ConfigProperty} on this class and arrives as a constructor argument.
    *
+   * <p>Each agent gets its own {@link AgentLaunchService}, built by the factory below: its own
+   * entity facts (so its own session name), its own checkout context (its wrapper branch and HEAD)
+   * and its own commands seam (its directory and credential). The transcript services, the auth
+   * probe and the MCP mapping are shared.
+   *
    * <p>{@link #hooksPort} is the one to watch. {@link HookWebhook} binds it and {@link
-   * AgentLaunchService} renders it into the hook {@code curl} every launch carries; if those two
-   * ever read it separately and disagree, launches still succeed and simply never report session
-   * lineage or activity. Passing the same field to both is what makes that impossible, and {@code
-   * AgentsApiTest} asserts the agreement.
+   * AgentLaunchService} renders it into every hook {@code curl}; if those two ever read it separately
+   * and disagree, launches still succeed and simply never report session lineage or activity.
    *
    * <p>A daemon with no {@code qits.workspace-daemon.url} cannot derive the MCP endpoints an agent
    * would be launched with — but it also never connected, so it is not serving this API either. The
    * agent surface is simply left unwired and answers 503.
    */
   private void wireAgents(
+      AgentWorktrees worktrees,
       CommandStore store,
       CommandLogService logs,
       CommandService commandService,
       CommandRegistry commandRegistry,
       DaemonWorkspaceContext context) {
-    DaemonAgentDefaults defaults =
-        new DaemonAgentDefaults(
-            () -> configState.config(),
-            agentDefaultType,
-            agentActivityTrackingEnabled,
-            refinementModel,
-            surfaceConfigurations,
-            DaemonAgentDefaults.ambientFactsOf(
-                projectId, repoName, repositoryId, workspaceId, branch),
-            entityId,
-            entityBlocked,
-            entityTitle,
-            entityStatus);
+    DaemonAgentDefaults defaults = defaultsFor(null, null, null);
     DaemonMcpEndpoints endpoints;
     try {
       endpoints =
@@ -874,24 +707,44 @@ public class ControlSocket {
     this.transcriptTail = tail;
     AgentAuthStatus authStatus =
         new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
-    AgentLaunchService launch =
+    // The scope→server mapping is this daemon's, not the library's: the projects daemon attaches
+    // one server and this one attaches three, with different narrowing and different pre-approval.
+    // The MCP header is the workspace's own token, as before: Kimi writes its MCP config to a
+    // temporary file, and the agent credential must never reach disk (D18).
+    WorkspaceMcpServers mcpServers =
+        new WorkspaceMcpServers(endpoints, repositoryId, workspaceId, endpoints.platformUrl(), token);
+    CommandsAgentCommands shared = new CommandsAgentCommands(commandService, commandRegistry, store);
+    AgentRuntime runtime =
+        new AgentRuntime(
+            worktrees,
+            store,
+            commandRegistry,
+            shared,
+            seat ->
+                new AgentLaunchService(
+                    seat.commands(),
+                    authStatus,
+                    transcripts,
+                    tail,
+                    defaultsFor(seat.wrapperBranch(), seat.entityId(), seat.entity()),
+                    mcpServers,
+                    new DaemonWorkspaceContext(
+                        repositoryId,
+                        workspaceId,
+                        () -> seat.wrapperBranch(),
+                        () -> head(seat.directory())),
+                    claudeMount,
+                    hooksPort),
+            claudeMount);
+    agents = runtime;
+    // The sign-in terminal is nobody's agent: a launch service of the workspace's own serves it.
+    AgentLaunchService workspaceLaunch =
         new AgentLaunchService(
-            new CommandsAgentCommands(commandService, commandRegistry, store),
-            authStatus,
-            transcripts,
-            tail,
-            defaults,
-            // The scope→server mapping is this daemon's, not the library's: the projects daemon
-            // attaches one server and this one attaches three, with different narrowing and
-            // different pre-approval. See WorkspaceMcpServers.
-            new WorkspaceMcpServers(
-                endpoints, repositoryId, workspaceId, endpoints.platformUrl(), token),
-            context,
-            claudeMount,
+            shared, authStatus, transcripts, tail, defaults, mcpServers, context, claudeMount,
             hooksPort);
-    agentLaunch = launch;
     workspaceApi.wireAgents(
-        launch,
+        runtime,
+        workspaceLaunch,
         new AgentSessionQueryService(store, agentSessionStore),
         new AgentPluginService(processes, claudeMount, WORKSPACE_DIR.toPath(), defaults),
         new PromptRefinementService(
@@ -902,6 +755,33 @@ public class ControlSocket {
     reportHarnessCapabilities(
         new HarnessCapabilityService(processes, authStatus, claudeMount, WORKSPACE_DIR.toPath()));
     LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
+  }
+
+  /**
+   * The agent defaults for one agent, or for the workspace itself when every argument is null. The
+   * entity facts seed the session name; the wrapper branch fills the {@code ticket}/{@code epic}
+   * prompt facts.
+   */
+  private DaemonAgentDefaults defaultsFor(
+      String wrapperBranch, String entityId, EntityFacts entity) {
+    return new DaemonAgentDefaults(
+        () -> configState.config(),
+        agentDefaultType,
+        agentActivityTrackingEnabled,
+        refinementModel,
+        surfaceConfigurations,
+        DaemonAgentDefaults.ambientFactsOf(
+            projectId, repoName, repositoryId, workspaceId, wrapperBranch),
+        entityId,
+        entity != null && entity.blocked(),
+        entity == null ? null : entity.title(),
+        entity == null ? null : entity.status());
+  }
+
+  /** {@code HEAD} of a worktree, or blank. */
+  private static String head(java.nio.file.Path directory) {
+    GitExec.Out out = GitExec.git(directory, "rev-parse", "HEAD");
+    return out.ok() ? out.line() : "";
   }
 
   /**
@@ -917,15 +797,26 @@ public class ControlSocket {
   }
 
   /**
-   * Hands an agent command's stored activity state to the launch service, which retries a queued
-   * interactive rename on {@code IDLE} and forgets the session on {@code ENDED}. A no-op until
-   * {@link #wireAgents} has run.
+   * Hands an agent command's stored activity state to its agent's launch service, which retries a
+   * queued interactive rename on {@code IDLE} and forgets the session on {@code ENDED}, and nudges
+   * the auto-push: a hook means a turn moved, and a turn may have committed. A no-op until {@link
+   * #wireAgents} has run.
    */
   private void forwardActivity(String commandId, String state) {
-    AgentLaunchService launch = agentLaunch;
-    if (launch != null) {
-      launch.onActivity(commandId, state);
+    AgentRuntime runtime = agents;
+    if (runtime != null) {
+      runtime.onActivity(commandId, state);
     }
+    OriginSync sync = originSync;
+    if (sync != null) {
+      sync.nudge();
+    }
+  }
+
+  /** Send a hook's frame, naming the agent whose harness fired it. */
+  private void sendTagged(DaemonMessage message) {
+    AgentRuntime runtime = agents;
+    send(runtime == null ? message : runtime.tag(message));
   }
 
   /**
@@ -1018,37 +909,6 @@ public class ControlSocket {
   private volatile List<HarnessCapabilities> harnessCapabilities = List.of();
 
   private volatile AgentTranscriptTailService transcriptTail;
-
-  /**
-   * The bootstrap phase of the boot sequence (clone → config → <b>bootstrap</b>). A failed provision means the host is tearing the workspace down (it acts on {@link
-   * ProvisionFailed}), so there's no bootstrap phase. A reconnect into an already-provisioned
-   * container ({@code !freshClone}) does not re-run the chain (bootstrap runs on fresh provision
-   * only) — but the host doesn't await a bootstrap on a restart either, so nothing is emitted. On a
-   * fresh clone the daemon runs the chain autonomously (or, with the autorun kill switch off, emits
-   * a benign terminal so the host's await still completes).
-   */
-  private void runBootstrapOnBoot(boolean freshClone, boolean provisioned) {
-    if (!provisioned) {
-      return; // failed provision ⇒ host is tearing the workspace down
-    }
-    if (!freshClone) {
-      // Reconnect/restart into an already-provisioned checkout: no bootstrap (it ran on the fresh
-      // clone). The host doesn't await a Bootstrapped here.
-      return;
-    }
-    if (!bootstrapAutorun) {
-      LOG.info("bootstrap autorun disabled — skipping the chain, reporting ready.");
-      send(new Bootstrapped(workspaceId, true));
-    } else {
-      BootstrapRunner.run(
-          workspaceId,
-          configState.config().bootstrap(),
-          null,
-          WORKSPACE_DIR,
-          bootstrapTimeoutMs,
-          this::send);
-    }
-  }
 
   private void connect(int attempt) {
     URI uri;
@@ -1187,8 +1047,8 @@ public class ControlSocket {
           new Hello(
               workspaceId,
               repositoryId,
-              branch,
-              parent,
+              null,
+              null,
               DaemonProtocol.CAPABILITY_VERSION,
               buildVersionConfig.orElse(null),
               buildTimeConfig.orElse(null)),
@@ -1203,23 +1063,11 @@ public class ControlSocket {
       flushPending(ws);
       socket = ws;
     }
-    // Reconnect adoption: re-report the working-tree status so a qits restart that lost its
-    // in-memory dirty cache gets the current value re-pushed (a no-op before the boot report).
-    GitStatusMonitor g = gitStatus;
-    if (g != null) {
-      workers.execute(g::reportCurrent);
-    }
-    // Likewise re-report the last known agent activity per tracked command, so a qits restart
+    // Reconnect adoption: re-report the last known agent activity per tracked command, so a qits restart
     // rebuilds the live "cooking / idle / waiting" projection from the daemon's retained state.
     HookWebhook h = hooks;
     if (h != null) {
       workers.execute(h::reportCurrent);
-    }
-    // And the editor's state, which on a first connect is also the announcement that this container
-    // has one at all — the host has no other way to learn it, deliberately (see EditorState).
-    EditorSupervisor e = editor;
-    if (e != null) {
-      workers.execute(e::reportCurrent);
     }
     LOG.infof("workspace-daemon control socket established for workspace %s", workspaceId);
   }
@@ -1248,7 +1096,7 @@ public class ControlSocket {
       case RunCommand command -> workers.execute(() -> CommandExecutor.run(command, this::send));
       case Describe ignored ->
           workers.execute(
-              () -> send(WorkspaceDescriber.describe(workspaceId, repositoryId, branch, parent)));
+              () -> send(WorkspaceDescriber.describe(workspaceId, repositoryId, null, null)));
       case DescribeConfig request ->
           workers.execute(
               () -> {
@@ -1257,19 +1105,6 @@ public class ControlSocket {
                     new ConfigView(
                         workspaceId, request.correlationId(), state.configJson(), state.warning()));
               });
-      case RunBootstrap request ->
-          // Manual re-run: run the whole chain (blank name) or a single named step from the
-          // in-container config, streaming the same step/outcome messages + terminal Bootstrapped
-          // the autonomous boot run does (docs/epics/qits-workspace-daemon/ Part 3).
-          workers.execute(
-              () ->
-                  BootstrapRunner.run(
-                      workspaceId,
-                      configState.config().bootstrap(),
-                      request.name(),
-                      WORKSPACE_DIR,
-                      bootstrapTimeoutMs,
-                      this::send));
       case OpenStream request -> {
         // On the event loop: both connects are non-blocking futures and the pumps are
         // handler-driven, so there is nothing here worth a worker thread.
@@ -1279,17 +1114,14 @@ public class ControlSocket {
         }
       }
       case PullBranch request -> {
-        // The host advanced this workspace's branch on origin (a merge/integration into it); pull
-        // it
-        // into the checkout. OriginSync serializes this behind any in-flight auto-push and refuses
-        // anything but a fast-forward.
+        // A ref moved on the git host. The base clone's working tree is never moved, so the answer
+        // is a fetch, ahead of the periodic one; the branch is read for the log only.
         OriginSync s = originSync;
         if (s != null) {
-          s.pull(request.branch());
+          s.requestFetch();
         } else {
           LOG.debugf(
-              "PullBranch for %s but origin-sync isn't up yet (not provisioned) — ignoring",
-              workspaceId);
+              "PullBranch for %s but the base clone is not up yet — ignoring", request.branch());
         }
       }
       default ->
@@ -1308,12 +1140,11 @@ public class ControlSocket {
 
   /**
    * Emit a message on the current socket, marshalling the write onto its event loop. When the
-   * socket isn't up yet (the boot self-provision/bootstrap can emit before the first connect, or
+   * socket isn't up yet (the boot self-provision can emit before the first connect, or
    * during a reconnect), buffer it for {@link #flushPending}: <b>terminal</b> events always buffer;
-   * streamed clone/bootstrap chunks buffer only up to {@link #PENDING_OUTBOUND_CAP}, then drop (the
-   * outcome, not the log tail, is what the host needs). {@link Bootstrapped} is terminal too — a
-   * verbose bootstrap step that fills the cap must not push its terminal out, or the host's await
-   * hangs to timeout.
+   * streamed clone chunks buffer only up to {@link #PENDING_OUTBOUND_CAP}, then drop (the outcome,
+   * not the log tail, is what the host needs). {@link AgentBranchPushed} always buffers too: it is
+   * the only report of a push, and the host keeps an agent's branch list from it.
    */
   private void send(DaemonMessage message) {
     synchronized (sendLock) {
@@ -1327,7 +1158,7 @@ public class ControlSocket {
       boolean terminal =
           message instanceof Provisioned
               || message instanceof ProvisionFailed
-              || message instanceof Bootstrapped
+              || message instanceof AgentBranchPushed
               || (message instanceof AgentActivity activity && activity.exitCode() != null);
       if (terminal || pendingOutbound.size() < PENDING_OUTBOUND_CAP) {
         pendingOutbound.offer(message);
@@ -1355,10 +1186,6 @@ public class ControlSocket {
   void stop() {
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);
-    GitStatusMonitor g = gitStatus;
-    if (g != null) {
-      g.close();
-    }
     HookWebhook h = hooks;
     if (h != null) {
       h.close();
@@ -1366,10 +1193,6 @@ public class ControlSocket {
     DaemonStreamTunnel tun = tunnel;
     if (tun != null) {
       tun.close();
-    }
-    EditorSupervisor e = editor;
-    if (e != null) {
-      e.close();
     }
     AgentTranscriptTailService t = transcriptTail;
     if (t != null) {
@@ -1403,7 +1226,7 @@ public class ControlSocket {
    * caller is about to close are still up, which is what lets an agent's exit callback (the
    * transcript sweep, the status update) report on its way out. Its grace ({@code termGraceMs},
    * default 5s) has to leave room under docker's 10s stop budget for whatever {@link #stop} still
-   * does afterward — chiefly {@link EditorSupervisor#close}'s own stop grace (also 5s by default).
+   * does afterward.
    *
    * <p>Package-private and static so it can be exercised without standing up the rest of {@link
    * ControlSocket}.

@@ -87,7 +87,7 @@ class CommandsApiTest {
         }
       };
 
-  /** Stands in for {@link ConfigActionResolver} over a checkout's {@code .qits-config.yml}. */
+  /** The commands layer still resolves actions; this daemon declares none (qits-1152). */
   private record DeclaredActions(List<ResolvedAction> declared) implements ActionResolver {
     @Override
     public Optional<ResolvedAction> resolve(String actionId) {
@@ -105,7 +105,7 @@ class CommandsApiTest {
     vertx = Vertx.vertx();
     api = new WorkspaceApi();
     api.vertx = vertx;
-    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
+    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, null, List::of));
     port = api.actualPort();
 
     CommandStore store = new CommandStore();
@@ -147,12 +147,14 @@ class CommandsApiTest {
   }
 
   @Test
-  void launchReturnsTheHostsCommandDtoFieldNames() throws Exception {
-    Answer launched = post("/commands", new JsonObject().put("actionId", "greet"));
+  void aCommandUsesTheHostsCommandDtoFieldNames() throws Exception {
+    // Launched through the service: the HTTP launch of a declared action went with the Actions tab
+    // (qits-1152). Agent harnesses are the commands this daemon runs now, and they are read here.
+    String id = commands.launch("greet").id();
+    Answer read = get("/commands/" + id);
 
-    assertEquals(200, launched.status());
-    JsonObject command = launched.body().getJsonObject("command");
-    assertNotNull(command, "the host's LaunchCommandRequest.Response wraps the command");
+    assertEquals(200, read.status());
+    JsonObject command = read.body();
     // Every one of these is a CommandDto component. A missing key decodes to null on the host.
     assertNotNull(command.getString("id"));
     assertEquals("repo-42", command.getString("repoId"), "synthesized from the workspace context");
@@ -162,7 +164,7 @@ class CommandsApiTest {
     assertEquals("0123456", command.getString("shortCommitHash"), "the host computed this in its mapper");
     assertEquals("greet", command.getString("actionId"));
     assertEquals("Greet", command.getString("actionName"));
-    assertEquals("RUNNING", command.getString("status"));
+    assertNotNull(command.getString("status"));
     assertEquals(false, command.getBoolean("interactive"));
     assertEquals("TERMINAL", command.getString("kind"));
     assertNotNull(command.getString("launchedAt"));
@@ -231,19 +233,6 @@ class CommandsApiTest {
   }
 
   @Test
-  void theDeclaredActionsAreListable() throws Exception {
-    Answer answer = get("/commands/actions");
-    assertEquals(200, answer.status());
-    JsonArray actions = answer.body().getJsonArray("actions");
-    assertEquals(3, actions.size());
-    assertEquals("greet", actions.getJsonObject(0).getString("id"));
-    assertEquals("Greet", actions.getJsonObject(0).getString("name"));
-    // The flag the caller needs before deciding whether to open a terminal socket for the run.
-    assertEquals(false, actions.getJsonObject(0).getBoolean("interactive"));
-    assertEquals(true, actions.getJsonObject(2).getBoolean("interactive"));
-  }
-
-  @Test
   void theLogNarrowsByChannelAndNeverCarriesASeverity() throws Exception {
     String id = launchAndAwait("greet");
 
@@ -277,11 +266,7 @@ class CommandsApiTest {
 
   @Test
   void aReportedAgentSessionUsesTheHostsAgentSessionRefFieldNames() throws Exception {
-    String id =
-        post("/commands", new JsonObject().put("actionId", "watch"))
-            .body()
-            .getJsonObject("command")
-            .getString("id");
+    String id = commands.launch("watch").id();
     // The SessionStart hook's ingest. It has no route on this API — HookWebhook is a separate,
     // unauthenticated loopback server — so it is driven through the service the webhook calls.
     commands.reportAgentSession(id, "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "projects/-w/s.jsonl");
@@ -299,17 +284,9 @@ class CommandsApiTest {
   }
 
   @Test
-  void anUndeclaredActionIs400() throws Exception {
-    Answer answer = post("/commands", new JsonObject().put("actionId", "no-such-action"));
-    assertEquals(400, answer.status());
-    assertTrue(answer.body().getString("message").contains(".qits-config.yml"));
-  }
-
-  @Test
-  void aMissingActionIdIs400() throws Exception {
-    Answer answer = post("/commands", new JsonObject());
-    assertEquals(400, answer.status());
-    assertEquals("actionId is required", answer.body().getString("message"));
+  void declaredActionsCanNoLongerBeLaunchedOrListed() throws Exception {
+    assertEquals(405, post("/commands", new JsonObject().put("actionId", "greet")).status());
+    assertEquals(404, get("/commands/actions").status(), "read as a command id nobody has");
   }
 
   @Test
@@ -323,9 +300,7 @@ class CommandsApiTest {
   }
 
   @Test
-  void launchIsPostOnly() throws Exception {
-    // The pairing check keeps a GET from ever spawning a process — the same discipline the
-    // fast-forward and update-from-parent routes have.
+  void theCollectionIsGetOnly() throws Exception {
     assertEquals(405, put("/commands").status());
   }
 
@@ -348,7 +323,7 @@ class CommandsApiTest {
     // "this daemon will never serve commands".
     WorkspaceApi unwired = new WorkspaceApi();
     unwired.vertx = vertx;
-    await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
+    await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, null, List::of));
     try {
       // One context per test, not one per server: this second server's call is pinned to the same
       // ctx as every other. Left on the JUnit thread it is exactly the call site the pool hang
@@ -371,11 +346,7 @@ class CommandsApiTest {
 
   /** Launch an action and poll until it leaves RUNNING; returns the command id. */
   private String launchAndAwait(String actionId) throws Exception {
-    String id =
-        post("/commands", new JsonObject().put("actionId", actionId))
-            .body()
-            .getJsonObject("command")
-            .getString("id");
+    String id = commands.launch(actionId).id();
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
     while (System.nanoTime() < deadline) {
       if (!"RUNNING".equals(get("/commands/" + id).body().getString("status"))) {

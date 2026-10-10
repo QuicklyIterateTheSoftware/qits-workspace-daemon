@@ -1,15 +1,12 @@
 package eu.wohlben.qits.workspacedaemon;
 
-import eu.wohlben.qits.workspacedaemon.DaemonQitsConfig.BootstrapDecl;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandNotFoundException;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.agents.AgentDefaults;
 import eu.wohlben.qits.agents.AgentLaunchMode;
-import eu.wohlben.qits.agents.AgentLaunchRequest;
 import eu.wohlben.qits.agents.AgentLaunchService;
-import eu.wohlben.qits.agents.AgentMcpScope;
 import eu.wohlben.qits.agents.AgentNotSignedInException;
 import eu.wohlben.qits.agents.AgentPluginService;
 import eu.wohlben.qits.agents.AgentSessionQueryService;
@@ -29,38 +26,38 @@ import eu.wohlben.qits.workspacedaemon.detection.DetectionService;
 import eu.wohlben.qits.workspacedaemon.files.LocalWorkspaceFiles;
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFileBrowser;
 import eu.wohlben.qits.workspacedaemon.files.WorkspaceFilesException;
-import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
- * The daemon's read API over the checkout it owns: the file browser's listing and file content, the
- * framework detection result, and the Angular component map. It is the transport half of the two
- * capability modules ({@code workspace-daemon-files}, {@code workspace-daemon-detection}) that
- * moved off the host — everything the host used to compute through N {@code docker exec find/cat}
- * spawns per request is now a local {@code java.nio} read, and this server is what qits reaches it
- * through.
+ * The daemon's HTTP API: the agent worktrees this workspace hosts (qits-1152), each agent's files,
+ * the commands its harnesses run, and the agent surface that is not bound to one agent (sign-in,
+ * plugins, sessions, prompt refinement). The file browser, detection and component map are the
+ * transport half of the two capability modules ({@code workspace-daemon-files}, {@code
+ * workspace-daemon-detection}) that moved off the host; since qits-1152 they are rooted at one
+ * agent's wrapper worktree, because the workspace has no checkout of its own to show.
  *
  * <p>A raw {@code vertx-core} {@link HttpServer}, exactly like {@link HookWebhook} and for the same
  * reason: the module carries {@code quarkus-vertx} only — no {@code quarkus-rest}, no {@code
@@ -70,14 +67,17 @@ import org.jboss.logging.Logger;
  *
  * <h2>The contract</h2>
  *
+ * <p>{@code docs/openapi.yml} has it whole. The file routes sit under {@code
+ * /agent-worktrees/{agentId}}:
+ *
  * <pre>
- *   GET /files?path=&lt;rel&gt;           200  {paths[], lazyDirs[{path,childCount}], generation}
- *   GET /files/content?path=&lt;rel&gt;   200  {path, content?, binary}
- *   GET /detection                   200  {projects[], frameworks[], links[], generation}
- *   GET /component-map               200  {framework, components[]}
+ *   GET …/files?path=&lt;rel&gt;           200  {paths[], lazyDirs[{path,childCount}], generation}
+ *   GET …/files/content?path=&lt;rel&gt;   200  {path, content?, binary}
+ *   GET …/detection                   200  {projects[], frameworks[], links[], generation}
+ *   GET …/component-map               200  {framework, components[]}
  * </pre>
  *
- * <p>{@code path} is workspace-root-relative and optional on {@code /files} (absent ⇒ the root
+ * <p>{@code path} is relative to the agent's wrapper worktree and optional on {@code /files} (absent ⇒ the root
  * level), required on {@code /files/content}. Failures carry {@link WorkspaceFilesException}'s own
  * status — 400 for a path the browser refuses to resolve, 404 for one that names nothing, 413 for a
  * response the transport cannot carry — and anything else is a 500; every non-2xx body is {@code
@@ -137,21 +137,26 @@ public class WorkspaceApi {
 
   private static final Logger LOG = Logger.getLogger(WorkspaceApi.class);
 
+  /**
+   * The agent worktrees this workspace hosts (qits-1152): {@code GET} lists them, {@code POST}
+   * starts one, and everything about one agent sits below {@code /agent-worktrees/{agentId}}.
+   */
+  static final String AGENT_WORKTREES_PATH = "/agent-worktrees";
+
+  /** The file routes, below one agent: its wrapper worktree is their root. */
   static final String FILES_PATH = "/files";
+
   static final String CONTENT_PATH = "/files/content";
   static final String DETECTION_PATH = "/detection";
   static final String COMPONENT_MAP_PATH = "/component-map";
 
-  /**
-   * The two write endpoints, and the only ones: integrating the parent branch into this workspace.
-   * They came from the host, where they were {@code POST
-   * /repositories/{repoId}/workspaces/{workspaceId}/{fast-forward,update-from-parent}} driving
-   * {@code docker exec git} into this container. Here the checkout is a local path and git runs in
-   * this process, serialized behind {@link OriginSync}'s auto-push.
-   */
-  static final String FAST_FORWARD_PATH = "/fast-forward";
+  /** The per-agent verbs, below {@code /agent-worktrees/{agentId}}. */
+  static final String YIELD_PATH = "/yield";
 
-  static final String UPDATE_FROM_PARENT_PATH = "/update-from-parent";
+  static final String TURN_PATH = "/turn";
+  static final String ENTITY_PATH = "/entity";
+  static final String BLOCKED_PATH = "/blocked";
+  static final String CLEANUP_CHECK_PATH = "/cleanup-check";
 
   /**
    * The commands surface, from {@code qits-commands}. These came from the host's {@code
@@ -165,16 +170,12 @@ public class WorkspaceApi {
    */
   static final String COMMANDS_PATH = "/commands";
 
-  /** {@code GET /commands/actions} — what this checkout declares. New; see {@link CommandJson}. */
-  static final String COMMAND_ACTIONS_PATH = "/commands/actions";
-
   /**
-   * The coding-agent surface. Prefix-free like {@link #COMMANDS_PATH} and for the same reason: the
+   * The agent surface that is not bound to one agent. Prefix-free like {@link #COMMANDS_PATH}: the
    * daemon serves one workspace, so a {@code /{repoId}/{workspaceId}} prefix would be a constant the
-   * caller has to get right. {@code AgentJson} puts both ids back into the response bodies.
+   * caller has to get right. Launching, turns and the entity moved to {@link #AGENT_WORKTREES_PATH}
+   * with qits-1152, since each of those belongs to one agent.
    */
-  static final String AGENTS_PATH = "/agents";
-
   static final String AGENTS_AVAILABLE_PATH = "/agents/available";
 
   /**
@@ -190,114 +191,15 @@ public class WorkspaceApi {
    */
   static final String AGENTS_SIGN_IN_PATH = "/agents/sign-in";
 
-  /**
-   * <b>A turn into an agent that is already running</b> — the host-side twin of what a browser does
-   * when somebody types into {@code CommandSockets}.
-   *
-   * <p>Until this existed the platform could launch an agent ({@code POST /agents}, the instruction
-   * as the seed turn) and ask whether one was running ({@code GET /commands?status=RUNNING}), and
-   * could say nothing at all to a standing session: the only path for a user turn was a browser
-   * attached to the command websocket. So a host that wanted to drive a session through phases had
-   * exactly one move — launch another agent — and a launch is not a turn. It starts a session
-   * instead of continuing the one that already holds the context.
-   *
-   * <p>It is deliberately general. Nothing here knows what a ticket is, or a phase, or a prompt
-   * template: the body is {@code {"text": …}} and the text is delivered verbatim. The two arms are
-   * {@code CommandSockets.onChatMessage}'s and {@code CommandSockets.onTerminalMessage}'s, through
-   * the same {@link CommandRegistry}, rather than a second mechanism that could drift from what a
-   * person typing gets.
-   *
-   * <h2>No agent running is a 200, not a 404</h2>
-   *
-   * <p>{@code {"delivered": false, "reason": "no agent is running"}}. The caller's next move is to
-   * launch, and an absence it can act on is an answer — a 404 would say "this endpoint does not
-   * exist", which is a different fact and the one thing that is not true here.
-   *
-   * <h2>The keystroke caveat, kept rather than papered over</h2>
-   *
-   * <p>A TERMINAL session has no stdin channel of its own: the REPL owns the terminal, so a turn is
-   * keystrokes and nothing else, and {@code AgentCommands.sendKeystrokes}' documented race comes
-   * with them — <b>a TUI that is still starting has no prompt to type into yet</b>, and the
-   * keystrokes land wherever the terminal happens to be. This route does not buffer for it. Holding
-   * a turn until something looked ready would mean inventing a readiness signal the harness does
-   * not emit, and a buffered turn that arrives late is worse than one that visibly missed: the
-   * caller would have been told it was delivered. {@code delivered} means the registry accepted the
-   * bytes for a live session, never that a prompt consumed them.
-   *
-   * <h2>The {@code /compact} question, and what is actually known</h2>
-   *
-   * <p>The intent this route was built for includes delivering {@code /compact} as a turn ahead of
-   * a phase prompt, so a long session enters the next phase with room to work in. <b>Whether a
-   * Claude Code session treats a delivered {@code /compact} as a slash command or echoes it as
-   * ordinary prompt text is not established</b>, on either arm. Nothing in this daemon parses the
-   * text, so the answer is entirely the harness's; it has not been observed, and it is not guessed
-   * at here. The spike was deliberately not run against a live session, because the only running
-   * chat session available to run it in was the orchestrating agent's own, and compacting that is
-   * not an acceptable cost of finding out.
-   *
-   * <p><b>So the host-side knob is defaulted off.</b> Defaulting "send {@code /compact} first" on
-   * an unestablished behaviour risks prepending a literal line of noise to every phase prompt,
-   * which is the failure that is both silent and permanent; a default of off costs only the
-   * compaction nobody has yet proven happens.
-   *
-   * <p>What would settle it: deliver {@code /compact} into a <em>disposable</em> session on each
-   * arm and read that command's transcript. A real compaction shows as a compact boundary and a
-   * shortened context in the session's own transcript; an echo shows as an ordinary user message
-   * carrying the literal text, with an assistant reply about it. The two are not confusable, and
-   * one throwaway session per arm answers it for good.
-   */
-  static final String AGENTS_TURN_PATH = "/agents/turn";
-
-  /**
-   * Marks the entity this container exists for as BLOCKED or not, and renames every live session
-   * that can be renamed to match — the daemon-side twin of {@code AgentLaunchService.setBlocked}.
-   * Superseded by {@link #AGENTS_ENTITY_PATH} and kept, unchanged, for a host that predates it.
-   *
-   * <p>Called by qits-workspaces-service for a workspace container and by qits-projects-service
-   * through the refinement tunnel for a refinement one, the same way either reaches {@link
-   * #AGENTS_TURN_PATH}: this container is the only place that knows which sessions are live and
-   * holds the stdin channel a rename travels over, so the host cannot do this itself even though it
-   * is the one that knows the entity changed state.
-   */
-  static final String AGENTS_BLOCKED_PATH = "/agents/blocked";
-
-  /**
-   * Tells this container what its entity is now — title, status, blocked and why — and renames
-   * every live session that can be renamed to the name those render ({@code [❗|⁉️]<status square>
-   * <id> <title>}): the daemon-side twin of {@code AgentLaunchService.setEntity}. The successor of
-   * {@link #AGENTS_BLOCKED_PATH}, which carried the blocked flag alone and is still served for a
-   * host that predates this; reached by the same two hosts, the same way.
-   */
-  static final String AGENTS_ENTITY_PATH = "/agents/entity";
-
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
 
   static final String AGENT_PLUGINS_PATH = "/agent-plugins";
 
   static final String PROMPT_REFINEMENTS_PATH = "/prompt-refinements";
 
-  /**
-   * The bootstrap chain's surface. It was a host route — {@code
-   * /workspaces/{id}/bootstrap-commands…} — that was <em>deleted rather than moved</em> when the
-   * work went into the container: {@link BootstrapRunner} does it here, and nothing ever grew a
-   * route for it. So the capability survived the move and the addressability did not. This puts
-   * the addressability back where the capability already is.
-   *
-   * <p>Prefix-free like {@link #COMMANDS_PATH} and for the same reason: the daemon serves exactly
-   * one workspace, so a {@code /{repoId}/{workspaceId}} prefix would be a constant the caller has
-   * to get right.
-   */
-  static final String BOOTSTRAP_COMMANDS_PATH = "/bootstrap-commands";
-
   private static final String BEARER = "Bearer ";
 
   @Inject Vertx vertx;
-
-  /**
-   * Owns the {@link OriginSync} these two routes need — it is created only once the checkout is
-   * provisioned, so it is read per request rather than captured.
-   */
-  @Inject ControlSocket controlSocket;
 
   // The port qits reaches this daemon's API on, through the reverse tunnel. Still distinct from
   // hooks-port: they are different surfaces with different callers, and collapsing them onto one
@@ -362,11 +264,15 @@ public class WorkspaceApi {
           });
 
   private volatile HttpServer server;
-  private volatile WorkspaceFileBrowser browser;
-  private volatile DetectionService detection;
-  private volatile ComponentMapService componentMap;
-  private volatile Supplier<String> marker;
+  private volatile AgentWorktrees worktrees;
+  private volatile Supplier<List<DeclaredFramework>> declaredFrameworks = List::of;
   private volatile String token;
+
+  /** One agent's file services, made on its first file request and dropped with the agent. */
+  private record AgentFiles(
+      WorkspaceFileBrowser browser, DetectionService detection, ComponentMapService componentMap) {}
+
+  private final Map<String, AgentFiles> agentFiles = new ConcurrentHashMap<>();
 
   /**
    * The commands capability, wired separately from {@link #start} because it is available earlier:
@@ -380,7 +286,10 @@ public class WorkspaceApi {
   private volatile CommandRegistry registry;
   private volatile WorkspaceContext workspaceContext;
 
-  /** The agent capability, wired alongside commands; null until then — every route answers 503. */
+  /** The agents, wired alongside commands; null until then — every agent route answers 503. */
+  private volatile AgentRuntime agents;
+
+  /** The workspace's own launch service: it opens the sign-in terminal, which is nobody's agent. */
   private volatile AgentLaunchService agentLaunch;
 
   private volatile AgentSessionQueryService agentSessions;
@@ -402,22 +311,6 @@ public class WorkspaceApi {
   private volatile java.util.function.Supplier<List<HarnessCapabilities>> harnessCapabilities =
       List::of;
 
-  /** The bootstrap wiring, null until {@link #wireBootstrap} runs; null ⇒ every route is a 503. */
-  private volatile BootstrapWiring bootstrap;
-
-  /**
-   * Everything {@link BootstrapRunner#run} needs, captured at wiring time. It is a static utility
-   * with no state of its own, so there is nothing to hold a reference to — and the module is
-   * framework-free and cannot read configuration, so the chain, the working directory and the step
-   * timeout all have to arrive from {@link ControlSocket}, the single config reader.
-   */
-  private record BootstrapWiring(
-      String workspaceId,
-      Supplier<List<BootstrapDecl>> chain,
-      File workingDir,
-      long stepTimeoutMs,
-      Consumer<DaemonMessage> emit) {}
-
   /**
    * Wire the commands surface. Separate from {@link #start} so the two capabilities' preconditions
    * stay independent and a test can exercise either alone.
@@ -434,6 +327,7 @@ public class WorkspaceApi {
    * commands without standing up a harness; {@link ControlSocket} wires both together.
    */
   void wireAgents(
+      AgentRuntime agents,
       AgentLaunchService agentLaunch,
       AgentSessionQueryService agentSessions,
       AgentPluginService agentPlugins,
@@ -441,6 +335,7 @@ public class WorkspaceApi {
       AgentDefaults agentDefaults,
       String imageVersion,
       java.util.function.Supplier<List<HarnessCapabilities>> harnessCapabilities) {
+    this.agents = agents;
     this.agentLaunch = agentLaunch;
     this.agentSessions = agentSessions;
     this.agentPlugins = agentPlugins;
@@ -450,48 +345,33 @@ public class WorkspaceApi {
     this.harnessCapabilities = harnessCapabilities == null ? List::of : harnessCapabilities;
   }
 
-  /** Wire the bootstrap surface; see {@link BootstrapWiring} for why it takes five arguments. */
-  void wireBootstrap(
-      String workspaceId,
-      Supplier<List<BootstrapDecl>> chain,
-      File workingDir,
-      long stepTimeoutMs,
-      Consumer<DaemonMessage> emit) {
-    this.bootstrap = new BootstrapWiring(workspaceId, chain, workingDir, stepTimeoutMs, emit);
-  }
-
   /**
-   * Wire the capabilities over {@code root} and bind, unless no token is configured. Called from
-   * {@link ControlSocket} once the checkout is provisioned — before that there is no git tree, and
-   * every endpoint would answer 500 from a failed {@code ls-files}.
+   * Bind, unless no token is configured. Called from {@link ControlSocket} once the base clone is
+   * provisioned: before that no agent worktree can exist, so nothing here could be answered.
    *
-   * @param root the workspace checkout (the daemon's {@code /workspace}), passed in rather than
-   *     hardcoded so this stays the same object {@link ControlSocket} clones and runs git in
-   * @param declaredFrameworks the checkout's own {@code frameworks:} hints; a supplier, not a list,
-   *     because the file it comes from lives in the working tree and an agent can edit it
-   * @param marker the working-tree marker {@link GitStatusMonitor} already computed behind its
-   *     inotify debounce — the detection caches key on it, and recomputing it here would fork the
-   *     same two git processes again and could disagree with the value just reported home
+   * @param worktrees the base clone and the agent worktrees made from it; each agent's wrapper
+   *     worktree is the root of its file routes
+   * @param declaredFrameworks the base clone's own {@code frameworks:} hints; a supplier, because a
+   *     {@code SIGHUP} re-reads them
    */
   public void start(
-      Path root, Supplier<List<DeclaredFramework>> declaredFrameworks, Supplier<String> marker) {
+      AgentWorktrees worktrees, Supplier<List<DeclaredFramework>> declaredFrameworks) {
     String configured = apiTokenConfig.map(String::trim).orElse("");
     if (configured.isEmpty()) {
       LOG.warn(
-          "No qits.workspace-daemon.api-token configured — the workspace read API stays unbound. It"
-              + " is reachable from the whole docker network and serves an untrusted checkout, so"
-              + " it is never served anonymously; qits falls back to its host-side file access.");
+          "No qits.workspace-daemon.api-token configured — the workspace API stays unbound. It"
+              + " serves untrusted checkouts, so it is never served anonymously.");
       return;
     }
-    listen(vertx, apiBindAddress, apiPort, configured, root, declaredFrameworks, marker)
+    listen(vertx, apiBindAddress, apiPort, configured, worktrees, declaredFrameworks)
         .onSuccess(
             s ->
                 LOG.infof(
-                    "workspace-daemon read API listening on %s:%d", apiBindAddress, s.actualPort()))
+                    "workspace-daemon API listening on %s:%d", apiBindAddress, s.actualPort()))
         .onFailure(
             t ->
                 LOG.errorf(
-                    t, "workspace-daemon read API failed to bind %s:%d", apiBindAddress, apiPort));
+                    t, "workspace-daemon API failed to bind %s:%d", apiBindAddress, apiPort));
   }
 
   /**
@@ -505,14 +385,10 @@ public class WorkspaceApi {
       String bindAddress,
       int port,
       String token,
-      Path root,
-      Supplier<List<DeclaredFramework>> declaredFrameworks,
-      Supplier<String> marker) {
-    LocalWorkspaceFiles files = new LocalWorkspaceFiles(root);
-    this.browser = new WorkspaceFileBrowser(files);
-    this.detection = new DetectionService(files, declaredFrameworks);
-    this.componentMap = new ComponentMapService(files);
-    this.marker = marker;
+      AgentWorktrees worktrees,
+      Supplier<List<DeclaredFramework>> declaredFrameworks) {
+    this.worktrees = worktrees;
+    this.declaredFrameworks = declaredFrameworks == null ? List::of : declaredFrameworks;
     this.token = token;
     // Null when constructed directly rather than by CDI, which is how every test here builds it.
     this.basePath = normalizeBase(apiBasePath == null ? null : apiBasePath.orElse(null));
@@ -522,7 +398,8 @@ public class WorkspaceApi {
         .requestHandler(this::onRequest)
         // The interactive half of commands. Authenticated at the handshake so an unauthenticated
         // caller never gets a socket, and served here rather than over the control socket because
-        // that protocol's command messages are fire-and-collect — no stdin, no resize.
+        // that protocol's command messages are fire-and-collect — no stdin, no resize. A command id
+        // is unique across agents, so the socket needs no agent in its path.
         .webSocketHandshakeHandler(
             handshake ->
                 CommandSockets.onHandshake(
@@ -614,34 +491,15 @@ public class WorkspaceApi {
       onCommandRequest(request, path);
       return;
     }
+    if (path.equals(AGENT_WORKTREES_PATH) || path.startsWith(AGENT_WORKTREES_PATH + "/")) {
+      onWorktreeRequest(request, path);
+      return;
+    }
     if (isAgentPath(path)) {
       onAgentRequest(request, path);
       return;
     }
-    if (isLifecyclePath(path)) {
-      onLifecycleRequest(request, path);
-      return;
-    }
-    boolean write = FAST_FORWARD_PATH.equals(path) || UPDATE_FROM_PARENT_PATH.equals(path);
-    // GET everywhere except the two parent-integration routes, which mutate the checkout and are
-    // POST-only. Checking the pairing here keeps a GET from ever reaching git.
-    if (write ? request.method() != HttpMethod.POST : request.method() != HttpMethod.GET) {
-      respond(request, 405, WorkspaceJson.error("Method not allowed"));
-      return;
-    }
-    Context context = vertx.getOrCreateContext();
-    String param = request.getParam(write ? "parent" : "path");
-    try {
-      workers.execute(
-          () -> {
-            Reply reply = dispatch(path, param);
-            context.runOnContext(v -> respond(request, reply.status(), reply.body()));
-          });
-    } catch (RejectedExecutionException shuttingDown) {
-      // The pool is gone (a request that raced @PreDestroy). Answer rather than let the rejection
-      // become an unhandled event-loop exception; the caller retries against the next container.
-      respond(request, 503, WorkspaceJson.error("Shutting down"));
-    }
+    respond(request, 404, WorkspaceJson.error("No such endpoint"));
   }
 
   /**
@@ -680,14 +538,311 @@ public class WorkspaceApi {
             });
   }
 
+  /**
+   * The {@code /agent-worktrees} routes (qits-1152). Same shape as {@link #onAgentRequest} — 503
+   * until wired, body read on the event loop, work on a worker — plus {@code DELETE}, which only
+   * these routes take.
+   */
+  private void onWorktreeRequest(HttpServerRequest request, String path) {
+    if (worktrees == null) {
+      respond(request, 503, WorkspaceJson.error("Agents are not available yet"));
+      return;
+    }
+    HttpMethod method = request.method();
+    if (method != HttpMethod.GET && method != HttpMethod.POST && method != HttpMethod.DELETE) {
+      respond(request, 405, WorkspaceJson.error("Method not allowed"));
+      return;
+    }
+    Context context = vertx.getOrCreateContext();
+    request
+        .body()
+        .onFailure(t -> respond(request, 400, WorkspaceJson.error("Could not read the request body")))
+        .onSuccess(
+            body -> {
+              try {
+                workers.execute(
+                    () -> {
+                      Reply reply = dispatchWorktree(method, path, request, body.toString());
+                      context.runOnContext(v -> respond(request, reply.status(), reply.body()));
+                    });
+              } catch (RejectedExecutionException shuttingDown) {
+                respond(request, 503, WorkspaceJson.error("Shutting down"));
+              }
+            });
+  }
+
+  /** Route and run one {@code /agent-worktrees} request, every failure turned into a status. */
+  private Reply dispatchWorktree(
+      HttpMethod method, String path, HttpServerRequest request, String body) {
+    try {
+      String rest = path.substring(AGENT_WORKTREES_PATH.length());
+      // The file routes need only the worktrees; everything else needs the agents, which are wired
+      // a moment later and not at all on a daemon that cannot reach its MCP servers.
+      boolean files = rest.endsWith(FILES_PATH) || rest.endsWith(CONTENT_PATH)
+          || rest.endsWith(DETECTION_PATH) || rest.endsWith(COMPONENT_MAP_PATH);
+      if (agents == null && !files) {
+        return new Reply(503, WorkspaceJson.error("Agents are not available yet"));
+      }
+      if (rest.isEmpty() || rest.equals("/")) {
+        return switch (method.name()) {
+          case "GET" -> new Reply(200, AgentWorktreeJson.views(agents.list()));
+          case "POST" -> new Reply(200, AgentWorktreeJson.started(agents.start(startRequest(body))));
+          default -> new Reply(405, WorkspaceJson.error("Method not allowed"));
+        };
+      }
+      String[] segments = rest.substring(1).split("/", 2);
+      String agentId = segments[0];
+      String verb = segments.length > 1 ? "/" + segments[1] : "";
+      if (!AgentWorktrees.validAgentId(agentId)) {
+        return new Reply(404, WorkspaceJson.error("No such agent"));
+      }
+      return switch (verb) {
+        case "" ->
+            switch (method.name()) {
+              case "GET" -> new Reply(200, AgentWorktreeJson.view(agents.view(agentId)));
+              case "DELETE" -> remove(agentId, "true".equalsIgnoreCase(request.getParam("force")));
+              default -> new Reply(405, WorkspaceJson.error("Method not allowed"));
+            };
+        case YIELD_PATH ->
+            method == HttpMethod.POST
+                ? new Reply(200, AgentWorktreeJson.yielded(agentId, agents.yield(agentId)))
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case TURN_PATH ->
+            method == HttpMethod.POST
+                ? deliverTurn(agentId, body)
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case ENTITY_PATH ->
+            method == HttpMethod.POST
+                ? setEntity(agentId, body)
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case BLOCKED_PATH ->
+            method == HttpMethod.POST
+                ? setBlocked(agentId, body)
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case CLEANUP_CHECK_PATH ->
+            method == HttpMethod.GET
+                ? new Reply(200, AgentWorktreeJson.cleanupCheck(agents.cleanupCheck(agentId)))
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case FILES_PATH, CONTENT_PATH, DETECTION_PATH, COMPONENT_MAP_PATH ->
+            method == HttpMethod.GET
+                ? dispatchFiles(agentId, verb, request.getParam("path"))
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        default -> new Reply(404, WorkspaceJson.error("No such endpoint"));
+      };
+    } catch (AgentWorktrees.AgentWorktreeException e) {
+      return new Reply(e.status(), WorkspaceJson.error(e.getMessage()));
+    } catch (AgentRuntime.UnknownAgentException e) {
+      return new Reply(404, WorkspaceJson.error(e.getMessage()));
+    } catch (WorkspaceFilesException e) {
+      return new Reply(e.status(), WorkspaceJson.error(e.getMessage()));
+    } catch (CommandNotFoundException e) {
+      return new Reply(404, WorkspaceJson.error(e.getMessage()));
+    } catch (InvalidCommandRequestException e) {
+      return new Reply(400, WorkspaceJson.error(e.getMessage()));
+    } catch (AgentNotSignedInException e) {
+      return new Reply(409, notSignedIn(e));
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "workspace-daemon agent-worktrees API failed handling %s", path);
+      return new Reply(500, WorkspaceJson.error("Internal error"));
+    }
+  }
+
+  /**
+   * {@code DELETE /agent-worktrees/{agentId}} — refused with 409 and the cleanup check while there
+   * is work that would be lost (D5), unless {@code force=true}.
+   */
+  private Reply remove(String agentId, boolean force) {
+    AgentWorktrees.CleanupCheck refused = agents.remove(agentId, force);
+    if (refused != null) {
+      return new Reply(409, AgentWorktreeJson.cleanupCheck(refused));
+    }
+    agentFiles.remove(agentId);
+    return new Reply(200, AgentWorktreeJson.removed(agentId));
+  }
+
+  /**
+   * {@code POST /agent-worktrees} — the start request. {@code agentId}, {@code workId} and {@code
+   * wrapperBranch} are required; {@code env} is the agent's credential and must be an object of
+   * strings, because it becomes a process environment and nothing else.
+   */
+  private static AgentRuntime.Start startRequest(String body) {
+    JsonObject json = jsonBody(body);
+    String agentId = json.getString("agentId");
+    if (agentId == null || agentId.isBlank()) {
+      throw new InvalidCommandRequestException("agentId is required");
+    }
+    String wrapperBranch = json.getString("wrapperBranch");
+    if (wrapperBranch == null || wrapperBranch.isBlank()) {
+      throw new InvalidCommandRequestException("wrapperBranch is required");
+    }
+    Map<String, String> env = new java.util.LinkedHashMap<>();
+    Object rawEnv = json.getValue("env");
+    if (rawEnv != null) {
+      if (!(rawEnv instanceof JsonObject envObject)) {
+        throw new InvalidCommandRequestException("env must be an object of strings");
+      }
+      for (Map.Entry<String, Object> entry : envObject) {
+        if (!(entry.getValue() instanceof String value)) {
+          throw new InvalidCommandRequestException("env must be an object of strings");
+        }
+        env.put(entry.getKey(), value);
+      }
+    }
+    return new AgentRuntime.Start(
+        agentId,
+        json.getString("workId"),
+        json.getString("entityId"),
+        wrapperBranch,
+        parseEnum(json.getString("harness"), AgentType::valueOf, "harness"),
+        json.getString("sessionId"),
+        env,
+        json.getString("instruction"),
+        surface(json.getString("surface")),
+        parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
+        entityFacts(json));
+  }
+
+  /** The entity facts a start may carry; null when it carries none. */
+  private static EntityFacts entityFacts(JsonObject json) {
+    Object title = json.getValue("entityTitle");
+    Object status = json.getValue("entityStatus");
+    Object blocked = json.getValue("entityBlocked");
+    Object blockSource = json.getValue("blockSource");
+    if (title == null && status == null && blocked == null && blockSource == null) {
+      return null;
+    }
+    if ((title != null && !(title instanceof String))
+        || (status != null && !(status instanceof String))
+        || (blocked != null && !(blocked instanceof Boolean))
+        || (blockSource != null && !(blockSource instanceof String))) {
+      throw new InvalidCommandRequestException(
+          "entityTitle, entityStatus and blockSource must be strings, entityBlocked a boolean");
+    }
+    return new EntityFacts(
+        (String) title, (String) status, Boolean.TRUE.equals(blocked), (String) blockSource);
+  }
+
+  /**
+   * {@code POST /agent-worktrees/{agentId}/turn} — deliver {@code text} to the agent's harness. A
+   * stopped harness is started again with its session first, the turn as its opening turn (D16), so
+   * {@code delivered} is true whenever the agent is known; {@code restarted} says which happened.
+   *
+   * <p>Blank text is a 400 rather than a delivered no-op: on the chat arm an empty user turn is a
+   * turn the harness will answer, and on the terminal arm a bare carriage return into whatever
+   * holds the prompt. Neither is what a caller with an empty string meant.
+   *
+   * <p>The keystroke caveat stays: a TERMINAL session has no stdin channel of its own, so a turn is
+   * keystrokes, and a TUI that is still starting has no prompt to type into yet. {@code delivered}
+   * means the bytes were accepted for a live session, never that a prompt consumed them.
+   */
+  private Reply deliverTurn(String agentId, String body) {
+    String text = jsonBody(body).getString("text");
+    if (text == null || text.isBlank()) {
+      return new Reply(400, WorkspaceJson.error("text is required"));
+    }
+    return new Reply(200, AgentWorktreeJson.turn(agents.turn(agentId, text)));
+  }
+
+  /**
+   * {@code POST /agent-worktrees/{agentId}/blocked} — mark the agent's entity BLOCKED or not,
+   * keeping its title and status, and rename its live session to match. {@code blocked} is
+   * required and must be a JSON boolean; {@code blockSource} is optional.
+   */
+  private Reply setBlocked(String agentId, String body) {
+    JsonObject json = jsonBody(body);
+    if (!(json.getValue("blocked") instanceof Boolean blocked)) {
+      return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
+    }
+    Object blockSource = json.getValue("blockSource");
+    if (blockSource != null && !(blockSource instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("blockSource must be a string or null"));
+    }
+    int renamed = agents.setBlocked(agentId, blocked, (String) blockSource);
+    return new Reply(200, AgentJson.blocked(blocked, renamed));
+  }
+
+  /**
+   * {@code POST /agent-worktrees/{agentId}/entity} — replace the agent's entity facts and rename its
+   * live session to match: the daemon-side twin of {@code AgentLaunchService.setEntity}.
+   *
+   * <p>{@code blocked} is required and a JSON boolean. {@code title} and {@code status} are each a
+   * string, or null or absent for "not known" — which the session name renders by dropping that
+   * fact: the body is the whole of what the host knows, so a field it omits is cleared. {@code
+   * blockSource} ({@code EXPLICIT}, {@code AGENT_WAITING} or {@code BOTH}) is passed through
+   * untouched; the library alone decides which mark it draws.
+   */
+  private Reply setEntity(String agentId, String body) {
+    JsonObject json = jsonBody(body);
+    if (!(json.getValue("blocked") instanceof Boolean blocked)) {
+      return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
+    }
+    Object title = json.getValue("title");
+    if (title != null && !(title instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("title must be a string or null"));
+    }
+    Object status = json.getValue("status");
+    if (status != null && !(status instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("status must be a string or null"));
+    }
+    Object blockSource = json.getValue("blockSource");
+    if (blockSource != null && !(blockSource instanceof String)) {
+      return new Reply(400, WorkspaceJson.error("blockSource must be a string or null"));
+    }
+    EntityFacts facts =
+        new EntityFacts((String) title, (String) status, blocked, (String) blockSource);
+    int renamed = agents.setEntity(agentId, facts);
+    return new Reply(200, AgentJson.entity(facts, renamed));
+  }
+
+  /**
+   * The file routes of one agent, rooted at its wrapper worktree. The services are made on first
+   * use and kept, so the detection caches survive between requests; they key on the worktree's
+   * marker, so an edit is seen on the next request.
+   */
+  private Reply dispatchFiles(String agentId, String verb, String pathParam) {
+    if (!worktrees.exists(agentId)) {
+      return new Reply(404, WorkspaceJson.error("No such agent"));
+    }
+    AgentFiles files =
+        agentFiles.computeIfAbsent(
+            agentId,
+            id -> {
+              LocalWorkspaceFiles local = new LocalWorkspaceFiles(worktrees.wrapperDir(id));
+              return new AgentFiles(
+                  new WorkspaceFileBrowser(local),
+                  new DetectionService(local, () -> declaredFrameworks.get()),
+                  new ComponentMapService(local));
+            });
+    return switch (verb) {
+      case FILES_PATH -> new Reply(200, WorkspaceJson.listing(files.browser().listFiles(pathParam)));
+      case CONTENT_PATH ->
+          new Reply(200, WorkspaceJson.content(files.browser().readFile(pathParam)));
+      case DETECTION_PATH ->
+          new Reply(
+              200, WorkspaceJson.detection(files.detection().detect(worktrees.marker(agentId))));
+      default ->
+          new Reply(
+              200,
+              WorkspaceJson.componentMap(
+                  files.componentMap().componentMap(worktrees.marker(agentId))));
+    };
+  }
+
+  /**
+   * The 409 a launch against a harness nobody signed in answers, with a machine-readable
+   * discriminator: {@code error} is the contract and the sentence is not.
+   */
+  private static JsonObject notSignedIn(AgentNotSignedInException e) {
+    return new JsonObject()
+        .put("error", "not-signed-in")
+        .put("agentType", e.harness() == null ? null : e.harness().name())
+        .put("message", e.getMessage());
+  }
+
   /** Whether {@code path} belongs to the coding-agent surface. */
   private static boolean isAgentPath(String path) {
-    return path.equals(AGENTS_PATH)
-        || path.equals(AGENTS_AVAILABLE_PATH)
+    return path.equals(AGENTS_AVAILABLE_PATH)
         || path.equals(AGENTS_SIGN_IN_PATH)
-        || path.equals(AGENTS_TURN_PATH)
-        || path.equals(AGENTS_BLOCKED_PATH)
-        || path.equals(AGENTS_ENTITY_PATH)
         || path.equals(AGENT_SESSIONS_PATH)
         || path.equals(AGENT_PLUGINS_PATH)
         || path.startsWith(AGENT_PLUGINS_PATH + "/")
@@ -750,12 +905,6 @@ public class WorkspaceApi {
                     harnessCapabilities.get()))
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
-      if (AGENTS_PATH.equals(path)) {
-        return method == HttpMethod.POST
-            ? new Reply(
-                200, AgentJson.launched(agentLaunch.launch(launchRequest(body)), repoId, workspaceId))
-            : new Reply(405, WorkspaceJson.error("Method not allowed"));
-      }
       if (AGENTS_SIGN_IN_PATH.equals(path)) {
         // The same {command: …} envelope every other launch answers, so one client-side decoder
         // serves it: a sign-in terminal is a command in this container like any other, and opening
@@ -765,21 +914,6 @@ public class WorkspaceApi {
                 200,
                 AgentJson.launched(
                     agentLaunch.launchLogin(signInHarness(body)), repoId, workspaceId))
-            : new Reply(405, WorkspaceJson.error("Method not allowed"));
-      }
-      if (AGENTS_TURN_PATH.equals(path)) {
-        return method == HttpMethod.POST
-            ? deliverTurn(body)
-            : new Reply(405, WorkspaceJson.error("Method not allowed"));
-      }
-      if (AGENTS_BLOCKED_PATH.equals(path)) {
-        return method == HttpMethod.POST
-            ? setBlocked(body)
-            : new Reply(405, WorkspaceJson.error("Method not allowed"));
-      }
-      if (AGENTS_ENTITY_PATH.equals(path)) {
-        return method == HttpMethod.POST
-            ? setEntity(body)
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       if (AGENT_SESSIONS_PATH.equals(path)) {
@@ -826,163 +960,11 @@ public class WorkspaceApi {
       // in a display name, and a reworded label silently moved every one of them. A key means the
       // message can be rewritten freely, and `agentType` means the caller can name the harness
       // without parsing it out of a sentence.
-      return new Reply(
-          409,
-          new JsonObject()
-              .put("error", "not-signed-in")
-              .put("agentType", e.harness() == null ? null : e.harness().name())
-              .put("message", e.getMessage()));
+      return new Reply(409, notSignedIn(e));
     } catch (RuntimeException e) {
       LOG.errorf(e, "workspace-daemon agents API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
-  }
-
-  /**
-   * {@code POST /agents/turn} — deliver {@code text} to this workspace's running agent session.
-   *
-   * <p>Blank text is a 400 rather than a delivered no-op: on the chat arm an empty user turn is a
-   * turn the harness will answer, and on the terminal arm it is a bare carriage return into
-   * whatever holds the prompt. Neither is what a caller with an empty string meant.
-   *
-   * <p>The two arms are {@code CommandSockets}', through the same registry: {@link
-   * CommandRegistry#chatSend} for a CHAT command, and for a TERMINAL one the keystrokes {@code
-   * AgentCommands.sendKeystrokes} sends — the text plus a <b>carriage return</b>, not a newline,
-   * because CR is what a terminal sends for Enter and what the attached xterm.js writes on the same
-   * channel.
-   *
-   * <p>A registry that answers false means the live session went away between the listing and the
-   * write. That is reported as the same {@link #NO_AGENT_RUNNING} absence rather than as a failure:
-   * the caller's next move is identical, and a second sentence for a race would be a second state
-   * to handle for no gain.
-   */
-  private Reply deliverTurn(String body) {
-    String text = jsonBody(body).getString("text");
-    if (text == null || text.isBlank()) {
-      return new Reply(400, WorkspaceJson.error("text is required"));
-    }
-    Command target = newestRunningAgentCommand();
-    if (target == null) {
-      return new Reply(200, AgentJson.turn(false, null, null, NO_AGENT_RUNNING));
-    }
-    boolean delivered =
-        target.kind() == CommandKind.CHAT
-            ? registry.chatSend(target.id(), text)
-            : registry.input(target.id(), (text + "\r").getBytes(StandardCharsets.UTF_8));
-    return new Reply(
-        200,
-        AgentJson.turn(
-            delivered, target.id(), target.kind().name(), delivered ? null : NO_AGENT_RUNNING));
-  }
-
-  /**
-   * {@code POST /agents/blocked} — mark this container's entity BLOCKED or not, keeping its title
-   * and status, and rename every live session that can be renamed to match.
-   *
-   * <p>{@code blocked} is required and must be a JSON boolean — a 400 for a missing or
-   * mistyped field rather than a guess, the same discipline {@link #deliverTurn} applies to a blank
-   * {@code text}. {@link AgentLaunchService#setBlocked} does the work and answers how many sessions
-   * it renamed; that count is echoed back so the caller can tell a rename from a no-op without a
-   * second round trip.
-   *
-   * <p>{@code blockSource} is optional, as on {@link #setEntity}.
-   */
-  private Reply setBlocked(String body) {
-    JsonObject json = jsonBody(body);
-    if (!(json.getValue("blocked") instanceof Boolean blocked)) {
-      return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
-    }
-    Object blockSource = json.getValue("blockSource");
-    if (blockSource != null && !(blockSource instanceof String)) {
-      return new Reply(400, WorkspaceJson.error("blockSource must be a string or null"));
-    }
-    int renamed = agentLaunch.setBlocked(blocked, (String) blockSource);
-    return new Reply(200, AgentJson.blocked(blocked, renamed));
-  }
-
-  /**
-   * {@code POST /agents/entity} — replace this container's entity facts and rename every live
-   * session to match.
-   *
-   * <p>{@code blocked} is required and a JSON boolean, as on {@link #setBlocked}. {@code title} and
-   * {@code status} are each a string, or null or absent for "not known" — which the session name
-   * renders by dropping that fact, not by keeping the old one: the body is the whole of what the
-   * host knows, so a field it omits is cleared. Any other type is a 400 rather than a coercion. The
-   * status word is passed through untouched; the library decides which square it draws, and an
-   * unknown word simply draws none. {@link AgentLaunchService#setEntity} answers how many sessions
-   * will carry the new name, echoed back with the facts it stored.
-   *
-   * <p>{@code blockSource} — why the entity is blocked: {@code EXPLICIT}, {@code AGENT_WAITING} or
-   * {@code BOTH} — is a string, or null or absent for explicit, and is passed through untouched
-   * like the status word: the library alone decides that {@code AGENT_WAITING} names the session with
-   * {@code ⁉️} rather than {@code ❗}, and reads any other word as explicit.
-   */
-  private Reply setEntity(String body) {
-    JsonObject json = jsonBody(body);
-    if (!(json.getValue("blocked") instanceof Boolean blocked)) {
-      return new Reply(400, WorkspaceJson.error("blocked is required and must be a boolean"));
-    }
-    Object title = json.getValue("title");
-    if (title != null && !(title instanceof String)) {
-      return new Reply(400, WorkspaceJson.error("title must be a string or null"));
-    }
-    Object status = json.getValue("status");
-    if (status != null && !(status instanceof String)) {
-      return new Reply(400, WorkspaceJson.error("status must be a string or null"));
-    }
-    Object blockSource = json.getValue("blockSource");
-    if (blockSource != null && !(blockSource instanceof String)) {
-      return new Reply(400, WorkspaceJson.error("blockSource must be a string or null"));
-    }
-    EntityFacts facts =
-        new EntityFacts((String) title, (String) status, blocked, (String) blockSource);
-    int renamed = agentLaunch.setEntity(facts);
-    return new Reply(200, AgentJson.entity(facts, renamed));
-  }
-
-  /**
-   * The sentence an undeliverable turn carries. A key would be better and there is none yet: this
-   * route answers one absence and one only, so a discriminator would have a single value. If a
-   * second reason is ever added, add an {@code error} key beside it rather than a second sentence —
-   * the lesson the 409 on {@code POST /agents} already carries.
-   */
-  private static final String NO_AGENT_RUNNING = "no agent is running";
-
-  /**
-   * The running agent command a turn is delivered to, or null when this workspace has none.
-   *
-   * <p><b>Narrowed exactly the way {@code DaemonAgentClient.anyAgentRunning} narrows the same
-   * listing</b> — a CHAT command, or any running command that has recorded an agent session — and
-   * that identity is the point rather than a convenience. The host asks {@code GET
-   * /commands?status=RUNNING} to decide whether to launch or to speak; if this probe accepted a
-   * command that one rejects, the host would be told no agent is running and then told a turn was
-   * delivered to one. Two probes over one fact have to agree, so they read it the same way.
-   * (Locally {@code Command.agentType()} is the stronger signal and is deliberately not used: it
-   * does not cross the wire the host's probe reads.) Plain declared actions fall outside both.
-   *
-   * <p>More than one is possible — a workspace can hold a chat and an interactive run at once — and
-   * the newest wins, by {@code launchedAt}. Sorted here rather than trusted off the listing,
-   * because "which one got the turn" is named in the answer, and a caller that logs it should not
-   * have to know the store's iteration order to read it.
-   */
-  private Command newestRunningAgentCommand() {
-    Command newest = null;
-    for (Command command : commands.list(CommandStatus.RUNNING)) {
-      if (command.kind() != CommandKind.CHAT && command.agentSessions().isEmpty()) {
-        continue;
-      }
-      if (newest == null || isNewer(command, newest)) {
-        newest = command;
-      }
-    }
-    return newest;
-  }
-
-  /** Null-tolerant {@code launchedAt} comparison: a command with no timestamp never wins. */
-  private static boolean isNewer(Command candidate, Command incumbent) {
-    return candidate.launchedAt() != null
-        && (incumbent.launchedAt() == null
-            || candidate.launchedAt().isAfter(incumbent.launchedAt()));
   }
 
   /**
@@ -996,144 +978,10 @@ public class WorkspaceApi {
     return agentDefaults.resolve(requested);
   }
 
-  /** Whether {@code path} belongs to the bootstrap surface. */
-  private static boolean isLifecyclePath(String path) {
-    return path.equals(BOOTSTRAP_COMMANDS_PATH)
-        || path.startsWith(BOOTSTRAP_COMMANDS_PATH + "/");
-  }
-
   /**
-   * The bootstrap routes. Same shape as {@link #onAgentRequest} — GET/POST only, body
-   * read on the event loop, work handed to a worker — because they have the same two needs: a path
-   * segment after a fixed prefix, and a request body.
-   */
-  private void onLifecycleRequest(HttpServerRequest request, String path) {
-    HttpMethod method = request.method();
-    if (method != HttpMethod.GET && method != HttpMethod.POST) {
-      respond(request, 405, WorkspaceJson.error("Method not allowed"));
-      return;
-    }
-    Context context = vertx.getOrCreateContext();
-    request
-        .body()
-        .onFailure(t -> respond(request, 400, WorkspaceJson.error("Could not read the request body")))
-        .onSuccess(
-            body -> {
-              try {
-                workers.execute(
-                    () -> {
-                      Reply reply = dispatchLifecycle(method, path);
-                      context.runOnContext(v -> respond(request, reply.status(), reply.body()));
-                    });
-              } catch (RejectedExecutionException shuttingDown) {
-                respond(request, 503, WorkspaceJson.error("Shutting down"));
-              }
-            });
-  }
-
-  /**
-   * Route and run one bootstrap request.
-   *
-   * <p><b>Every write here answers 202, not 200.</b> Running a bootstrap chain is long-running and
-   * already reports itself over the control socket — as {@code BootstrapStep}/{@code
-   * BootstrapOutcome}/{@code Bootstrapped} — and a bootstrap step is bounded only by {@code
-   * bootstrap-timeout-ms}, which
-   * defaults to an hour. Holding a response open for that is not a contract anyone wants, and
-   * inventing a second, synchronous report of an outcome the caller is already subscribed to would
-   * be two sources of one truth.
-   */
-  private Reply dispatchLifecycle(HttpMethod method, String path) {
-    try {
-      return dispatchBootstrap(method, path);
-    } catch (RuntimeException e) {
-      // Same posture as dispatch(): an arbitrary exception's text can carry container paths the
-      // caller has no business seeing, so it is logged here and not returned.
-      LOG.errorf(e, "workspace-daemon lifecycle API failed handling %s", path);
-      return new Reply(500, WorkspaceJson.error("Internal error"));
-    }
-  }
-
-  /** {@code /bootstrap-commands} — list the chain, run it whole, or run one named step. */
-  private Reply dispatchBootstrap(HttpMethod method, String path) {
-    BootstrapWiring wiring = bootstrap;
-    if (wiring == null) {
-      return new Reply(503, WorkspaceJson.error("Bootstrap is not available yet"));
-    }
-    String rest = path.substring(BOOTSTRAP_COMMANDS_PATH.length());
-    if (rest.isEmpty() || rest.equals("/")) {
-      return method == HttpMethod.GET
-          ? new Reply(200, WorkspaceJson.bootstrapCommands(wiring.chain().get()))
-          : new Reply(405, WorkspaceJson.error("Method not allowed"));
-    }
-    if (method != HttpMethod.POST) {
-      return new Reply(405, WorkspaceJson.error("Method not allowed"));
-    }
-    String[] segments = rest.substring(1).split("/", 2);
-    // The whole chain is /bootstrap-commands/run and one step is /bootstrap-commands/{name}/run, so
-    // "run" is a reserved step name here. Checking the collection form first is what makes it so.
-    if (segments.length == 1 && "run".equals(segments[0])) {
-      runBootstrap(wiring, null);
-      return new Reply(202, WorkspaceJson.accepted());
-    }
-    if (segments.length == 2 && "run".equals(segments[1])) {
-      runBootstrap(wiring, segments[0]);
-      return new Reply(202, WorkspaceJson.accepted());
-    }
-    return new Reply(404, WorkspaceJson.error("No such endpoint"));
-  }
-
-  /**
-   * Hand the chain to the worker pool and return. The run streams itself home over the control
-   * socket exactly as {@code RunBootstrap} does, so there is nothing left to answer with — and it is
-   * bounded by a step timeout that defaults to an hour, so returning immediately is the point.
-   */
-  private void runBootstrap(BootstrapWiring wiring, String onlyName) {
-    workers.execute(
-        () ->
-            BootstrapRunner.run(
-                wiring.workspaceId(),
-                wiring.chain().get(),
-                onlyName,
-                wiring.workingDir(),
-                wiring.stepTimeoutMs(),
-                wiring.emit()));
-  }
-
-  /** {@code POST /agents} — the launch request, with the enums validated like a query parameter. */
-  private static AgentLaunchRequest launchRequest(String body) {
-    JsonObject json = jsonBody(body);
-    return new AgentLaunchRequest(
-        parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
-        surface(json.getString("surface")),
-        parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
-        json.getString("initialContext"),
-        json.getString("resumeSessionId"),
-        Boolean.TRUE.equals(json.getBoolean("fork")),
-        Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
-        parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType"));
-  }
-
-  /**
-   * The {@code surface} field of a launch body: where in the product this session was started from.
-   *
-   * <p><b>This is the daemon where the parameter earns its keep.</b> The four surfaces this
-   * container serves — {@code epic.chat}, {@code epic.agent}, {@code workspace.chat}, {@code
-   * workspace.agent} — send byte-identical launch requests today; {@code epic.chat} and {@code
-   * workspace.chat} differ only in which container the request reached, and nothing downstream could
-   * tell them apart. This is the first time the daemon can be told which of them it is serving, and
-   * therefore the first time one of them can be configured without configuring the other three.
-   *
-   * <p><b>It is required.</b> Two shapes, both the library's rather than reimplemented here: an
-   * <b>unknown</b> surface is a refusal ({@code AgentSurface.of} throws {@link
-   * InvalidCommandRequestException}, which this surface answers as a 400 with the message attached),
-   * and a <b>missing</b> one is null here and a refusal from the launch itself ({@code
-   * AgentLaunchRequest.requiredSurface}), so the 400 says which of the two went wrong.
-   *
-   * <p>It used to be guessed from the request's shape when it was missing — a dated crutch so the
-   * frontends could ship after the daemon. That guess is gone (task 747a0225), and it had to be:
-   * it collapsed {@code epic.chat} onto {@code workspace.chat} and {@code epic.agent} onto {@code
-   * workspace.agent}, which is exactly the collapse this field exists to end, and a caller that
-   * forgot the field looked like one that had shipped it.
+   * The optional {@code surface} of a start: where in the product the agent was started from, which
+   * keys its configuration. Absent means {@code ticket.dispatch}, the surface every dispatched agent
+   * runs on. An unknown one is a 400 ({@code AgentSurface.of} refuses it), never a silent default.
    */
   private static AgentSurface surface(String raw) {
     return raw == null || raw.isBlank() ? null : AgentSurface.of(raw);
@@ -1147,35 +995,8 @@ public class WorkspaceApi {
     }
   }
 
-  /** One answered request: the status and the body that goes with it. */
-  private record Reply(int status, JsonObject body) {}
-
-  /**
-   * Route and run, converting every failure into a status. {@link WorkspaceFilesException} already
-   * carries the one the host used to answer with ({@link WorkspaceFilesException#status()}), so the
-   * browser UI's "invalid path" and "no such file" states keep resolving exactly as before;
-   * anything else is a 500 whose message is logged here and not returned, because an arbitrary
-   * exception's text can carry container paths the caller has no business seeing.
-   */
-  private Reply dispatch(String path, String pathParam) {
-    try {
-      return switch (path) {
-        case FILES_PATH -> new Reply(200, WorkspaceJson.listing(browser.listFiles(pathParam)));
-        case CONTENT_PATH -> new Reply(200, WorkspaceJson.content(browser.readFile(pathParam)));
-        case DETECTION_PATH -> new Reply(200, WorkspaceJson.detection(detection.detect(marker())));
-        case COMPONENT_MAP_PATH ->
-            new Reply(200, WorkspaceJson.componentMap(componentMap.componentMap(marker())));
-        case FAST_FORWARD_PATH -> integrate(pathParam, true);
-        case UPDATE_FROM_PARENT_PATH -> integrate(pathParam, false);
-        default -> new Reply(404, WorkspaceJson.error("No such endpoint"));
-      };
-    } catch (WorkspaceFilesException e) {
-      return new Reply(e.status(), WorkspaceJson.error(e.getMessage()));
-    } catch (RuntimeException e) {
-      LOG.errorf(e, "workspace-daemon read API failed handling %s", path);
-      return new Reply(500, WorkspaceJson.error("Internal error"));
-    }
-  }
+  /** One answered request: the status and its body, a JSON object or (for a list) array. */
+  private record Reply(int status, Object body) {}
 
   /**
    * Route and run one {@code /commands} request.
@@ -1194,15 +1015,14 @@ public class WorkspaceApi {
       // Everything after "/commands", so "" for the collection and "/{id}[/verb]" otherwise.
       String rest = path.substring(COMMANDS_PATH.length());
       if (rest.isEmpty() || rest.equals("/")) {
-        return method == HttpMethod.POST
-            ? launchCommand(body, repoId, workspaceId)
-            : new Reply(
+        // POST /commands launched a checkout-declared action; actions went with the Actions tab
+        // (qits-1152).
+        return method == HttpMethod.GET
+            ? new Reply(
                 200,
                 CommandJson.commands(
-                    commands.list(parseStatus(request.getParam("status"))), repoId, workspaceId));
-      }
-      if (COMMAND_ACTIONS_PATH.equals(path) && method == HttpMethod.GET) {
-        return new Reply(200, CommandJson.actions(commands.availableActions()));
+                    commands.list(parseStatus(request.getParam("status"))), repoId, workspaceId))
+            : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       String[] segments = rest.substring(1).split("/", 2);
       String commandId = segments[0];
@@ -1242,21 +1062,6 @@ public class WorkspaceApi {
     }
   }
 
-  /** {@code POST /commands} — launch a declared action by id. */
-  private Reply launchCommand(String body, String repoId, String workspaceId) {
-    String actionId;
-    try {
-      actionId = new JsonObject(body == null || body.isBlank() ? "{}" : body).getString("actionId");
-    } catch (RuntimeException notJson) {
-      return new Reply(400, WorkspaceJson.error("Expected a JSON body"));
-    }
-    if (actionId == null || actionId.isBlank()) {
-      return new Reply(400, WorkspaceJson.error("actionId is required"));
-    }
-    return new Reply(
-        200, CommandJson.launched(commands.launch(actionId), repoId, workspaceId));
-  }
-
   /**
    * Query-parameter enums. An unparseable value is a 400 rather than being silently ignored: the
    * host's JAX-RS binding rejected it, and quietly widening a filter would show a caller more than
@@ -1286,39 +1091,6 @@ public class WorkspaceApi {
   }
 
   /**
-   * Integrate {@code parentBranch} into this workspace's checkout: fast-forward onto it when {@code
-   * fastForwardOnly}, otherwise merge it in with a merge commit. The two differ only in that,
-   * exactly as the host's two routes did.
-   *
-   * <p>A refusal is a <b>400</b>, not a 500: "this branch has diverged" and "that merge would
-   * conflict" are the answers the UI acts on, and git's own text goes back with them so the user
-   * sees what it saw. 503 when the checkout has no {@link OriginSync} yet — the daemon is up but
-   * has not finished provisioning, and the caller should retry rather than treat it as a failure.
-   */
-  private Reply integrate(String parentBranch, boolean fastForwardOnly) {
-    OriginSync sync = controlSocket.originSync();
-    if (sync == null) {
-      return new Reply(503, WorkspaceJson.error("Workspace is not provisioned yet"));
-    }
-    OriginSync.ParentOpResult result =
-        fastForwardOnly ? sync.fastForwardOntoParent(parentBranch) : sync.mergeParentIn(parentBranch);
-    return result.ok()
-        ? new Reply(200, WorkspaceJson.output(result.output()))
-        : new Reply(400, WorkspaceJson.error(result.failure()));
-  }
-
-  /**
-   * The cache key the two detection services validate against. Coalesced to {@code ""} because the
-   * monitor has no marker until its first report (a git read that failed at boot), and the services
-   * compare it with {@code equals} — a null would NPE on the second call rather than simply missing
-   * the cache.
-   */
-  private String marker() {
-    String current = marker.get();
-    return current == null ? "" : current;
-  }
-
-  /**
    * Constant-time bearer check. {@link MessageDigest#isEqual} rather than {@link String#equals}:
    * the latter returns on the first differing character, which over a network-reachable port is a
    * byte-at-a-time oracle on a secret that never rotates within a container's life.
@@ -1339,7 +1111,7 @@ public class WorkspaceApi {
   }
 
   /** Write one JSON answer. Always runs on the request's context, never throws. */
-  private static void respond(HttpServerRequest request, int status, JsonObject body) {
+  private static void respond(HttpServerRequest request, int status, Object body) {
     try {
       request
           .response()
@@ -1348,7 +1120,7 @@ public class WorkspaceApi {
           // The bodies embed repository-controlled text; nosniff keeps a client from ever deciding
           // this is anything other than the JSON it is labelled as.
           .putHeader("X-Content-Type-Options", "nosniff")
-          .end(body.encode());
+          .end(body instanceof JsonArray array ? array.encode() : ((JsonObject) body).encode());
     } catch (RuntimeException e) {
       // A client that vanished mid-response must not surface as an event-loop exception.
       LOG.debugf("workspace-daemon read API could not write a response: %s", e.getMessage());

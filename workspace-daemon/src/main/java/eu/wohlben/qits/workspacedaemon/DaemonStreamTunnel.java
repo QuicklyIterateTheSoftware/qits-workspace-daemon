@@ -14,7 +14,7 @@ import org.jboss.logging.Logger;
 /**
  * The daemon's half of the reverse tunnel: on an {@code OpenStream}, dial back to qits and pipe
  * that WebSocket to a fresh TCP connection to one of this container's loopback listeners — {@link
- * WorkspaceApi} by default, the supervised web editor when the message names it.
+ * WorkspaceApi}, the only target since the web editor was removed (qits-1152).
  *
  * <p><b>What this replaces.</b> {@code WorkspaceApi} used to bind {@code 0.0.0.0} and be reachable
  * by DNS name from every other container on {@code qits-net} — every one of which runs a coding
@@ -59,13 +59,6 @@ final class DaemonStreamTunnel {
   private final int apiPort;
 
   /**
-   * The loopback port the supervised web editor binds, or {@code 0} when this container has no
-   * editor — which is what makes {@link StreamTarget#EDITOR} a <em>refusal</em> rather than a dial
-   * into a closed port on a plain workspace. See {@link #portFor}.
-   */
-  private final int editorPort;
-
-  /**
    * The {@code Authorization} header every dial-back carries — {@code Bearer <workspace token>} on
    * a workspace carrying a {@code QITS_TOKEN} (runner-placed, or an admin/editor (DIRECT) workspace
    * since qits-1084), empty on a container still holding a commissioned pair instead (that branch
@@ -78,24 +71,15 @@ final class DaemonStreamTunnel {
   private volatile NetClient netClient;
 
   DaemonStreamTunnel(Vertx vertx, String controlSocketUrl, int apiPort) {
-    this(vertx, controlSocketUrl, apiPort, 0);
-  }
-
-  DaemonStreamTunnel(Vertx vertx, String controlSocketUrl, int apiPort, int editorPort) {
-    this(vertx, controlSocketUrl, Optional.empty(), apiPort, editorPort);
+    this(vertx, controlSocketUrl, Optional.empty(), apiPort);
   }
 
   DaemonStreamTunnel(
-      Vertx vertx,
-      String controlSocketUrl,
-      Optional<String> authorization,
-      int apiPort,
-      int editorPort) {
+      Vertx vertx, String controlSocketUrl, Optional<String> authorization, int apiPort) {
     this.vertx = vertx;
     this.controlSocketUrl = controlSocketUrl;
     this.authorization = authorization == null ? Optional.empty() : authorization;
     this.apiPort = apiPort;
-    this.editorPort = editorPort;
   }
 
   void start() {
@@ -125,10 +109,10 @@ final class DaemonStreamTunnel {
     }
     int localPort = portFor(target);
     if (localPort <= 0) {
-      // The allow-list's refusal branch. Reached when the host asks for a listener this container
-      // does not have — an EDITOR stream to a plain workspace. Refusing here rather than dialling
-      // and failing to connect keeps the two indistinguishable-from-the-outside cases apart in the
-      // log, and costs the host nothing it did not already have to handle.
+      // The allow-list's refusal branch, for a target this container has no listener for. Refusing
+      // here rather than dialling and failing to connect keeps the two indistinguishable-from-the-
+      // outside cases apart in the log, and costs the host nothing it did not already have to
+      // handle.
       LOG.warnf("refusing a stream to %s: this daemon serves no such listener", target);
       return;
     }
@@ -171,8 +155,8 @@ final class DaemonStreamTunnel {
    * <p><b>The daemon owns the address; the host owns only the name.</b> Putting a port on the wire
    * would have been the shorter change and would have handed a container-supplied integer straight
    * to {@code NetClient.connect} — the same SSRF primitive {@link #dialUrl} refuses on the path,
-   * pointed at loopback instead of at the network. Two named ports the daemon configured itself
-   * cannot be talked into being a third.
+   * pointed at loopback instead of at the network. A named port the daemon configured itself
+   * cannot be talked into being another.
    *
    * <p>A name outside the enum never reaches here at all: {@code DaemonCodec} refuses to decode it
    * and {@code ControlSocket} drops the frame. So this switch is exhaustive on purpose, and the
@@ -181,7 +165,6 @@ final class DaemonStreamTunnel {
   private int portFor(StreamTarget target) {
     return switch (target == null ? StreamTarget.API : target) {
       case API -> apiPort;
-      case EDITOR -> editorPort;
     };
   }
 

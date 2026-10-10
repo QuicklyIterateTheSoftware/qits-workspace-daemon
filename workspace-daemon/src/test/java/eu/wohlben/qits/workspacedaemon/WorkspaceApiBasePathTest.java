@@ -3,7 +3,6 @@ package eu.wohlben.qits.workspacedaemon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.workspacedaemon.files.LocalWorkspaceFiles;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -40,6 +39,9 @@ class WorkspaceApiBasePathTest {
 
   @TempDir Path root;
 
+  /** One agent's file listing: the route these tests address. */
+  private static final String FILES = "/agent-worktrees/a1/files";
+
   private Vertx vertx;
   private HttpClient client;
   private WorkspaceApi api;
@@ -50,9 +52,12 @@ class WorkspaceApiBasePathTest {
 
   @BeforeEach
   void startServer() throws Exception {
-    LocalWorkspaceFiles files = new LocalWorkspaceFiles(root);
-    files.git("init", "--quiet");
-    Files.writeString(root.resolve("README.md"), "hello\n");
+    Path base = Files.createDirectories(root.resolve("base"));
+    GitFixtures.git(base, "init", "--quiet", "--initial-branch=main");
+    GitFixtures.identity(base);
+    GitFixtures.git(base, "commit", "--quiet", "--allow-empty", "-m", "base");
+    AgentWorktrees worktrees = new AgentWorktrees(base, root.resolve("agents"), "wrapper");
+    Files.writeString(worktrees.ensure("a1", "ticket/qits-1").resolve("README.md"), "hello\n");
 
     vertx = Vertx.vertx();
     api = new WorkspaceApi();
@@ -60,7 +65,7 @@ class WorkspaceApiBasePathTest {
     // The injected value carries a trailing slash (ContainerProxyPath.base does), so binding with
     // one here is the real input rather than a tidied version of it.
     api.apiBasePath = java.util.Optional.of(BASE + "/");
-    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
+    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, worktrees, List::of));
     port = api.actualPort();
     client = vertx.createHttpClient();
     ctx = vertx.getOrCreateContext();
@@ -79,7 +84,7 @@ class WorkspaceApiBasePathTest {
 
   @Test
   void servesItsRoutesUnderTheConfiguredBase() throws Exception {
-    Answer answer = get(BASE + "/files");
+    Answer answer = get(BASE + FILES);
     assertEquals(200, answer.status());
     // The real listing rather than a stub 200: the route reached the file browser.
     assertTrue(answer.body().getJsonArray("paths").contains("README.md"));
@@ -90,7 +95,7 @@ class WorkspaceApiBasePathTest {
     // The daemon is addressed at its base or not at all. Serving both would mean the proxy and a
     // direct caller disagree about this daemon's address and both be right, which is the ambiguity
     // a configured base exists to remove.
-    assertEquals(404, get("/files").status());
+    assertEquals(404, get(FILES).status());
   }
 
   @Test
@@ -99,8 +104,8 @@ class WorkspaceApiBasePathTest {
     // /workspaces/container/1. A plain startsWith would route workspace 12's request into
     // workspace 1's daemon, and on a host running a container per workspace that is a
     // cross-workspace read rather than a miss.
-    assertEquals(404, get("/workspaces/container/12/files").status());
-    assertEquals(404, get("/workspaces/container/2/files").status());
+    assertEquals(404, get("/workspaces/container/12" + FILES).status());
+    assertEquals(404, get("/workspaces/container/2" + FILES).status());
   }
 
   @Test

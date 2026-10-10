@@ -114,7 +114,7 @@ class CommandSocketsTest {
                     // proof that a keystroke crossed the socket and reached the PTY.
                     new ActionResolver.ResolvedAction("echo", "Echo", "cat", true, Map.of()))));
     api.wireCommands(commands, registry, WORKSPACE);
-    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
+    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, null, List::of));
     port = api.actualPort();
     client = vertx.createHttpClient();
     ctx = vertx.getOrCreateContext();

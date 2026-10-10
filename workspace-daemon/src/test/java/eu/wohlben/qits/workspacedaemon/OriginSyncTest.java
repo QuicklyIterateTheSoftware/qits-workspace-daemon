@@ -1,271 +1,186 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import static eu.wohlben.qits.workspacedaemon.GitFixtures.CHILD;
+import static eu.wohlben.qits.workspacedaemon.GitFixtures.WRAPPER;
+import static eu.wohlben.qits.workspacedaemon.GitFixtures.git;
+import static eu.wohlben.qits.workspacedaemon.GitFixtures.line;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.HashMap;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentBranchPushed;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Locks in {@link OriginSync}'s decide/retry/reconcile logic — the container-free half driven off
- * the scheduler through the package-private {@code pushIfAhead}/{@code applyIncomingPull} seams
- * with a scripted {@link GitRunner}, so no real repository or network is needed. Backoff is set to
- * 0 so the transient-retry cases don't sleep.
+ * Fetch and auto-push against real repositories, driven off the scheduler through {@code fetchAll}
+ * and {@code pushCycle}: what is pushed, what is not, and what is reported.
  */
+@EnabledOnOs(OS.LINUX)
 class OriginSyncTest {
 
-  /**
-   * A {@link GitRunner} scripting per-subcommand results (keyed by argv[1]) and recording calls.
-   */
-  private static final class ScriptedGit implements GitRunner {
-    private final Map<String, Deque<Result>> scripts = new HashMap<>();
-    final List<List<String>> calls = new ArrayList<>();
+  private static final String BRANCH = "ticket/qits-1";
 
-    ScriptedGit on(String subcommand, Result... results) {
-      Deque<Result> queue = scripts.computeIfAbsent(subcommand, k -> new ArrayDeque<>());
-      for (Result r : results) {
-        queue.add(r);
-      }
-      return this;
-    }
+  @TempDir Path tmp;
 
-    @Override
-    public Result run(String... argv) {
-      calls.add(List.of(argv));
-      Deque<Result> queue = scripts.get(argv[1]);
-      Result next = queue == null ? null : queue.poll();
-      return next != null ? next : new Result(0, ""); // default: success
-    }
+  private GitFixtures.Estate estate;
+  private AgentWorktrees worktrees;
+  private final List<DaemonMessage> sent = new CopyOnWriteArrayList<>();
 
-    long count(String subcommand) {
-      return calls.stream().filter(c -> c.get(1).equals(subcommand)).count();
-    }
+  /** The credential each agent's push carries; empty means "not known yet". */
+  private final AtomicReference<Optional<Map<String, String>>> credential =
+      new AtomicReference<>(Optional.of(Map.of("QITS_TOKEN", "agent-token")));
+
+  private OriginSync sync;
+
+  @BeforeEach
+  void estate() throws Exception {
+    estate = GitFixtures.estate(tmp);
+    worktrees = new AgentWorktrees(estate.base(), estate.agents(), WRAPPER);
+    sync =
+        new OriginSync(worktrees, agentId -> credential.get(), sent::add, true, 0, 0, 0, 3, 0, 0);
   }
 
-  private static final GitRunner.Result OK = new GitRunner.Result(0, "");
-  private static final GitRunner.Result NON_FF =
-      new GitRunner.Result(1, "! [rejected] feature -> feature (fetch first)");
-  private static final GitRunner.Result LOCKED =
-      new GitRunner.Result(1, "error: cannot lock ref 'refs/heads/feature'");
-  private static final GitRunner.Result FATAL =
-      new GitRunner.Result(128, "fatal: something went badly wrong");
+  @AfterEach
+  void close() {
+    sync.close();
+  }
 
-  private OriginSync sync(GitRunner git, boolean enabled) {
-    return new OriginSync("ws-1", "feature", git, enabled, 250, 4, 0, 0);
+  private Path child() throws Exception {
+    return worktrees.ensure("agent-1", BRANCH).resolve(CHILD);
   }
 
   @Test
-  void nothingToPushWhenNotAhead() {
-    ScriptedGit git = new ScriptedGit().on("rev-list", new GitRunner.Result(0, "0\n"));
-    assertEquals(OriginSync.PushOutcome.NOTHING_TO_PUSH, sync(git, true).pushIfAhead());
-    assertEquals(0, git.count("push"));
+  void aSubmoduleBranchWithNewCommitsIsPushedAndReported() throws Exception {
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    Files.writeString(child.resolve("lib.txt"), "fixed\n");
+    git(child, "commit", "--quiet", "-am", "fix");
+    String head = line(child, "rev-parse", "HEAD");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    AgentBranchPushed expected = new AgentBranchPushed("agent-1", "child", BRANCH + "-fix", head);
+    assertEquals(List.of(expected), pushed);
+    assertEquals(List.of(expected), sent, "and each push goes home as a frame");
+    assertEquals(head, line(estate.childOrigin(), "rev-parse", BRANCH + "-fix"));
   }
 
   @Test
-  void pushesWhenAhead() {
-    ScriptedGit git =
-        new ScriptedGit().on("rev-list", new GitRunner.Result(0, "2\n")).on("push", OK);
-    assertEquals(OriginSync.PushOutcome.PUSHED, sync(git, true).pushIfAhead());
-    assertEquals(1, git.count("push"));
+  void theWrapperBranchIsReportedUnderTheWrappersName() throws Exception {
+    Path wrapper = worktrees.ensure("agent-1", BRANCH);
+    git(wrapper, "commit", "--quiet", "--allow-empty", "-m", "docs");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    assertEquals(1, pushed.size());
+    assertEquals(WRAPPER, pushed.get(0).repository());
+    assertEquals(BRANCH, pushed.get(0).branch());
   }
 
   @Test
-  void pushesWhenNoRemoteTrackingRefYet() {
-    // rev-list fails (origin/feature doesn't exist): treat as ahead and let git decide.
-    ScriptedGit git =
-        new ScriptedGit().on("rev-list", new GitRunner.Result(128, "unknown revision"));
-    assertEquals(OriginSync.PushOutcome.PUSHED, sync(git, true).pushIfAhead());
-    assertEquals(1, git.count("push"));
+  void aBranchWithNothingNewIsNotPushed() throws Exception {
+    git(child(), "switch", "--quiet", "-c", BRANCH + "-fix");
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-fix"));
   }
 
   @Test
-  void disabledNeverPushes() {
-    ScriptedGit git = new ScriptedGit();
-    assertEquals(OriginSync.PushOutcome.DISABLED, sync(git, false).pushIfAhead());
-    assertTrue(git.calls.isEmpty());
+  void aCommitOnADetachedHeadIsNotPushed() throws Exception {
+    Path child = child();
+    git(child, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "nowhere to go");
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals(1, worktrees.cleanupCheck("agent-1").unpushed().size(), "the check catches it");
   }
 
   @Test
-  void nonFastForwardReconcilesThenPushes() {
-    ScriptedGit git =
-        new ScriptedGit()
-            .on("rev-list", new GitRunner.Result(0, "1\n"))
-            .on("push", NON_FF, OK) // first rejected, retry succeeds after reconcile
-            .on("fetch", OK)
-            .on("merge", OK); // ff-only reconcile succeeds
-    assertEquals(OriginSync.PushOutcome.PUSHED, sync(git, true).pushWithRetry());
-    assertEquals(2, git.count("push"));
-    assertEquals(1, git.count("fetch"));
-    assertEquals(1, git.count("merge"));
+  void theDefaultBranchIsNeverPushed() throws Exception {
+    Path child = child();
+    String before = line(estate.childOrigin(), "rev-parse", "main");
+    git(child, "switch", "--quiet", "main");
+    git(child, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "on main");
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals(before, line(estate.childOrigin(), "rev-parse", "main"));
   }
 
   @Test
-  void nonFastForwardThatCannotReconcileIsLeft() {
-    ScriptedGit git =
-        new ScriptedGit()
-            .on("push", NON_FF)
-            .on("fetch", OK)
-            .on("merge", FATAL); // ff-only refuses (diverged/dirty)
-    assertEquals(OriginSync.PushOutcome.DIVERGED, sync(git, true).pushWithRetry());
-    assertEquals(1, git.count("push")); // no force, no second push
+  void anAgentWhoseCredentialIsNotKnownWaitsAndIsPushedOnceItIs() throws Exception {
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "work");
+    credential.set(Optional.empty());
+
+    assertTrue(sync.pushCycle().isEmpty(), "never pushed as the workspace");
+
+    credential.set(Optional.of(Map.of("QITS_TOKEN", "agent-token")));
+    assertEquals(1, sync.pushCycle().size());
   }
 
   @Test
-  void transientFailureRetriesThenSucceeds() {
-    ScriptedGit git = new ScriptedGit().on("push", LOCKED, OK);
-    assertEquals(OriginSync.PushOutcome.PUSHED, sync(git, true).pushWithRetry());
-    assertEquals(2, git.count("push"));
+  void anUnmovedHeadIsNotPushedTwice() throws Exception {
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "work");
+    assertEquals(1, sync.pushCycle().size());
+
+    assertTrue(sync.pushCycle().isEmpty());
+
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "more work");
+    assertEquals(1, sync.pushCycle().size(), "a new commit is pushed again");
   }
 
   @Test
-  void transientFailureExhaustsAttempts() {
-    ScriptedGit git = new ScriptedGit().on("push", LOCKED, LOCKED, LOCKED, LOCKED);
-    assertEquals(OriginSync.PushOutcome.FAILED, sync(git, true).pushWithRetry());
-    assertEquals(4, git.count("push")); // maxAttempts
-  }
+  void aBranchTheHostMovedAheadIsLeftAloneRatherThanForced() throws Exception {
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "local");
+    Path elsewhere = tmp.resolve("elsewhere");
+    git(tmp, "clone", "--quiet", estate.childOrigin().toString(), elsewhere.toString());
+    GitFixtures.identity(elsewhere);
+    git(elsewhere, "commit", "--quiet", "--allow-empty", "-m", "remote");
+    git(elsewhere, "push", "--quiet", "origin", "HEAD:refs/heads/" + BRANCH + "-fix");
+    git(estate.base().resolve(CHILD), "fetch", "--quiet", "origin");
 
-  @Test
-  void fatalFailureStopsImmediately() {
-    ScriptedGit git = new ScriptedGit().on("push", FATAL);
-    assertEquals(OriginSync.PushOutcome.FAILED, sync(git, true).pushWithRetry());
-    assertEquals(1, git.count("push"));
-  }
-
-  @Test
-  void incomingPullFastForwards() {
-    ScriptedGit git = new ScriptedGit().on("fetch", OK).on("merge", OK);
-    assertEquals(OriginSync.PullOutcome.PULLED, sync(git, true).applyIncomingPull("feature"));
-    assertTrue(git.calls.get(git.calls.size() - 1).contains("--ff-only"));
-  }
-
-  @Test
-  void incomingPullRefusedWhenNotFastForwardable() {
-    // The accepted race: the tree turned dirty since the host's clean-gate, so ff-only refuses and
-    // the checkout is left intact rather than clobbered.
-    ScriptedGit git = new ScriptedGit().on("fetch", OK).on("merge", FATAL);
-    assertEquals(OriginSync.PullOutcome.REFUSED, sync(git, true).applyIncomingPull("feature"));
-  }
-
-  @Test
-  void incomingPullRefusedWhenFetchFails() {
-    ScriptedGit git = new ScriptedGit().on("fetch", FATAL);
-    assertEquals(OriginSync.PullOutcome.REFUSED, sync(git, true).applyIncomingPull("feature"));
-    assertEquals(0, git.count("merge")); // never merges if the fetch failed
-  }
-
-  @Test
-  void incomingPullSkipsBlankOrFlagBranch() {
-    ScriptedGit git = new ScriptedGit();
-    assertEquals(OriginSync.PullOutcome.SKIPPED, sync(git, true).applyIncomingPull(""));
-    assertEquals(OriginSync.PullOutcome.SKIPPED, sync(git, true).applyIncomingPull("-D"));
-    assertTrue(git.calls.isEmpty());
-  }
-
-  @Test
-  void incomingPullIndependentOfTheAutoPushKillSwitch() {
-    // A disabled auto-push must not disable host-triggered incoming pulls.
-    ScriptedGit git = new ScriptedGit().on("fetch", OK).on("merge", OK);
-    assertEquals(OriginSync.PullOutcome.PULLED, sync(git, false).applyIncomingPull("feature"));
-  }
-
-  @Test
-  void nonFastForwardRejectionIsNotMistakenForTransient() {
-    // Guards the classify() ordering: a "(fetch first)" reject must reconcile, not blind-retry.
-    ScriptedGit git = new ScriptedGit().on("push", NON_FF, OK).on("fetch", OK).on("merge", OK);
-    sync(git, true).pushWithRetry();
-    assertEquals(1, git.count("fetch"), "a non-ff reject reconciles via fetch, not a bare retry");
-    assertFalse(git.calls.isEmpty());
-  }
-
-  // --- Parent integration: the two routes that moved off the host ------------------------------
-  //
-  // These replaced `docker exec git fetch/merge --ff-only/merge --no-edit/push` in
-  // WorkspaceService. The cases below are the ones the host's REST suite used to cover
-  // (WorkspaceControllerTest#testFastForward*/testUpdateFromParent*), re-asserted here against the
-  // git that now runs in this process.
-
-  @Test
-  void fastForwardOntoParentReconcilesOwnBranchThenParentThenPushes() {
-    ScriptedGit git = new ScriptedGit();
-    OriginSync.ParentOpResult result = sync(git, true).fastForwardOntoParent("main");
-
-    assertTrue(result.ok(), result.failure());
+    assertTrue(sync.pushCycle().isEmpty());
     assertEquals(
-        List.of(
-            List.of("git", "fetch", "origin"),
-            List.of("git", "merge", "--ff-only", "origin/feature"),
-            List.of("git", "merge", "--ff-only", "origin/main"),
-            List.of("git", "push", "origin", "feature")),
-        git.calls,
-        "own branch is reconciled with origin before the parent is fast-forwarded onto");
+        line(elsewhere, "rev-parse", "HEAD"),
+        line(estate.childOrigin(), "rev-parse", BRANCH + "-fix"),
+        "never a force");
   }
 
   @Test
-  void fastForwardRefusesADivergedBranchWithoutPushing() {
-    // --ff-only failing against the parent is exactly the "diverged" case: a 400, not a 500, and
-    // nothing is pushed.
-    ScriptedGit git =
-        new ScriptedGit()
-            .on("merge", new GitRunner.Result(0, ""), new GitRunner.Result(1, "not possible to fast-forward"));
+  void aFetchBringsEveryHeadAndPrunesDeletedOnesWithoutMovingTheBase() throws Exception {
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "work");
+    sync.pushCycle();
+    String baseHead = line(estate.base().resolve(CHILD), "rev-parse", "HEAD");
+    String released = GitFixtures.advanceChildOrigin(tmp, estate);
+    git(estate.childOrigin(), "branch", "-D", BRANCH + "-fix");
 
-    OriginSync.ParentOpResult result = sync(git, true).fastForwardOntoParent("main");
+    assertEquals(0, sync.fetchAll());
 
-    assertFalse(result.ok());
-    assertTrue(result.failure().contains("fast-forward"), result.failure());
-    assertEquals(0, git.count("push"));
-  }
-
-  @Test
-  void mergeParentInCreatesAMergeCommitAndPushes() {
-    ScriptedGit git = new ScriptedGit();
-    OriginSync.ParentOpResult result = sync(git, true).mergeParentIn("main");
-
-    assertTrue(result.ok(), result.failure());
-    assertEquals(
-        List.of(
-            List.of("git", "fetch", "origin"),
-            List.of("git", "merge", "--ff-only", "origin/feature"),
-            List.of("git", "merge", "--no-edit", "origin/main"),
-            List.of("git", "push", "origin", "feature")),
-        git.calls);
-  }
-
-  @Test
-  void mergeParentInAbortsOnConflictSoTheWorkspaceStaysUsable() {
-    // The reason this operation is worth running here rather than leaving a half-merged tree: the
-    // conflicting merge is aborted, so the checkout is exactly as it was and the caller gets a 400.
-    ScriptedGit git =
-        new ScriptedGit()
-            .on(
-                "merge",
-                new GitRunner.Result(0, ""),
-                new GitRunner.Result(1, "CONFLICT (content): Merge conflict in a.txt"),
-                new GitRunner.Result(0, ""));
-
-    OriginSync.ParentOpResult result = sync(git, true).mergeParentIn("main");
-
-    assertFalse(result.ok());
-    assertTrue(result.failure().contains("without conflicts"), result.failure());
-    assertTrue(
-        git.calls.contains(List.of("git", "merge", "--abort")), "the conflicting merge is aborted");
-    assertEquals(0, git.count("push"), "nothing is pushed when the merge did not land");
-  }
-
-  @Test
-  void parentBranchArgumentIsValidatedBeforeItReachesGit() {
-    // Reachable from the docker network now, so a flag-shaped or empty branch is refused here
-    // rather than handed to git as an option.
-    for (String bad : new String[] {null, "", "  ", "--upload-pack=touch /tmp/pwned"}) {
-      ScriptedGit git = new ScriptedGit();
-      OriginSync.ParentOpResult result = sync(git, true).fastForwardOntoParent(bad);
-      assertFalse(result.ok(), "refused: " + bad);
-      assertEquals(0, git.calls.size(), "git is never invoked for: " + bad);
-    }
+    Path baseChild = estate.base().resolve(CHILD);
+    assertEquals(released, line(baseChild, "rev-parse", "origin/main"));
+    assertFalse(
+        git(baseChild, "branch", "--remotes").contains(BRANCH + "-fix"),
+        "a branch the release deleted is pruned");
+    assertEquals(baseHead, line(baseChild, "rev-parse", "HEAD"), "the base clone never moves");
+    assertEquals(released, line(child, "rev-parse", "origin/main"), "and agents see it at once");
   }
 }

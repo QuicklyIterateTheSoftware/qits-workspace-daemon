@@ -29,8 +29,8 @@ import org.yaml.snakeyaml.Yaml;
  *
  * <p>So the two mechanical properties are asserted here, and the interesting one — that each
  * documented <em>field name</em> is real — stays where it already lives, as literal-string
- * assertions in {@code WorkspaceApiTest}, {@code CommandsApiTest}, {@code AgentsApiTest} and
- * {@code BootstrapApiTest}. This class deliberately does not try to check
+ * assertions in {@code WorkspaceApiTest}, {@code CommandsApiTest} and {@code AgentsApiTest}. This
+ * class deliberately does not try to check
  * those: it would have to reimplement the serializers to do it, and the API tests already exercise
  * the real ones over a real socket.
  *
@@ -39,34 +39,33 @@ import org.yaml.snakeyaml.Yaml;
  */
 class OpenApiContractTest {
 
+  private static final String AGENT = WorkspaceApi.AGENT_WORKTREES_PATH + "/{agentId}";
+
   /** Every route the dispatch ladder answers, in the templated spelling the document uses. */
   private static final Set<String> ROUTES =
       new LinkedHashSet<>(
           List.of(
-              WorkspaceApi.FILES_PATH,
-              WorkspaceApi.CONTENT_PATH,
-              WorkspaceApi.DETECTION_PATH,
-              WorkspaceApi.COMPONENT_MAP_PATH,
-              WorkspaceApi.FAST_FORWARD_PATH,
-              WorkspaceApi.UPDATE_FROM_PARENT_PATH,
               WorkspaceApi.COMMANDS_PATH,
-              WorkspaceApi.COMMAND_ACTIONS_PATH,
               WorkspaceApi.COMMANDS_PATH + "/{commandId}",
               WorkspaceApi.COMMANDS_PATH + "/{commandId}/log",
               WorkspaceApi.COMMANDS_PATH + "/{commandId}/terminate",
-              WorkspaceApi.AGENTS_PATH,
               WorkspaceApi.AGENTS_AVAILABLE_PATH,
               WorkspaceApi.AGENTS_SIGN_IN_PATH,
-              WorkspaceApi.AGENTS_TURN_PATH,
-              WorkspaceApi.AGENTS_BLOCKED_PATH,
-              WorkspaceApi.AGENTS_ENTITY_PATH,
               WorkspaceApi.AGENT_SESSIONS_PATH,
               WorkspaceApi.AGENT_PLUGINS_PATH,
               WorkspaceApi.AGENT_PLUGINS_PATH + "/{pluginId}/install",
               WorkspaceApi.PROMPT_REFINEMENTS_PATH,
-              WorkspaceApi.BOOTSTRAP_COMMANDS_PATH,
-              WorkspaceApi.BOOTSTRAP_COMMANDS_PATH + "/run",
-              WorkspaceApi.BOOTSTRAP_COMMANDS_PATH + "/{name}/run"));
+              WorkspaceApi.AGENT_WORKTREES_PATH,
+              AGENT,
+              AGENT + WorkspaceApi.YIELD_PATH,
+              AGENT + WorkspaceApi.TURN_PATH,
+              AGENT + WorkspaceApi.ENTITY_PATH,
+              AGENT + WorkspaceApi.BLOCKED_PATH,
+              AGENT + WorkspaceApi.CLEANUP_CHECK_PATH,
+              AGENT + WorkspaceApi.FILES_PATH,
+              AGENT + WorkspaceApi.CONTENT_PATH,
+              AGENT + WorkspaceApi.DETECTION_PATH,
+              AGENT + WorkspaceApi.COMPONENT_MAP_PATH));
 
   @Test
   void everyRouteTheDispatchLadderAnswersIsDocumented() throws Exception {

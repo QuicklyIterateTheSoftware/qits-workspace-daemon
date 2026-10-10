@@ -24,9 +24,8 @@ import java.util.function.Supplier;
  * database. What genuinely belongs to the <em>user</em> rather than the repository stays host-side:
  * {@code domain.setting} is not extracted, and {@code GET·PUT /api/settings} stay open questions.
  *
- * <p>The config is read through a {@link Supplier} rather than captured, so an agent editing
- * {@code .qits-config.yml} in its own workspace takes effect on the next launch — the same reason
- * {@link ConfigActionResolver} holds one.
+ * <p>The config is read through a {@link Supplier} rather than captured, so a {@code SIGHUP}
+ * reload of the base clone's config takes effect on the next launch.
  */
 final class DaemonAgentDefaults implements AgentDefaults {
 

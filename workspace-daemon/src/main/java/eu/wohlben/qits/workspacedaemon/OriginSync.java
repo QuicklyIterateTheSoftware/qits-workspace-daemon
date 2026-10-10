@@ -1,69 +1,75 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.workspacedaemon.protocol.AgentBranchPushed;
+import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import org.jboss.logging.Logger;
 
 /**
- * Keeps the container's checkout and its origin ref in sync in <em>both</em> directions
- * (docs/epics/qits-workspace-daemon/features/2026-07-25_daemon-bidirectional-auto-sync.md):
+ * Keeps the workspace in sync with the git host in both directions (qits-1152, D8, D22):
  *
  * <ul>
- *   <li><b>Auto-push (container → origin).</b> The {@link GitStatusMonitor} already sees every
- *       commit (a commit moves the working-tree marker even though it touches only {@code .git}),
- *       so {@link #onWorkingTreeSettled()} is called on each report. When the local branch is ahead
- *       of {@code origin/<branch>} it pushes right away — so a commit the coding agent (or a
- *       merge-into-this-workspace) makes is durable on origin without waiting for the next host op.
- *   <li><b>Incoming pull (origin → container).</b> {@link #pull(String)} fast-forwards the checkout
- *       to origin after the host reports a merge/integration advanced this branch out-of-band.
+ *   <li><b>Fetch (origin → base clone).</b> {@code git fetch --prune origin} in the base clone and
+ *       in every submodule, on a timer and whenever the host hints that a ref moved ({@code
+ *       PullBranch}). Only remote-tracking refs move; the base clone's working tree is never
+ *       touched, so a dirty tree can never block it. Agent worktrees share these refs, so a fresh
+ *       {@code origin/main} is there for every agent at once.
+ *   <li><b>Auto-push (agent branches → origin).</b> Every agent branch with commits no remote
+ *       branch has is pushed, the wrapper branch and any branch an agent made in a submodule alike,
+ *       each with <em>that agent's</em> credential. Each push is reported as an {@link
+ *       AgentBranchPushed}. The default branch is never pushed, and a commit on a detached HEAD is
+ *       not pushed at all; the cleanup check reports it.
  * </ul>
  *
- * <p><b>Push conflicts.</b> The host still pushes the same branch to the same bare origin from a
- * few paths ({@code mergeWorkspace}'s pre-integration push, {@code fastForwardWorkspace}, {@code
- * updateWorkspaceFromParent}, the stop-time {@code pushBranch}), so two pushes can race on origin's
- * ref lock. A rejected push is classified: a transient lock/connection failure is retried with
- * capped exponential backoff (the "delay this automatic push" the design calls for), and a
- * non-fast-forward rejection (origin moved ahead under us) is reconciled with a {@code --ff-only}
- * pull before one more push — never a force. A tree that can't fast-forward is left exactly as-is;
- * the next host git op reconciles it.
+ * <p>Both run on one thread, so a fetch and a push never race for the same ref lock. A rejected
+ * push is classified: a lock or connection failure is retried with capped backoff, a
+ * non-fast-forward is left alone (never a force; the agent rewrote a pushed branch, and only it can
+ * say what it meant).
  *
- * <p><b>Serialization.</b> Pushes and pulls both run on one single-thread scheduler, so an
- * auto-push and an incoming pull in the same container never interleave against git.
+ * <p>The push side polls rather than watches: one {@code git worktree list} per repository finds
+ * every agent's branch and head at once, so the cost of a cycle does not grow with the number of
+ * agents. A harness hook nudges a cycle at once, so a commit made in a turn is pushed when the turn
+ * ends rather than at the next poll.
  */
 final class OriginSync {
 
   private static final Logger LOG = Logger.getLogger(OriginSync.class);
 
-  /** The terminal outcome of an auto-push cycle. Package-private so tests can assert on it. */
+  /** The outcome of one push. Package-private so a test can assert on it. */
   enum PushOutcome {
-    DISABLED,
-    NOTHING_TO_PUSH,
     PUSHED,
     DIVERGED,
-    FAILED
+    FAILED,
+    RETRY_LATER
   }
 
-  /** The terminal outcome of an incoming pull. */
-  enum PullOutcome {
-    SKIPPED,
-    PULLED,
-    REFUSED
-  }
-
-  /** How a rejected {@code git push} is classified from its combined output. */
   private enum Rejection {
     NON_FAST_FORWARD,
     TRANSIENT,
     FATAL
   }
 
-  private final String workspaceId;
-  private final String branch;
-  private final GitRunner git;
-  private final boolean enabled;
+  /** One worktree of a repository, as {@code git worktree list --porcelain} reports it. */
+  record Worktree(Path path, String head, String branch) {}
+
+  private final AgentWorktrees worktrees;
+  private final Function<String, Optional<Map<String, String>>> agentEnvironment;
+  private final Consumer<DaemonMessage> emit;
+  private final boolean autoPush;
+  private final long fetchIntervalMs;
+  private final long pushPollMs;
   private final long coalesceMs;
   private final int maxAttempts;
   private final long backoffInitialMs;
@@ -77,105 +83,203 @@ final class OriginSync {
             return thread;
           });
 
-  /** At-most-one pending push window, so a burst of reports coalesces into one push cycle. */
-  private final AtomicBoolean windowOpen = new AtomicBoolean();
+  private final AtomicBoolean fetchPending = new AtomicBoolean();
+  private final AtomicBoolean pushPending = new AtomicBoolean();
+
+  /**
+   * The head last handled per (agent, repository path, branch): pushed, found to have nothing new,
+   * or refused for good. A cycle skips a branch whose head has not moved since.
+   */
+  private final Map<String, String> handled = new ConcurrentHashMap<>();
 
   private volatile boolean closed;
 
+  /**
+   * @param agentEnvironment the agent's harness environment — its credential — by agent id, or
+   *     empty while the daemon has not been told it (after a restart, until the host starts the
+   *     agent again). A branch of such an agent waits rather than being pushed as the workspace
+   * @param fetchIntervalMs the periodic fetch; {@code <= 0} fetches only on a hint
+   * @param pushPollMs the periodic push cycle; {@code <= 0} pushes only when nudged
+   */
   OriginSync(
-      String workspaceId,
-      String branch,
-      GitRunner git,
-      boolean enabled,
+      AgentWorktrees worktrees,
+      Function<String, Optional<Map<String, String>>> agentEnvironment,
+      Consumer<DaemonMessage> emit,
+      boolean autoPush,
+      long fetchIntervalMs,
+      long pushPollMs,
       long coalesceMs,
       int maxAttempts,
       long backoffInitialMs,
       long backoffMaxMs) {
-    this.workspaceId = workspaceId;
-    this.branch = branch;
-    this.git = git;
-    this.enabled = enabled;
-    this.coalesceMs = coalesceMs;
+    this.worktrees = worktrees;
+    this.agentEnvironment = agentEnvironment;
+    this.emit = emit;
+    this.autoPush = autoPush;
+    this.fetchIntervalMs = fetchIntervalMs;
+    this.pushPollMs = pushPollMs;
+    this.coalesceMs = Math.max(0, coalesceMs);
     this.maxAttempts = Math.max(1, maxAttempts);
     this.backoffInitialMs = Math.max(0, backoffInitialMs);
     this.backoffMaxMs = Math.max(this.backoffInitialMs, backoffMaxMs);
   }
 
-  /**
-   * The {@link GitStatusMonitor} reported (its marker moved — a commit, a checkout, or a content
-   * edit): open a coalescing window and, when it closes, push if the branch has unpushed commits. A
-   * content-edit-only report finds nothing ahead and is a cheap no-op.
-   */
-  void onWorkingTreeSettled() {
-    if (!enabled || closed || branch == null || branch.isBlank()) {
-      return;
+  /** Start the two timers. */
+  void start() {
+    if (fetchIntervalMs > 0) {
+      scheduler.scheduleWithFixedDelay(
+          () -> guarded("fetch", this::fetchAll),
+          fetchIntervalMs,
+          fetchIntervalMs,
+          TimeUnit.MILLISECONDS);
     }
-    if (windowOpen.compareAndSet(false, true)) {
-      scheduler.schedule(this::pushCycle, coalesceMs, TimeUnit.MILLISECONDS);
+    if (autoPush && pushPollMs > 0) {
+      scheduler.scheduleWithFixedDelay(
+          () -> guarded("push", this::pushCycle), pushPollMs, pushPollMs, TimeUnit.MILLISECONDS);
     }
   }
 
-  private void pushCycle() {
-    windowOpen.set(false);
+  /** The host says a ref moved: fetch now, ahead of the timer. Coalesced. */
+  void requestFetch() {
+    if (!closed && fetchPending.compareAndSet(false, true)) {
+      submit(
+          () -> {
+            fetchPending.set(false);
+            guarded("fetch", this::fetchAll);
+          },
+          0);
+    }
+  }
+
+  /** Something may have been committed (a harness hook fired): push soon. Coalesced. */
+  void nudge() {
+    if (autoPush && !closed && pushPending.compareAndSet(false, true)) {
+      submit(
+          () -> {
+            pushPending.set(false);
+            guarded("push", this::pushCycle);
+          },
+          coalesceMs);
+    }
+  }
+
+  private void submit(Runnable work, long delayMs) {
+    try {
+      scheduler.schedule(work, delayMs, TimeUnit.MILLISECONDS);
+    } catch (java.util.concurrent.RejectedExecutionException shuttingDown) {
+      LOG.debug("origin sync is shut down; request dropped");
+    }
+  }
+
+  private void guarded(String what, Runnable work) {
     if (closed) {
       return;
     }
     try {
-      pushIfAhead();
+      work.run();
     } catch (RuntimeException e) {
-      LOG.debugf(e, "auto-push cycle failed for %s", workspaceId);
+      LOG.debugf(e, "origin %s cycle failed", what);
     }
   }
 
   /**
-   * Push the branch iff it is ahead of {@code origin/<branch>}. Package-private so a test drives it
-   * directly (off the scheduler) with a canned {@link GitRunner}.
+   * {@code git fetch --prune origin} in the base clone and every submodule. Package-private so a
+   * test drives it off the scheduler. Answers how many repositories failed to fetch.
    */
-  PushOutcome pushIfAhead() {
-    if (!enabled) {
-      return PushOutcome.DISABLED;
-    }
-    if (!isAhead()) {
-      return PushOutcome.NOTHING_TO_PUSH;
-    }
-    return pushWithRetry();
-  }
-
-  /**
-   * Whether the local {@code HEAD} has commits {@code origin/<branch>} lacks. A failed count (no
-   * remote-tracking ref yet, e.g. a never-pushed branch) is treated as "ahead" so the first push is
-   * attempted — git itself is the source of truth for what actually needs sending.
-   */
-  private boolean isAhead() {
-    GitRunner.Result r = git.run("git", "rev-list", "--count", "origin/" + branch + "..HEAD");
-    if (!r.ok()) {
-      return true;
-    }
-    try {
-      return Integer.parseInt(r.output().trim()) > 0;
-    } catch (NumberFormatException e) {
-      return true;
-    }
-  }
-
-  /** Package-private for tests: push with backoff-retry and non-fast-forward reconciliation. */
-  PushOutcome pushWithRetry() {
-    long backoff = backoffInitialMs;
-    for (int attempt = 1; attempt <= maxAttempts && !closed; attempt++) {
-      GitRunner.Result r = git.run("git", "push", "origin", branch);
-      if (r.ok()) {
-        return PushOutcome.PUSHED; // includes "Everything up-to-date"
+  int fetchAll() {
+    int failures = 0;
+    for (AgentWorktrees.Repo repo : worktrees.repositories()) {
+      GitExec.Out fetched =
+          GitExec.git(worktrees.dirOf(repo), "fetch", "--prune", "--quiet", "origin");
+      if (!fetched.ok()) {
+        failures++;
+        LOG.debugf(
+            "fetch failed in %s: %s",
+            repo.path().isEmpty() ? "the wrapper" : repo.path(), fetched.message());
       }
-      switch (classify(r.output())) {
+    }
+    return failures;
+  }
+
+  /**
+   * One push cycle over every repository and every agent. Package-private so a test drives it off
+   * the scheduler. Answers what it pushed, in order.
+   */
+  List<AgentBranchPushed> pushCycle() {
+    List<AgentBranchPushed> pushed = new ArrayList<>();
+    if (!autoPush) {
+      return pushed;
+    }
+    Path agentsRoot = worktrees.agentsRoot().toAbsolutePath().normalize();
+    for (AgentWorktrees.Repo repo : worktrees.repositories()) {
+      Path repository = worktrees.dirOf(repo);
+      for (Worktree worktree : list(repository)) {
+        Path path = worktree.path().toAbsolutePath().normalize();
+        if (worktree.branch() == null
+            || !path.startsWith(agentsRoot)
+            || path.equals(agentsRoot)
+            || worktree.branch().equals(repo.defaultBranch())) {
+          continue;
+        }
+        String agentId = agentsRoot.relativize(path).getName(0).toString();
+        AgentBranchPushed done = pushIfNew(repository, repo, agentId, worktree);
+        if (done != null) {
+          pushed.add(done);
+          emit.accept(done);
+        }
+      }
+    }
+    return pushed;
+  }
+
+  private AgentBranchPushed pushIfNew(
+      Path repository, AgentWorktrees.Repo repo, String agentId, Worktree worktree) {
+    String key = agentId + '\u0000' + repo.path() + '\u0000' + worktree.branch();
+    if (worktree.head().equals(handled.get(key))) {
+      return null;
+    }
+    GitExec.Out ahead =
+        GitExec.git(
+            repository, "rev-list", "--count", worktree.head(), "--not", "--remotes=origin");
+    if (ahead.ok() && "0".equals(ahead.line())) {
+      handled.put(key, worktree.head());
+      return null;
+    }
+    Optional<Map<String, String>> env = agentEnvironment.apply(agentId);
+    if (env.isEmpty()) {
+      // Not handled: the branch is pushed once the host starts the agent again.
+      LOG.debugf(
+          "not pushing %s for agent %s: its credential is not known yet",
+          worktree.branch(), agentId);
+      return null;
+    }
+    PushOutcome outcome = push(repository, env.get(), worktree.branch());
+    if (outcome != PushOutcome.RETRY_LATER) {
+      handled.put(key, worktree.head());
+    }
+    return outcome == PushOutcome.PUSHED
+        ? new AgentBranchPushed(agentId, repo.name(), worktree.branch(), worktree.head())
+        : null;
+  }
+
+  /** Push one branch with retry. Package-private so a test can drive the classification. */
+  PushOutcome push(Path repository, Map<String, String> env, String branch) {
+    long backoff = backoffInitialMs;
+    String refspec = "refs/heads/" + branch + ":refs/heads/" + branch;
+    for (int attempt = 1; attempt <= maxAttempts && !closed; attempt++) {
+      GitExec.Out result = GitExec.git(repository, env, "push", "origin", refspec);
+      if (result.ok()) {
+        return PushOutcome.PUSHED;
+      }
+      switch (classify(result.message())) {
         case NON_FAST_FORWARD -> {
-          // Origin advanced under us: reconcile with a fast-forward pull, then retry the push once
-          // more. If it won't fast-forward (diverged/dirty), leave it — never force.
-          if (!reconcile().ok()) {
-            LOG.debugf(
-                "auto-push for %s hit a non-fast-forward it could not reconcile; leaving it",
-                workspaceId);
-            return PushOutcome.DIVERGED;
-          }
+          LOG.infof(
+              "not pushing %s: the git host has commits it lacks (%s)", branch, result.message());
+          return PushOutcome.DIVERGED;
+        }
+        case FATAL -> {
+          LOG.infof("pushing %s failed: %s", branch, result.message());
+          return PushOutcome.FAILED;
         }
         case TRANSIENT -> {
           if (attempt < maxAttempts) {
@@ -183,197 +287,43 @@ final class OriginSync {
             backoff = Math.min(backoffMaxMs, backoff * 2);
           }
         }
-        case FATAL -> {
-          LOG.debugf("auto-push for %s failed fatally: %s", workspaceId, oneLine(r.output()));
-          return PushOutcome.FAILED;
-        }
       }
     }
-    return PushOutcome.FAILED;
+    return PushOutcome.RETRY_LATER;
   }
 
-  /** {@code git fetch} + {@code git merge --ff-only origin/<branch>} — the reconcile primitive. */
-  private GitRunner.Result reconcile() {
-    git.run("git", "fetch", "origin", branch);
-    return git.run("git", "merge", "--ff-only", "origin/" + branch);
-  }
-
-  /**
-   * Apply an incoming merge the host pushed to origin: fetch and fast-forward the checkout. Runs on
-   * the sync thread (serialized with pushes). Refuses anything but a fast-forward — a tree that
-   * turned dirty since the host's clean-gate is left intact rather than clobbered (the accepted
-   * race).
-   */
-  void pull(String incomingBranch) {
-    if (closed) {
-      return;
+  /** Every worktree of {@code repository}. */
+  static List<Worktree> list(Path repository) {
+    GitExec.Out out = GitExec.git(repository, "worktree", "list", "--porcelain");
+    List<Worktree> worktrees = new ArrayList<>();
+    if (!out.ok()) {
+      return worktrees;
     }
-    scheduler.execute(
-        () -> {
-          try {
-            applyIncomingPull(incomingBranch);
-          } catch (RuntimeException e) {
-            LOG.debugf(e, "incoming pull failed for %s", workspaceId);
-          }
-        });
-  }
-
-  /** Package-private for tests: the fetch + ff-only body of {@link #pull}. */
-  PullOutcome applyIncomingPull(String incomingBranch) {
-    // The host only asks us to pull our own checkout branch; reject a blank/flag-shaped name rather
-    // than hand it to git as an argument.
-    if (incomingBranch == null || incomingBranch.isBlank() || incomingBranch.startsWith("-")) {
-      return PullOutcome.SKIPPED;
+    String path = null;
+    String head = "";
+    String branch = null;
+    for (String line : (out.stdout() + "\n").split("\n", -1)) {
+      if (line.isEmpty()) {
+        if (path != null) {
+          worktrees.add(new Worktree(Path.of(path), head, branch));
+        }
+        path = null;
+        head = "";
+        branch = null;
+      } else if (line.startsWith("worktree ")) {
+        path = line.substring("worktree ".length());
+      } else if (line.startsWith("HEAD ")) {
+        head = line.substring("HEAD ".length());
+      } else if (line.startsWith("branch refs/heads/")) {
+        branch = line.substring("branch refs/heads/".length());
+      }
     }
-    if (!git.run("git", "fetch", "origin", incomingBranch).ok()) {
-      return PullOutcome.REFUSED;
-    }
-    GitRunner.Result ff = git.run("git", "merge", "--ff-only", "origin/" + incomingBranch);
-    if (ff.ok()) {
-      return PullOutcome.PULLED;
-    }
-    // Not fast-forwardable now (a race dirtied the tree, or an unexpected divergence): leave it —
-    // the next host git op (fast-forward / merge-parent-in) reconciles via its own --ff-only step.
-    LOG.debugf(
-        "incoming pull for %s could not fast-forward %s; left intact", workspaceId, incomingBranch);
-    return PullOutcome.REFUSED;
-  }
-
-  /**
-   * The outcome of one host-requested parent integration. {@code output} is git's own text, handed
-   * back so the caller can show it exactly as the host used to show the {@code docker exec} output;
-   * {@code failure} is set (and {@code ok} false) when the operation was refused, and carries the
-   * reason the API turns into a 400.
-   */
-  record ParentOpResult(boolean ok, String output, String failure) {
-    static ParentOpResult done(String output) {
-      return new ParentOpResult(true, output, null);
-    }
-
-    static ParentOpResult refused(String failure) {
-      return new ParentOpResult(false, null, failure);
-    }
-  }
-
-  /**
-   * Fast-forward this workspace's branch onto {@code parentBranch} and push the result — the
-   * daemon-side half of what used to be the host's {@code POST /{workspaceId}/fast-forward}, back
-   * when qits reached in with {@code docker exec git}.
-   *
-   * <p>Same three steps, same order, same meaning as the host's version: fetch, reconcile our own
-   * branch with origin first (it may have advanced out-of-band — e.g. a host-side integration into
-   * it), then fast-forward onto the parent. {@code --ff-only} is what makes this safe: it refuses a
-   * diverged branch instead of inventing a merge commit, which is exactly the 400 the UI expects.
-   */
-  ParentOpResult fastForwardOntoParent(String parentBranch) {
-    return onSyncThread(
-        () -> {
-          String rejected = rejectBranchArgument(parentBranch);
-          if (rejected != null) {
-            return ParentOpResult.refused(rejected);
-          }
-          if (!git.run("git", "fetch", "origin").ok()) {
-            return ParentOpResult.refused("Could not fetch origin");
-          }
-          GitRunner.Result own = git.run("git", "merge", "--ff-only", "origin/" + branch);
-          if (!own.ok()) {
-            return ParentOpResult.refused(oneLine(own.output()));
-          }
-          GitRunner.Result onto = git.run("git", "merge", "--ff-only", "origin/" + parentBranch);
-          if (!onto.ok()) {
-            return ParentOpResult.refused(oneLine(onto.output()));
-          }
-          GitRunner.Result push = git.run("git", "push", "origin", branch);
-          if (!push.ok()) {
-            return ParentOpResult.refused(oneLine(push.output()));
-          }
-          return ParentOpResult.done(onto.output());
-        });
-  }
-
-  /**
-   * Merge {@code parentBranch} into this workspace's branch, creating a merge commit, and push —
-   * the daemon-side half of the host's former {@code POST /{workspaceId}/update-from-parent}. Works
-   * where {@link #fastForwardOntoParent} cannot, i.e. when the branch has its own commits.
-   *
-   * <p>On conflict the merge is <b>aborted</b>, so the checkout is left exactly as it was and the
-   * caller gets a 400. That abort is the whole reason this is worth doing here rather than leaving
-   * a half-merged tree behind: the workspace stays usable either way.
-   */
-  ParentOpResult mergeParentIn(String parentBranch) {
-    return onSyncThread(
-        () -> {
-          String rejected = rejectBranchArgument(parentBranch);
-          if (rejected != null) {
-            return ParentOpResult.refused(rejected);
-          }
-          if (!git.run("git", "fetch", "origin").ok()) {
-            return ParentOpResult.refused("Could not fetch origin");
-          }
-          GitRunner.Result own = git.run("git", "merge", "--ff-only", "origin/" + branch);
-          if (!own.ok()) {
-            return ParentOpResult.refused(oneLine(own.output()));
-          }
-          GitRunner.Result merge =
-              git.run("git", "merge", "--no-edit", "origin/" + parentBranch);
-          if (!merge.ok()) {
-            git.run("git", "merge", "--abort");
-            return ParentOpResult.refused(
-                "Cannot merge '" + parentBranch + "' without conflicts");
-          }
-          GitRunner.Result push = git.run("git", "push", "origin", branch);
-          if (!push.ok()) {
-            return ParentOpResult.refused(oneLine(push.output()));
-          }
-          return ParentOpResult.done(merge.output());
-        });
-  }
-
-  /**
-   * A branch name that came in over HTTP is never handed straight to git: blank is meaningless and
-   * a leading {@code -} would be read as an option. The host validated this too — it is repeated
-   * rather than trusted, because this listener is reachable from the network and the host is no
-   * longer the only caller.
-   */
-  private static String rejectBranchArgument(String candidate) {
-    if (candidate == null || candidate.isBlank()) {
-      return "No parent branch given";
-    }
-    if (candidate.startsWith("-")) {
-      return "Invalid parent branch";
-    }
-    return null;
-  }
-
-  /**
-   * Run {@code work} on the sync thread and wait for it, so a host-requested integration can never
-   * interleave with an auto-push or an incoming pull against the same index — the invariant this
-   * class exists to hold. Unlike {@link #pull}, the caller is an HTTP request that must answer with
-   * the result, so this one blocks (on the API's worker pool, never the event loop).
-   */
-  private ParentOpResult onSyncThread(java.util.concurrent.Callable<ParentOpResult> work) {
-    if (closed) {
-      return ParentOpResult.refused("Daemon is shutting down");
-    }
-    try {
-      return scheduler.submit(work).get();
-    } catch (java.util.concurrent.RejectedExecutionException shuttingDown) {
-      return ParentOpResult.refused("Daemon is shutting down");
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      return ParentOpResult.refused("Interrupted");
-    } catch (java.util.concurrent.ExecutionException e) {
-      LOG.debugf(e, "parent integration failed for %s", workspaceId);
-      return ParentOpResult.refused("Integration failed");
-    }
+    return worktrees;
   }
 
   private static Rejection classify(String output) {
     String o = output == null ? "" : output.toLowerCase(Locale.ROOT);
-    if (o.contains("fetch first")
-        || o.contains("non-fast-forward")
-        || o.contains("[rejected]")
-        || o.contains("remote rejected")) {
+    if (o.contains("fetch first") || o.contains("non-fast-forward") || o.contains("[rejected]")) {
       return Rejection.NON_FAST_FORWARD;
     }
     if (o.contains("cannot lock ref")
@@ -382,10 +332,8 @@ final class OriginSync {
         || o.contains("index.lock")
         || o.contains("could not read from remote")
         || o.contains("hung up")
-        || o.contains("shutdown")
         || o.contains("connection")
-        || o.contains("timed out")
-        || o.contains("interrupted")) {
+        || o.contains("timed out")) {
       return Rejection.TRANSIENT;
     }
     return Rejection.FATAL;
@@ -400,10 +348,6 @@ final class OriginSync {
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
-  }
-
-  private static String oneLine(String output) {
-    return output == null ? "" : output.strip().replace('\n', ' ');
   }
 
   void close() {

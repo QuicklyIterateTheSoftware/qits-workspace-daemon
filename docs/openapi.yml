@@ -4,8 +4,18 @@ info:
   title: qits-workspace-daemon HTTP API
   version: "1"
   description: |
-    Everything qits serves from **inside** a workspace container: the working tree, the commands
-    surface, the coding-agent surface, the bootstrap surface, and two websockets.
+    Everything qits serves from **inside** a workspace container: the agent worktrees the workspace
+    hosts and each one's files, the commands surface, the coding-agent surface, and two websockets.
+
+    ## A workspace hosts agents (qits-1152)
+
+    A workspace keeps one base clone of its wrapper (`/workspace/base`) and never works in it. Each
+    agent gets an **agent worktree** at `/workspace/agents/{agentId}/{wrapper}`: the wrapper on the
+    agent's wrapper branch, each submodule detached at its `origin/main`. `POST /agent-worktrees`
+    makes it and starts the agent's harness there; everything about one agent sits below
+    `/agent-worktrees/{agentId}`. The checkout-wide routes of the single-checkout model (`/files`,
+    `/fast-forward`, `/update-from-parent`, `POST /agents`, `/agents/turn`, `/agents/entity`,
+    `/agents/blocked`, `POST /commands`, `/commands/actions`, `/bootstrap-commands`) are gone.
 
     ## This file is written by hand, and that is deliberate
 
@@ -18,8 +28,8 @@ info:
 
     > **Every field named here is asserted as a literal string by a test in this repository.**
 
-    Those tests are `WorkspaceApiTest`, `CommandsApiTest`, `AgentsApiTest` and `BootstrapApiTest`,
-    which drive a real Vert.x server on an ephemeral port against real
+    Those tests are `WorkspaceApiTest`, `CommandsApiTest` and `AgentsApiTest`, which drive a real
+    Vert.x server on an ephemeral port against real
     processes and a real git tree. They assert wire keys as literal strings on purpose — a test
     that read the names off the records would rename itself along with the bug. Change a key here
     and you must change a test; change a test and you must change this file.
@@ -32,8 +42,9 @@ info:
     the caller's path untouched** — no hop in the chain rewrites anything. The daemon is therefore
     *told* where it is mounted, as `qits.workspace-daemon.api-base-path`
     (`QITS_WORKSPACE_DAEMON_API_BASE_PATH`, injected as `/workspaces/container/{workspaceId}`).
-    With a base configured, `GET /files` is served at `GET /workspaces/container/12/files` and only
-    there. With none — every direct caller, every test — it is served at `GET /files`.
+    With a base configured, `GET /agent-worktrees` is served at
+    `GET /workspaces/container/12/agent-worktrees` and only there. With none — every direct caller,
+    every test — it is served at `GET /agent-worktrees`.
 
     No `{repoId}/{workspaceId}` prefix appears in any path: this daemon serves exactly one
     workspace, so those segments would be a constant the caller has to get right. The response
@@ -71,10 +82,6 @@ info:
       present, `[]` when empty.
     - Timestamps are ISO-8601 strings (`Instant.toString()`).
     - Enums go out as their constant name.
-    - **Every write on the bootstrap surface answers `202`, not `200`.** A chain is long-running
-      (a bootstrap step is bounded only by an hour-default timeout) and already reports itself on
-      the control socket. A second, synchronous account of an outcome the
-      caller is already subscribed to would be two sources of one truth.
     - `503` means "not wired yet" and is retryable — the daemon is up but the capability's
       preconditions are not met. It is never a `404`, which would read as "this daemon will never
       serve that".
@@ -100,172 +107,16 @@ security:
   - bearerAuth: []
 
 tags:
-  - name: checkout
-    description: Reading the working tree this daemon owns.
-  - name: parent integration
-    description: The only two routes that mutate the checkout.
+  - name: agent worktrees
+    description: The agents this workspace hosts, their harnesses, and what they leave behind.
+  - name: files
+    description: Reading one agent's worktree.
   - name: commands
     description: Launching and inspecting this container's processes.
   - name: coding agents
-    description: Launching harnesses, and the session lineage they leave behind.
-  - name: bootstrap
-    description: The declared setup chain.
+    description: The harness surface no one agent owns — sign-in, plugins, sessions, refinement.
 
 paths:
-  /files:
-    get:
-      tags: [checkout]
-      operationId: listFiles
-      summary: One level of the working tree.
-      description: |
-        Lists one level of the tree plus the whole-tree generation token. `path` is
-        workspace-root-relative and optional — absent means the root level.
-
-        **Submodules are part of the tree.** An initialized submodule's files (tracked and new
-        untracked, its own gitignore honoured) are listed eagerly under their workspace-relative
-        paths, recursively — never as the bare gitlink path, which a client would render as a file
-        that 404s on open. A submodule with no checkout behind its gitlink comes back as a lazy
-        stub instead.
-
-        **Lazy directories are otherwise the gitignored ones.** There is no separate "ignored"
-        flag: a directory that git does not track is returned as a stub with its immediate child
-        count rather than being walked, and the caller asks for it by path when the user expands
-        it.
-
-        `.git` is refused like anything outside the root.
-      parameters:
-        - $ref: "#/components/parameters/RelativePath"
-      responses:
-        "200":
-          description: The level, and the token it was computed under.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/FileListing" }
-        "400": { $ref: "#/components/responses/BadPath" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-
-  /files/content:
-    get:
-      tags: [checkout]
-      operationId: readFile
-      summary: One file's text.
-      description: |
-        Reads **any regular file inside the root, tracked or not** — no git consultation at all, so
-        a path that only exists in the working tree (a log, a generated file) resolves.
-
-        Two cases arrive identically as `binary: true` with no `content`: a file that is genuinely
-        binary, and one over the 2 MB cap. The cap **soft-degrades** rather than answering 413, so
-        a client cannot distinguish them from the body alone.
-      parameters:
-        - name: path
-          in: query
-          required: true
-          schema: { type: string }
-          description: Workspace-root-relative. Required here, unlike on `/files`.
-      responses:
-        "200":
-          description: The file, or the binary flag standing in for it.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/FileContent" }
-        "400": { $ref: "#/components/responses/BadPath" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-
-  /detection:
-    get:
-      tags: [checkout]
-      operationId: detect
-      summary: Frameworks, projects and the source-to-test graph.
-      description: |
-        Carries a `generation` token computed by a **byte-identical duplicate** of the algorithm
-        `/files` uses — a sha256 over the deduped, sorted path list of the whole tree, submodules
-        walked like the listing walks them.
-
-        That is not decoration. `/files` and `/detection` are two independently-fetched views over
-        one mutable tree, and applying a detection result to a tree it was not computed from makes
-        the UI flicker in a way that is very hard to diagnose later. **Apply a detection only while
-        its token matches the tree currently rendered; on a mismatch hold the last consistent
-        result rather than blanking it.** The tokens agree on first load, so there is no initial
-        flash.
-      responses:
-        "200":
-          description: The detection result and its token.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Detection" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-
-  /component-map:
-    get:
-      tags: [checkout]
-      operationId: componentMap
-      summary: The UI components a framed pick can be attributed to.
-      description: |
-        Angular only today; `framework` says which scanner produced the map, and a tree it does not
-        recognise answers `components: []` rather than an error.
-
-        Fetch it once per pick-mode activation, not per pick — a map that misses a just-created
-        component simply skips attribution.
-      responses:
-        "200":
-          description: The map.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ComponentMap" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-
-  /fast-forward:
-    post:
-      tags: [parent integration]
-      operationId: fastForwardOntoParent
-      summary: Fast-forward this workspace's branch onto its parent.
-      description: |
-        Fetches, reconciles this branch with its own origin ref first (it may have advanced
-        out-of-band), then fast-forwards onto the parent and pushes. `--ff-only` throughout, which
-        is what makes it safe: a diverged branch is **refused** rather than merged.
-
-        A refusal is a `400` carrying git's own text, not a `500` — "this branch has diverged" and
-        "that merge would conflict" are answers the UI acts on.
-
-        POST-only. The method pairing is checked before dispatch specifically so a GET can never
-        reach git.
-      parameters:
-        - $ref: "#/components/parameters/ParentBranch"
-      responses:
-        "200": { $ref: "#/components/responses/GitOutput" }
-        "400": { $ref: "#/components/responses/IntegrationRefused" }
-        "503": { $ref: "#/components/responses/NotProvisioned" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-
-  /update-from-parent:
-    post:
-      tags: [parent integration]
-      operationId: mergeParentIn
-      summary: Merge the parent branch in, creating a merge commit.
-      description: |
-        Works where `/fast-forward` cannot — when the branch has its own commits. **On conflict the
-        merge is aborted**, so the checkout is left exactly as it was and the caller gets a 400.
-        That abort is the whole reason this runs here rather than leaving a half-merged tree
-        behind: the workspace stays usable either way.
-
-        Serialized behind the same sync thread as the auto-pusher, so a host-requested integration
-        can never interleave with a push against the same index.
-      parameters:
-        - $ref: "#/components/parameters/ParentBranch"
-      responses:
-        "200": { $ref: "#/components/responses/GitOutput" }
-        "400": { $ref: "#/components/responses/IntegrationRefused" }
-        "503": { $ref: "#/components/responses/NotProvisioned" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-
   /commands:
     get:
       tags: [commands]
@@ -278,6 +129,10 @@ paths:
         that as an explicit state, not as an empty list.
 
         Bounded at 200 finished commands, oldest evicted; running commands are never evicted.
+
+        Every agent's harness is a command here, and a command id is unique across agents, so the
+        list and the sockets need no agent in their path. Launching a checkout-declared action
+        (`POST /commands`, `GET /commands/actions`) went with the Actions tab (qits-1152).
       parameters:
         - name: status
           in: query
@@ -293,59 +148,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CommandList" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "503": { $ref: "#/components/responses/CommandsUnavailable" }
-    post:
-      tags: [commands]
-      operationId: launchCommand
-      summary: Launch a declared action.
-      description: |
-        Spawn-and-return, always. There is no fire-and-await form on this API: the
-        `RunCommand`/`CommandChunk`/`CommandExit` triple exists only on the control socket, so a
-        config action reports through the run history and its log like any other command.
-
-        `actionId` must name an action the checkout's `.qits-config.yml` declares — see
-        `GET /commands/actions`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/LaunchCommandRequest" }
-      responses:
-        "200":
-          description: The launched command.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/CommandEnvelope" }
-        "400":
-          description: |
-            No `actionId`, an `actionId` the checkout does not declare, or an unparseable body.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "503": { $ref: "#/components/responses/CommandsUnavailable" }
-
-  /commands/actions:
-    get:
-      tags: [commands]
-      operationId: listActions
-      summary: What this checkout declares, and therefore what POST /commands accepts.
-      description: |
-        Read from the checkout's `.qits-config.yml` by `ConfigActionResolver`.
-
-        **There is no origin field, because there is only one origin.** The platform's globally
-        defined "code actions" did not survive the split — the action tools never left the
-        monolith. Do not build a badge for a distinction that no longer exists.
-
-        The `execute`/`check` scripts are deliberately absent: they come from an untrusted checkout
-        and the caller's use for this list is to *name* an action, not to read what it will do.
-      responses:
-        "200":
-          description: The declared actions, in config order.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ActionList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/CommandsUnavailable" }
 
@@ -429,64 +231,6 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/CommandsUnavailable" }
 
-  /agents:
-    post:
-      tags: [coding agents]
-      operationId: launchAgent
-      summary: Launch a coding agent.
-      description: |
-        A coding agent **is** a command, so this answers the same `{command: …}` envelope
-        `POST /commands` does and one client-side decoder serves both.
-
-        `mode` picks how the run is driven and rendered, and it determines which socket to attach:
-
-        | mode | `command.kind` | `command.interactive` | socket |
-        |---|---|---|---|
-        | `CHAT` | `CHAT` | `false` | `WS /chat/commands/{id}` |
-        | `INTERACTIVE` | `TERMINAL` | `true` | `WS /terminal/commands/{id}` |
-
-        **Resume and fork require the session to belong to this container.** A session recorded by
-        a previous container is refused rather than attempted: the store that would vouch for it
-        did not survive, and resuming a vanished id exits instantly with "no conversation found",
-        in a loop the user never asked for. Fail closed.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/LaunchAgentRequest" }
-      responses:
-        "200":
-          description: The launched agent command.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/CommandEnvelope" }
-        "400":
-          description: |
-            A missing or unparseable `scope`/`mode`/`agentType`, an unknown `surface`, `fork`
-            without `resumeSessionId`, a `resumeSessionId` this container does not own, or a fork
-            of a Kimi session.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "409":
-          description: |
-            **Nobody has signed this harness in** on the shared credential volume, so the session
-            cannot start. Not a 500 and not a 400: the request was well-formed and the caller
-            cannot fix it by asking differently — somebody has to sign in, once.
-
-            Match `error`, never the sentence. The discriminator is the contract precisely so the
-            message can be reworded without breaking a caller; this repo has already paid once for
-            a display string used as one.
-
-            Offer `POST /agents/sign-in` as an explicit next step rather than opening it in place —
-            being dropped into a login terminal you did not ask for is what this replaced.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/NotSignedIn" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/AgentsUnavailable" }
-
   /agents/sign-in:
     post:
       tags: [coding agents]
@@ -495,10 +239,10 @@ paths:
       description: |
         A **door**, opened deliberately, and until this existed there was none.
 
-        The login REPL used to be reachable only by accident: an unauthenticated harness made
-        `POST /agents` quietly answer a login terminal instead of the session that was asked for,
-        and the caller redirected the user into it without saying so. That substitution is gone —
-        a launch against a harness nobody has signed in is a `409` (see `POST /agents`) — so this
+        The login REPL used to be reachable only by accident: an unauthenticated harness made a
+        launch quietly answer a login terminal instead of the session that was asked for, and the
+        caller redirected the user into it without saying so. That substitution is gone — a start
+        against a harness nobody has signed in is a `409` (see `POST /agent-worktrees`) — so this
         is how a signed-out platform becomes a signed-in one. Somebody has to complete the OAuth
         once per credential volume; after that every container on it is signed in.
 
@@ -524,152 +268,13 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
-  /agents/turn:
-    post:
-      tags: [coding agents]
-      operationId: deliverAgentTurn
-      summary: Say something to the agent that is already running.
-      description: |
-        The **host-side twin of typing into the command websocket**. Until this existed the platform
-        could launch an agent (`POST /agents`, the instruction as the seed turn) and ask whether one
-        was running (`GET /commands?status=RUNNING`), and could say nothing at all to a standing
-        session — the only path for a user turn was a browser attached to the socket. A launch is
-        not a turn: it starts a session instead of continuing the one holding the context.
-
-        Deliberately general. Nothing here knows what the text is for; it is delivered verbatim to
-        the workspace's **newest running agent command**, narrowed exactly as the `RUNNING` probe
-        narrows it (a `CHAT` command, or any running command that has recorded an agent session).
-        Two probes over one fact have to agree.
-
-        | `command.kind` | how the text is delivered |
-        |---|---|
-        | `CHAT` | a user turn on the harness's stdin, as the chat socket sends |
-        | `TERMINAL` | keystrokes into the PTY, followed by a carriage return |
-
-        **No agent running is a `200`, not a `404`.** The caller's next move is to launch, and an
-        absence it can act on is an answer; a `404` would claim the endpoint does not exist, which
-        is the one thing that is not true.
-
-        **The keystroke caveat is kept rather than papered over.** A TUI that is still starting has
-        no prompt to type into yet, and this route does not buffer for it: holding a turn would mean
-        inventing a readiness signal the harness does not emit, and a buffered turn arriving late is
-        worse than one that visibly missed. `delivered` means the registry accepted the bytes for a
-        live session, never that a prompt consumed them.
-
-        **`/compact` is unestablished.** Whether a Claude Code session treats a delivered
-        `/compact` as a slash command or echoes it as prompt text has not been observed on either
-        arm, so no host-side knob that sends it is defaulted on. Nothing in the daemon parses the
-        text; the answer is the harness's. See `WorkspaceApi.AGENTS_TURN_PATH` for what observation
-        would settle it.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/AgentTurnRequest" }
-      responses:
-        "200":
-          description: |
-            The delivery outcome — including `delivered: false` when no agent is running, which is
-            an answer rather than an error.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AgentTurnResult" }
-        "400":
-          description: A missing or blank `text`, or an unparseable body.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/AgentsUnavailable" }
-
-  /agents/blocked:
-    post:
-      tags: [coding agents]
-      operationId: setAgentBlocked
-      summary: Mark this container's entity BLOCKED or not, and rename live sessions to match.
-      description: |
-        The daemon-side twin of `POST /agents/turn`: qits-workspaces-service (a workspace container)
-        and qits-projects-service, through the refinement tunnel (a refinement container), call this
-        the same way either reaches `/agents/turn`, because this container is the only place that
-        holds the stdin channel a Claude Remote Control rename travels over — the host knows the
-        entity changed state, but cannot act on it itself.
-
-        The flag is stored first, so every launch from here on renders the new session name whatever
-        happens next. Then every live Claude chat this container's `AgentLaunchService` started with
-        Remote Control on is renamed over its own stdin (`/rename`, answered locally by the harness,
-        no model call); a session whose rename fails has ended and is dropped from the renameable
-        set. Interactive sessions are renamed as for `POST /agents/entity`. The title and status
-        stay what they were.
-
-        Superseded by `POST /agents/entity` and kept, unchanged, for a host that predates it.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/AgentBlockedRequest" }
-      responses:
-        "200":
-          description: The marker this call left standing, and how many live sessions it renamed.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AgentBlockedResult" }
-        "400":
-          description: A missing or non-boolean `blocked`, or an unparseable body.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/AgentsUnavailable" }
-
-  /agents/entity:
-    post:
-      tags: [coding agents]
-      operationId: setAgentEntity
-      summary: Tell this container its entity's title, status and blocked flag; rename live sessions.
-      description: |
-        The successor of `POST /agents/blocked`, reached by the same two hosts the same way. A
-        session name is `[❗]<status square> <id> <title>`; the id is the container's boot value and
-        this call moves the other three facts, whole — a `title` or `status` that is null or absent
-        is cleared, not kept, and the name drops that fact.
-
-        The facts are stored first, so every launch from here on renders the new name. Every live
-        Claude Remote Control chat is renamed over its own stdin at once. A live interactive
-        `--remote-control` session is renamed by typing `/rename <name>` into its terminal — but
-        only when its hooks last reported IDLE and the person's browser terminal holds no unsent
-        draft; otherwise the name is queued and typed at the next safe moment. With activity
-        tracking off there is never such a moment, and the session takes the name at its next
-        launch. See `AgentLaunchService.setEntity`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/AgentEntityRequest" }
-      responses:
-        "200":
-          description: The facts this call left standing, and how many live sessions carry the name.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AgentEntityResult" }
-        "400":
-          description: |
-            A missing or non-boolean `blocked`, a `title` or `status` that is neither a string nor
-            null, or an unparseable body. Nothing is stored.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/AgentsUnavailable" }
-
   /agents/available:
     get:
       tags: [coding agents]
       operationId: availableAgents
       summary: The harnesses this daemon can launch, the resolved default, and what each reports.
       description: |
-        The default is resolved from the checkout's `.qits-config.yml` (`agent.defaultType`)
+        The default is resolved from the base clone's `.qits-config.yml` (`agent.defaultType`)
         falling through to the daemon's. Fetch once per page; it does not change under a container.
 
         A **resumed** session keeps its original harness — only a fresh launch may pick one.
@@ -804,65 +409,427 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
-  /bootstrap-commands:
+  /agent-worktrees:
     get:
-      tags: [bootstrap]
-      operationId: listBootstrapCommands
-      summary: The chain this checkout declares, in the order it runs.
+      tags: [agent worktrees]
+      operationId: listAgentWorktrees
+      summary: Every agent with a worktree in this workspace.
       description: |
-        **The declaration only — there is no per-step last run here.** Progress rides the control
-        socket as `BootstrapStep`/`BootstrapOutcome`/`Bootstrapped`, and the durable per-step
-        history is host-side (`workspace_bootstrap_run`, read through qits-workspaces). Join the
-        two by step name.
+        **A JSON array**, the one top-level array on this API. It lists every agent whose worktree
+        is on the workspace volume, whether or not this process has started it since it came up:
+        after a container restart an agent is listed with `harnessRunning: false`, and its
+        `workId`, `wrapperBranch` and `sessionId` come from the `agent.json` the daemon keeps
+        beside the worktree (no credential is ever written there).
 
-        The `execute` and `check` scripts are absent for the same reason they are on
-        `/commands/actions`: untrusted checkout, and the caller's use is to name a step.
+        Each repository's state is read from git on every call, so this is not a cheap poll.
       responses:
         "200":
-          description: The chain.
+          description: The agents.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BootstrapChain" }
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AgentWorktree" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/BootstrapUnavailable" }
-
-  /bootstrap-commands/run:
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
     post:
-      tags: [bootstrap]
-      operationId: runBootstrapChain
-      summary: Run the whole chain.
+      tags: [agent worktrees]
+      operationId: startAgentWorktree
+      summary: Make an agent's worktree if missing, and start its harness there.
       description: |
-        `202` and nothing else: the run streams itself home on the control socket, and it is
-        bounded only by `bootstrap-timeout-ms` — an hour by default. Returning immediately is the
-        point.
+        **Idempotent.** The worktrees are made where they are missing and never touched where they
+        exist, because they may hold work. A harness that already runs is left running and
+        answered (`launched: false`); one that does not is started.
 
-        `run` is therefore a reserved step name; the collection form is matched first.
+        The wrapper worktree is on `wrapperBranch`: continued from `origin/<wrapperBranch>` when the
+        git host has it, else new from the wrapper's `origin/main`. Each submodule is a worktree
+        **detached** at its own `origin/main`; in each one the agent changes, the agent creates
+        its own branch `<wrapperBranch>-<name>` (a `pre-commit` hook refuses commits on `main` or
+        on a detached HEAD and says so).
+
+        **Resume.** With a `sessionId` whose files the harness still has (they live on the shared
+        harness volume, keyed by the worktree's path, so they outlive a container restart), the
+        harness resumes that session (`resumed: true`). Without them it starts a new one; the
+        answer's `sessionId` is then the new id.
+
+        **The credential.** `env` is laid over the harness process's environment and reaches
+        nothing else: never a file, never git config. The daemon keeps it in memory to push the
+        agent's branches as the agent. After a restart it is not known until this is called again,
+        and until then the agent's branches wait rather than being pushed as the workspace.
+
+        `instruction` is the opening turn, on a fresh or a resumed session alike.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentWorktreeStart" }
       responses:
-        "202": { $ref: "#/components/responses/Accepted" }
+        "200":
+          description: The agent's worktree and its harness.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentWorktreeStarted" }
+        "400":
+          description: |
+            A missing `agentId`, `workId` or `wrapperBranch`; an `agentId` that is not a safe
+            directory name; a `wrapperBranch` that is not a valid branch, starts with `-`, or is the
+            default branch; an unknown `harness`, `mode` or `surface`; an `env` that is not an
+            object of strings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            Either git would not make the wrapper worktree — its branch is checked out in another
+            agent's worktree, say — and the `message` says why, or nobody has signed the harness in,
+            which answers the `NotSignedIn` body. Match `error`, never the sentence.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/Error" }
+                  - { $ref: "#/components/schemas/NotSignedIn" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}:
+    get:
+      tags: [agent worktrees]
+      operationId: getAgentWorktree
+      summary: One agent, as the list reports it.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: The agent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentWorktree" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+    delete:
+      tags: [agent worktrees]
+      operationId: removeAgentWorktree
+      summary: Stop the agent and remove its worktrees and local branches.
+      description: |
+        **Refused while work would be lost**: uncommitted changes, or commits no remote branch has
+        (a commit on a detached HEAD included). The `409` carries the cleanup check, so the caller
+        can hand the leftovers back to the agent. `force=true` removes it anyway — for a person's
+        explicit discard, never for the cleanup sweep.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+        - name: force
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Remove even when the cleanup check finds work.
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRemoved" }
+        "409":
+          description: Not removed; this is what would have been lost.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CleanupCheck" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/yield:
+    post:
+      tags: [agent worktrees]
+      operationId: yieldAgent
+      summary: Stop the agent's harness and keep everything else.
+      description: |
+        A blocked agent yields the workspace's harness slot: its process stops (memory freed), and
+        its worktree, branches and session stay. A turn or a start resumes it with its session.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: Whether a running harness was stopped.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentYielded" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/BootstrapUnavailable" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
-  /bootstrap-commands/{name}/run:
+  /agent-worktrees/{agentId}/turn:
     post:
-      tags: [bootstrap]
-      operationId: runBootstrapStep
-      summary: Run one named step alone.
+      tags: [agent worktrees]
+      operationId: deliverAgentTurn
+      summary: Say something to the agent, starting its harness again if it stopped.
       description: |
-        Same `202` contract as the whole chain. A name the chain does not declare runs nothing and
-        still terminates — the outcome is on the control socket, not in this response.
+        The host-side twin of typing into the command websocket, for one agent. Delivered verbatim:
+
+        | `command.kind` | how the text is delivered |
+        |---|---|
+        | `CHAT` | a user turn on the harness's stdin, as the chat socket sends |
+        | `TERMINAL` | keystrokes into the PTY, followed by a carriage return |
+
+        **A stopped harness is started again first**, resuming its session when the session's
+        files are there, with the text as its opening turn (`restarted: true`). So `delivered` is
+        true whenever the agent is known here.
+
+        **The keystroke caveat is kept.** A TUI that is still starting has no prompt to type into
+        yet, and this route does not buffer for it. `delivered` means the bytes were accepted for a
+        live session, never that a prompt consumed them.
+
+        An agent this process has not started since it came up is a `404`: after a restart the
+        credential is not known, so the host starts the agent again with `POST /agent-worktrees`.
       parameters:
-        - name: name
-          in: path
+        - $ref: "#/components/parameters/AgentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentTurnRequest" }
+      responses:
+        "200":
+          description: Where the turn went.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentTurnResult" }
+        "400":
+          description: A missing or blank `text`, or an unparseable body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "409":
+          description: The harness had to be started again and nobody has signed it in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotSignedIn" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/entity:
+    post:
+      tags: [agent worktrees]
+      operationId: setAgentEntity
+      summary: Tell an agent its entity's title, status and blocked flag; rename its session.
+      description: |
+        A session name is `[❗|⁉️]<status square> <id> <title>`; the id is the agent's entity id
+        and this call moves the other facts, whole — a `title` or `status` that is null or absent
+        is cleared, not kept. The facts are stored first, so every launch of this agent renders the
+        new name. The agent's live Claude Remote Control chat is renamed over its own stdin at once;
+        a live interactive session is renamed at its next idle moment. Other agents are untouched.
+        See `AgentLaunchService.setEntity`.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentEntityRequest" }
+      responses:
+        "200":
+          description: The facts this call left standing, and how many live sessions carry the name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentEntityResult" }
+        "400":
+          description: |
+            A missing or non-boolean `blocked`, a `title`, `status` or `blockSource` that is neither
+            a string nor null, or an unparseable body. Nothing is stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/blocked:
+    post:
+      tags: [agent worktrees]
+      operationId: setAgentBlocked
+      summary: Mark an agent's entity BLOCKED or not, keeping its title and status.
+      description: |
+        The flag alone; `POST …/entity` moves all the facts. Renames the agent's live sessions as
+        that route does.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentBlockedRequest" }
+      responses:
+        "200":
+          description: The marker this call left standing, and how many live sessions it renamed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentBlockedResult" }
+        "400":
+          description: A missing or non-boolean `blocked`, or an unparseable body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/cleanup-check:
+    get:
+      tags: [agent worktrees]
+      operationId: agentCleanupCheck
+      summary: What removing the agent would lose.
+      description: |
+        Uncommitted changes and commits no remote branch has, per repository. A commit on a
+        detached HEAD is unpushed work too, reported with no `branch`. In the wrapper a moved
+        gitlink does not count: it is the trace of submodule work, and each submodule is checked on
+        its own. `clean` is true when both lists are empty.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: The check.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CleanupCheck" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/files:
+    get:
+      tags: [files]
+      operationId: listFiles
+      summary: One level of the working tree.
+      description: |
+        Lists one level of the agent's wrapper worktree plus the whole-tree generation token.
+        `path` is relative to that worktree and optional — absent means the root level. Each
+        submodule is the agent's own worktree of it, so an agent's submodule work shows here.
+
+        **Submodules are part of the tree.** An initialized submodule's files (tracked and new
+        untracked, its own gitignore honoured) are listed eagerly under their workspace-relative
+        paths, recursively — never as the bare gitlink path, which a client would render as a file
+        that 404s on open. A submodule with no checkout behind its gitlink comes back as a lazy
+        stub instead.
+
+        **Lazy directories are otherwise the gitignored ones.** There is no separate "ignored"
+        flag: a directory that git does not track is returned as a stub with its immediate child
+        count rather than being walked, and the caller asks for it by path when the user expands
+        it.
+
+        `.git` is refused like anything outside the root.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+        - $ref: "#/components/parameters/RelativePath"
+      responses:
+        "200":
+          description: The level, and the token it was computed under.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileListing" }
+        "400": { $ref: "#/components/responses/BadPath" }
+        "404":
+          description: The path names nothing, or the agent has no worktree here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/files/content:
+    get:
+      tags: [files]
+      operationId: readFile
+      summary: One file's text.
+      description: |
+        Reads **any regular file inside the root, tracked or not** — no git consultation at all, so
+        a path that only exists in the working tree (a log, a generated file) resolves.
+
+        Two cases arrive identically as `binary: true` with no `content`: a file that is genuinely
+        binary, and one over the 2 MB cap. The cap **soft-degrades** rather than answering 413, so
+        a client cannot distinguish them from the body alone.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+        - name: path
+          in: query
           required: true
           schema: { type: string }
-          description: The step's declared `name`.
+          description: Relative to the agent's wrapper worktree. Required here, unlike on `files`.
       responses:
-        "202": { $ref: "#/components/responses/Accepted" }
+        "200":
+          description: The file, or the binary flag standing in for it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileContent" }
+        "400": { $ref: "#/components/responses/BadPath" }
+        "404":
+          description: The path names nothing, or the agent has no worktree here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
-        "503": { $ref: "#/components/responses/BootstrapUnavailable" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/detection:
+    get:
+      tags: [files]
+      operationId: detect
+      summary: Frameworks, projects and the source-to-test graph.
+      description: |
+        Carries a `generation` token computed by a **byte-identical duplicate** of the algorithm
+        `/files` uses — a sha256 over the deduped, sorted path list of the whole tree, submodules
+        walked like the listing walks them.
+
+        That is not decoration. `/files` and `/detection` are two independently-fetched views over
+        one mutable tree, and applying a detection result to a tree it was not computed from makes
+        the UI flicker in a way that is very hard to diagnose later. **Apply a detection only while
+        its token matches the tree currently rendered; on a mismatch hold the last consistent
+        result rather than blanking it.** The tokens agree on first load, so there is no initial
+        flash.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: The detection result and its token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Detection" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/component-map:
+    get:
+      tags: [files]
+      operationId: componentMap
+      summary: The UI components a framed pick can be attributed to.
+      description: |
+        Angular only today; `framework` says which scanner produced the map, and a tree it does not
+        recognise answers `components: []` rather than an error.
+
+        Fetch it once per pick-mode activation, not per pick — a map that misses a just-created
+        component simply skips attribution.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: The map.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComponentMap" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
 components:
 
@@ -882,17 +849,8 @@ components:
       required: false
       schema: { type: string }
       description: |
-        Workspace-root-relative. Absent means the root level. Traversal, absolute paths, symlinks
+        Relative to the agent's wrapper worktree. Absent means the root level. Traversal, absolute paths, symlinks
         (named outright *or* as an intermediate segment) and `.git` are all refused with a `400`.
-
-    ParentBranch:
-      name: parent
-      in: query
-      required: true
-      schema: { type: string }
-      description: |
-        The parent branch to integrate. A blank name, or one starting with `-` (which git would
-        read as a flag), is refused.
 
     CommandId:
       name: commandId
@@ -900,6 +858,17 @@ components:
       required: true
       schema: { type: string }
       description: The daemon-generated command id.
+
+    AgentId:
+      name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      description: |
+        The agent worktree's id, as the host assigned it (a UUID). It names a directory, so any
+        other shape is refused.
 
   responses:
     Unauthorized:
@@ -935,48 +904,24 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
-    IntegrationRefused:
-      description: |
-        Git refused, and its own text comes back so the user sees what it saw — a diverged branch,
-        a conflicting merge, a rejected push.
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    NotProvisioned:
-      description: |
-        The daemon is up but the checkout has no origin sync yet. Retryable, not a failure.
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
     CommandsUnavailable:
       description: Commands are not wired yet. Retryable.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     AgentsUnavailable:
-      description: Coding agents are not wired yet. Retryable.
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    BootstrapUnavailable:
-      description: Bootstrap is not wired yet. Retryable.
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    Accepted:
       description: |
-        The request was taken. Not the outcome — that arrives on the control socket. The body has a
-        shape rather than being empty so a client's JSON parse stays unconditional across every
-        route here.
+        Coding agents are not wired yet — the base clone is still being made, say. Retryable.
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/Accepted" }
-    GitOutput:
-      description: Git's own text from the integration.
+          schema: { $ref: "#/components/schemas/Error" }
+    NoSuchAgent:
+      description: |
+        No worktree for that agent here, or (for a turn, the entity and yield) an agent this process
+        has not started since it came up. Start it with `POST /agent-worktrees`.
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/GitOutput" }
-
+          schema: { $ref: "#/components/schemas/Error" }
   schemas:
 
     Error:
@@ -991,23 +936,7 @@ components:
       properties:
         message: { type: string }
 
-    Accepted:
-      type: object
-      required: [accepted]
-      properties:
-        accepted: { type: boolean, const: true }
-
-    GitOutput:
-      type: object
-      required: [output]
-      properties:
-        output:
-          type: string
-          description: |
-            Git's combined output, verbatim, shown exactly as the old `docker exec` output was.
-            Empty string rather than null when git said nothing.
-
-    # --- the checkout ------------------------------------------------------------------------
+    # --- an agent's files ------------------------------------------------------------------------
 
     FileListing:
       type: object
@@ -1185,8 +1114,8 @@ components:
     CommandEnvelope:
       type: object
       description: |
-        The single-command envelope both `POST /commands` and `POST /agents` answer with, kept so
-        the host's request/response records reconstruct unchanged.
+        The single-command envelope `POST /agents/sign-in` answers with, kept so the host's
+        request/response records reconstruct unchanged.
       required: [command]
       properties:
         command: { $ref: "#/components/schemas/Command" }
@@ -1364,34 +1293,6 @@ components:
         what keeps the list a faithful order of the sessions actually driven.
       enum: [PINNED, RESUMED, FORKED, SWITCHED, REPORTED]
 
-    LaunchCommandRequest:
-      type: object
-      required: [actionId]
-      properties:
-        actionId:
-          type: string
-          description: Must name an action from `GET /commands/actions`.
-
-    ActionList:
-      type: object
-      required: [actions]
-      properties:
-        actions:
-          type: array
-          items: { $ref: "#/components/schemas/Action" }
-
-    Action:
-      type: object
-      required: [id, name, interactive]
-      properties:
-        id: { type: string }
-        name: { type: string }
-        interactive:
-          type: boolean
-          description: |
-            Whether the run wants a PTY — the flag a caller needs before deciding to open a
-            terminal socket for it.
-
     CommandLog:
       type: object
       required: [lines]
@@ -1423,27 +1324,20 @@ components:
       type: string
       enum: [CLAUDE, KIMI]
 
-    AgentMcpScope:
-      type: string
-      description: |
-        Which MCP servers the launch is wired to. `ACTIONS` fails with an explanation today — no
-        service in the split serves that server, and handing the agent a URL that 404s would make
-        the launch look like it worked while a tool silently was not there.
-      enum: [ACTIONS, REPOSITORY]
-
     AgentLaunchMode:
       type: string
       description: |
-        `CHAT` is the stream-json conversation over pipes; `INTERACTIVE` is the full agent TUI over
-        a PTY. See the table on `POST /agents` for which socket each implies.
+        `CHAT` is the stream-json conversation over pipes (`command.kind` `CHAT`, `WS
+        /chat/commands/{id}`); `INTERACTIVE` is the full agent TUI over a PTY (`command.kind`
+        `TERMINAL`, `WS /terminal/commands/{id}`).
       enum: [CHAT, INTERACTIVE]
 
     AgentSurface:
       type: string
       description: |
         Where in the product this session was started from — what it is steered at and what its
-        configuration is keyed by. Orthogonal to `scope`: the scope *addresses* (how narrow the MCP
-        urls are), the surface *steers* (which prompt, model, permissions and servers it runs with).
+        configuration is keyed by: which prompt, model, permissions and servers it runs with. An
+        agent worktree runs on `ticket.dispatch` unless its start names another.
 
         The five a workspace container serves are `epic.chat`, `epic.agent`, `workspace.chat`,
         `workspace.agent`, and `ticket.dispatch` where a ticket dispatch cut the workspace; the
@@ -1461,57 +1355,6 @@ components:
         - workspace.agent
         - epic.autonomous
         - ticket.dispatch
-
-    LaunchAgentRequest:
-      type: object
-      required: [scope, surface, mode]
-      properties:
-        scope: { $ref: "#/components/schemas/AgentMcpScope" }
-        surface:
-          $ref: "#/components/schemas/AgentSurface"
-          description: |
-            **Required.** Omitting it is a **400**, and a surface outside the enum is a 400 too —
-            the two answers differ so a caller can tell which mistake it made.
-
-            It used to be guessed from the request's *shape* when it was missing — a chat read as
-            `workspace.chat`, an interactive launch as `workspace.agent` — a dated migration crutch
-            so this daemon could ship ahead of the frontends. The guess is gone: it was lossy in
-            exactly the place the field exists to fix, collapsing `epic.chat` onto `workspace.chat`
-            and `epic.agent` onto `workspace.agent`, and it made a caller that had forgotten the
-            field look like one that had shipped it.
-        mode: { $ref: "#/components/schemas/AgentLaunchMode" }
-        agentType:
-          $ref: "#/components/schemas/AgentType"
-          description: |
-            Omit to take the resolved default. **Ignored on a resume** — a resumed session keeps
-            its original harness.
-        initialContext:
-          type: string
-          description: |
-            The composed prompt, delivered **inline**. Text, code references and picked elements
-            are all text, so this covers everything except images: an image cannot ride an argv or
-            a PTY keystroke, which is the whole reason the fetch inversion below exists.
-        resumeSessionId:
-          type: string
-          description: |
-            Continue an existing session. Must belong to **this container** — a session from a
-            previous one is refused rather than attempted.
-        fork:
-          type: boolean
-          default: false
-          description: |
-            Branch `resumeSessionId` into a fresh session rather than continuing it in place.
-            Requires `resumeSessionId`, and is not supported by Kimi Code.
-        deliverTaskPrompt:
-          type: boolean
-          default: false
-          description: |
-            Seed the session with an instruction to *fetch* the task prompt through an MCP tool
-            instead of carrying it in `initialContext`.
-
-            **Do not set this yet.** The tool it sends the agent to (`taskPrompt`) is not
-            implemented anywhere on the platform, so the agent is told to call something that does
-            not exist. Deliver the prompt inline until it lands.
 
     SignInRequest:
       type: object
@@ -1541,35 +1384,27 @@ components:
 
     AgentTurnResult:
       type: object
-      description: |
-        What the host logs about a turn it spoke. `delivered: false` with `reason` is an ordinary
-        `200`: no agent was running, or the session went away between the listing and the write —
-        the same absence, because the caller's next move is the same either way.
-      required: [delivered]
+      description: Where a turn went. Every key is present, `commandId` and `kind` once there was one.
+      required: [delivered, restarted]
       properties:
         delivered:
           type: boolean
           description: |
-            Whether the registry accepted the bytes for a live session. **Not** whether a prompt
-            consumed them: a TUI that is still starting has no prompt to type into yet.
+            Whether the bytes were accepted for a live session. **Not** whether a prompt consumed
+            them: a TUI that is still starting has no prompt to type into yet.
+        restarted:
+          type: boolean
+          description: |
+            True when the harness was not running and was started again for this turn — resuming
+            its session when the session's files were there — with the text as its opening turn.
         commandId:
           type: string
-          description: |
-            The command the turn went to. Omitted when none was running. Present so a fire-and-
-            forget turn can be tied to the session that heard it — the reply comes back on that
-            session's own socket, minutes later, to whoever is watching.
+          description: The command the turn went to — after a restart, the new one.
         kind:
           $ref: "#/components/schemas/CommandKind"
           description: |
-            Which arm carried it. Omitted when none was running. `CHAT` read the text off stdin;
-            `TERMINAL` had it typed into a prompt, and the two fail differently.
-        reason:
-          type: string
-          description: |
-            Why nothing was delivered, present only when `delivered` is false. **Prose, not a
-            contract** — do not match on it. This route answers one absence, so there is no
-            discriminator yet; a second reason gets an `error` key beside it rather than a second
-            sentence to match.
+            Which arm carried it. `CHAT` read the text off stdin; `TERMINAL` had it typed into a
+            prompt, and the two fail differently.
 
     AgentBlockedRequest:
       type: object
@@ -1581,6 +1416,11 @@ components:
         blocked:
           type: boolean
           description: The new marker. Stored before any session is renamed, so it is never stale.
+        blockSource:
+          type: [string, "null"]
+          description: |
+            Why it is blocked: `EXPLICIT`, `AGENT_WAITING` or `BOTH`; null or absent is explicit.
+            Passed through untouched — the library alone decides that `AGENT_WAITING` draws `⁉️`.
 
     AgentEntityRequest:
       type: object
@@ -1600,12 +1440,16 @@ components:
             picks the square it draws; a word it does not know draws none.
         blocked:
           type: boolean
-          description: Whether the entity is BLOCKED — the leading `❗`.
+          description: Whether the entity is BLOCKED — the leading `❗` (or `⁉️`).
+        blockSource:
+          type: [string, "null"]
+          description: |
+            Why it is blocked: `EXPLICIT`, `AGENT_WAITING` or `BOTH`; null or absent is explicit.
 
     AgentEntityResult:
       type: object
       description: The facts this call stored, and how many live sessions carry the name they render.
-      required: [title, status, blocked, renamed]
+      required: [title, status, blocked, blockSource, renamed]
       properties:
         title:
           type: [string, "null"]
@@ -1616,6 +1460,9 @@ components:
         blocked:
           type: boolean
           description: Echoes the request.
+        blockSource:
+          type: [string, "null"]
+          description: Echoes the request; present as null when not given, never omitted.
         renamed:
           type: integer
           description: |
@@ -1833,30 +1680,180 @@ components:
       properties:
         prompt: { type: string }
 
-    # --- bootstrap ---------------------------------------------------------------------------
+    # --- agent worktrees -----------------------------------------------------------------------
 
-    BootstrapChain:
+    AgentWorktreeStart:
       type: object
-      required: [steps]
+      description: |
+        What the host knows about the agent, whole. The credential travels in `env` and nowhere
+        else.
+      required: [agentId, workId, wrapperBranch]
       properties:
-        steps:
+        agentId:
+          type: string
+          description: The agent row's id; names the agent's directory.
+        workId:
+          type: string
+          description: The top-level work item (`<project>-<n>`) the agent works on.
+        entityId:
+          type: string
+          description: The entity the session is named for; usually the same as `workId`.
+        wrapperBranch:
+          type: string
+          description: |
+            `<prefix>/<workId>`. The wrapper worktree's branch; a submodule branch the agent makes
+            is `<wrapperBranch>-<name>`. Must be a valid branch and not the default branch.
+        harness:
+          $ref: "#/components/schemas/AgentType"
+          description: Omit to take the resolved default, or on a resume the session's own.
+        sessionId:
+          type: string
+          description: |
+            The session to resume, as the host stored it. Resumed only when its files are still
+            there; otherwise a new session starts and its id comes back.
+        env:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            The agent's credential (`QITS_TOKEN`, say), laid over the harness process's
+            environment. Never written to disk; never served back.
+        instruction:
+          type: string
+          description: The opening turn, on a fresh or a resumed session alike.
+        surface:
+          $ref: "#/components/schemas/AgentSurface"
+          description: Omit for `ticket.dispatch`. An unknown one is a `400`.
+        mode:
+          $ref: "#/components/schemas/AgentLaunchMode"
+          description: Omit for `CHAT`.
+        entityTitle:
+          type: string
+          description: Seeds the session name; `POST …/entity` moves it later.
+        entityStatus:
+          type: string
+          description: Seeds the session name, as `entityTitle`.
+        entityBlocked:
+          type: boolean
+          description: Seeds the session name's blocked mark.
+        blockSource:
+          type: string
+          description: Why it is blocked, as on `POST …/entity`.
+
+    AgentWorktreeStarted:
+      type: object
+      required: [agentId, path, commandId, launched, resumed]
+      properties:
+        agentId: { type: string }
+        path:
+          type: string
+          description: The agent's wrapper worktree — the harness's working directory.
+        commandId:
+          type: string
+          description: The harness's command; attach to its socket by this id.
+        launched:
+          type: boolean
+          description: False when a harness was already running and was left as it was.
+        resumed:
+          type: boolean
+          description: True when the harness was started on the stored session.
+        sessionId:
+          type: [string, "null"]
+          description: |
+            The session the harness runs: the resumed one, or a new one. Null for a fresh Kimi
+            session until its first hook reports it.
+
+    AgentWorktree:
+      type: object
+      required: [agentId, path, harnessRunning, branches, dirty, unpushed]
+      properties:
+        agentId: { type: string }
+        workId: { type: [string, "null"] }
+        wrapperBranch: { type: [string, "null"] }
+        path:
+          type: string
+          description: The agent's wrapper worktree.
+        harnessRunning: { type: boolean }
+        commandId:
+          type: [string, "null"]
+          description: The harness's last command, while this process knows it.
+        sessionId:
+          type: [string, "null"]
+          description: |
+            The agent's current session — kept current from the harness's hooks, so a Kimi session
+            or an in-session `/resume` is reflected.
+        branches:
           type: array
-          items: { $ref: "#/components/schemas/BootstrapStep" }
-          description: In declaration order, which is the order they run.
+          items: { $ref: "#/components/schemas/AgentBranch" }
+          description: |
+            One entry per repository whose worktree is on a branch: the wrapper first, then each
+            submodule the agent branched in. A detached submodule is not listed.
+        dirty:
+          type: boolean
+          description: Any repository has uncommitted changes.
+        unpushed:
+          type: boolean
+          description: Any repository has commits no remote branch has.
 
-    BootstrapStep:
+    AgentBranch:
       type: object
-      required: [name]
+      required: [repository, path, branch, head, pushed]
       properties:
-        name:
+        repository:
           type: string
-          description: What `/bootstrap-commands/{name}/run` addresses, and the join key for the host's run history.
-        id:
+          description: |
+            The repository's name on the git host: the wrapper's, or the name a submodule's origin
+            points at. The same value `AgentBranchPushed` carries on the control socket.
+        path:
           type: string
-          description: The declared id, defaulting to `name`.
-        description:
-          type: string
-          description: Omitted when the checkout declares none.
+          description: The submodule's path in the wrapper; empty for the wrapper.
+        branch: { type: string }
+        head: { type: string }
+        pushed:
+          type: boolean
+          description: The git host's branch is at `head`.
+
+    CleanupCheck:
+      type: object
+      required: [clean, dirty, unpushed]
+      properties:
+        clean:
+          type: boolean
+          description: Nothing would be lost; both lists are empty.
+        dirty:
+          type: array
+          items: { type: string }
+          description: The repositories with uncommitted changes, by name.
+        unpushed:
+          type: array
+          items: { $ref: "#/components/schemas/UnpushedWork" }
+
+    UnpushedWork:
+      type: object
+      required: [repository, branch, commits]
+      properties:
+        repository: { type: string }
+        branch:
+          type: [string, "null"]
+          description: Null for a commit on a detached HEAD, which is never pushed.
+        commits:
+          type: integer
+          description: Commits on HEAD that no remote branch has.
+
+    AgentYielded:
+      type: object
+      required: [agentId, yielded]
+      properties:
+        agentId: { type: string }
+        yielded:
+          type: boolean
+          description: A running harness was stopped; false when none was running.
+
+    AgentRemoved:
+      type: object
+      required: [agentId, removed]
+      properties:
+        agentId: { type: string }
+        removed: { type: boolean, const: true }
 
 x-websockets:
   description: |

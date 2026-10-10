@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
-import eu.wohlben.qits.workspacedaemon.files.LocalWorkspaceFiles;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -26,8 +25,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Drives {@link WorkspaceApi} over a <em>real</em> Vert.x server on an ephemeral port, against a
- * real git repository in a temp directory. Deliberately not a seam test: the value of this class is
+ * Drives {@link WorkspaceApi}'s file routes over a <em>real</em> Vert.x server on an ephemeral port,
+ * against a real agent worktree in a temp directory. Deliberately not a seam test: the value of this class is
  * everything a seam would skip — the routing, the bearer check, the {@link
  * eu.wohlben.qits.workspacedaemon.files.WorkspaceFilesException} status mapping, and the fact that
  * a blocking handler on a worker still writes its answer back onto the event loop.
@@ -43,7 +42,13 @@ class WorkspaceApiTest {
 
   private static final String TOKEN = "s3cret-workspace-token";
 
-  @TempDir Path root;
+  @TempDir Path tmp;
+
+  /** The agent's wrapper worktree: the root every file route serves (qits-1152). */
+  private Path root;
+
+  /** Every file route sits below one agent. */
+  private static final String AGENT = "/agent-worktrees/agent-1";
 
   /** Stands in for anything outside the workspace — what every escape case aims at. */
   @TempDir Path outside;
@@ -56,17 +61,19 @@ class WorkspaceApiTest {
   /** The one context every client call is issued on; see {@link #get(String, String)}. */
   private Context ctx;
 
-  /** The marker the detection caches key on; mutable so a test could move the tree if it needed. */
-  private volatile String marker = "marker-1";
-
   private List<DeclaredFramework> declared = List.of();
 
   @BeforeEach
   void startServer() throws Exception {
-    LocalWorkspaceFiles files = new LocalWorkspaceFiles(root);
-    files.git("init", "--quiet");
-    // A commit-free repo is enough: every read path here runs off `ls-files --cached --others`,
-    // which sees the working tree.
+    // A base clone with one commit, and one agent's worktree made from it — the tree the file
+    // routes now serve. Every read path runs off `ls-files --cached --others`, which sees the
+    // working tree.
+    Path base = Files.createDirectories(tmp.resolve("base"));
+    GitFixtures.git(base, "init", "--quiet", "--initial-branch=main");
+    GitFixtures.identity(base);
+    GitFixtures.git(base, "commit", "--quiet", "--allow-empty", "-m", "base");
+    AgentWorktrees worktrees = new AgentWorktrees(base, tmp.resolve("agents"), "wrapper");
+    root = worktrees.ensure("agent-1", "ticket/qits-1");
     Files.writeString(root.resolve("README.md"), "hello\n");
 
     vertx = Vertx.vertx();
@@ -74,7 +81,7 @@ class WorkspaceApiTest {
     api.vertx = vertx;
     // Port 0: the bind future carries the ephemeral the OS actually handed out, so the suite never
     // races another process for a fixed one.
-    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, () -> declared, () -> marker));
+    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, worktrees, () -> declared));
     port = api.actualPort();
     client = vertx.createHttpClient();
     ctx = vertx.getOrCreateContext();
@@ -82,9 +89,6 @@ class WorkspaceApiTest {
 
   @AfterEach
   void stopServer() throws Exception {
-    if (originSync != null) {
-      originSync.close();
-    }
     api.close();
     if (client != null) {
       client.close();
@@ -142,45 +146,11 @@ class WorkspaceApiTest {
     return await(promise.future());
   }
 
-  /** One POST with the valid bearer and no body — the shape both write routes take. */
-  private Answer post(String uri) throws Exception {
-    Promise<Answer> promise = Promise.promise();
-    ctx.runOnContext(
-        v ->
-            client
-                .request(HttpMethod.POST, port, "127.0.0.1", uri)
-                .compose(request -> request.putHeader("Authorization", "Bearer " + TOKEN).send())
-                .compose(WorkspaceApiTest::answerOf)
-                .onComplete(promise));
-    return await(promise.future());
-  }
-
   private static Future<Answer> answerOf(HttpClientResponse response) {
     return response.body().map(body -> new Answer(response.statusCode(), new JsonObject(body)));
   }
 
   private record Answer(int status, JsonObject body) {}
-
-  /**
-   * Wire the two write routes onto an {@link OriginSync} over a canned git, and register it for
-   * teardown. {@link WorkspaceApi} reads the sync off {@link ControlSocket} per request (it does
-   * not exist until the checkout is provisioned), so the seam is an override of that one accessor
-   * rather than a field — no CDI, no real repository, and no network, exactly as {@code
-   * OriginSyncTest} drives the same logic.
-   */
-  private void wireOriginSync(GitRunner git) {
-    OriginSync sync = git == null ? null : new OriginSync("ws-1", "feature", git, false, 0, 1, 0, 0);
-    this.originSync = sync;
-    api.controlSocket =
-        new ControlSocket() {
-          @Override
-          OriginSync originSync() {
-            return sync;
-          }
-        };
-  }
-
-  private OriginSync originSync;
 
   private void writeAngularComponent() throws Exception {
     Files.createDirectories(root.resolve("web/src/app"));
@@ -204,7 +174,7 @@ class WorkspaceApiTest {
 
   @Test
   void listsTheRootLevelWithTheHostsFieldNames() throws Exception {
-    Answer answer = get("/files");
+    Answer answer = get(AGENT + "/files");
 
     assertEquals(200, answer.status());
     assertTrue(answer.body().getJsonArray("paths").contains("README.md"));
@@ -220,14 +190,14 @@ class WorkspaceApiTest {
     Files.writeString(root.resolve("node_modules/top.js"), "1;\n");
     Files.writeString(root.resolve("node_modules/pkg/index.js"), "2;\n");
 
-    JsonArray lazyDirs = get("/files").body().getJsonArray("lazyDirs");
+    JsonArray lazyDirs = get(AGENT + "/files").body().getJsonArray("lazyDirs");
     JsonObject stub = lazyDirs.getJsonObject(0);
     assertEquals("node_modules", stub.getString("path"));
     assertEquals(2, stub.getInteger("childCount"));
     // href is the host controller's to synthesise — the daemon knows no repository/workspace id
     assertFalse(stub.containsKey("href"));
 
-    Answer level = get("/files?path=node_modules");
+    Answer level = get(AGENT + "/files?path=node_modules");
     assertEquals(200, level.status());
     assertTrue(level.body().getJsonArray("paths").contains("node_modules/top.js"));
     assertEquals(
@@ -237,7 +207,7 @@ class WorkspaceApiTest {
 
   @Test
   void readsFileContentWithTheHostsFieldNames() throws Exception {
-    Answer answer = get("/files/content?path=README.md");
+    Answer answer = get(AGENT + "/files/content?path=README.md");
 
     assertEquals(200, answer.status());
     assertEquals("README.md", answer.body().getString("path"));
@@ -249,7 +219,7 @@ class WorkspaceApiTest {
   void reportsABinaryFileWithNoContent() throws Exception {
     Files.write(root.resolve("blob.bin"), new byte[] {1, 2, 0, 3});
 
-    Answer answer = get("/files/content?path=blob.bin");
+    Answer answer = get(AGENT + "/files/content?path=blob.bin");
 
     assertEquals(200, answer.status());
     assertEquals(true, answer.body().getBoolean("binary"));
@@ -265,7 +235,7 @@ class WorkspaceApiTest {
     Files.writeString(root.resolve("src/main/java/app/Thing.java"), "class Thing {}\n");
     Files.writeString(root.resolve("src/test/java/app/ThingTest.java"), "class ThingTest {}\n");
 
-    Answer answer = get("/detection");
+    Answer answer = get(AGENT + "/detection");
 
     assertEquals(200, answer.status());
     JsonObject project = answer.body().getJsonArray("projects").getJsonObject(0);
@@ -295,7 +265,7 @@ class WorkspaceApiTest {
     // which is what proves the supplier is wired through from the checkout's own config.
     declared = List.of(new DeclaredFramework("docs", "handbook"));
 
-    JsonArray projects = get("/detection").body().getJsonArray("projects");
+    JsonArray projects = get(AGENT + "/detection").body().getJsonArray("projects");
     assertEquals("handbook", projects.getJsonObject(0).getString("root"));
     assertEquals("docs", projects.getJsonObject(0).getString("frameworkId"));
   }
@@ -304,7 +274,7 @@ class WorkspaceApiTest {
   void servesTheComponentMapWithTheHostsFieldNames() throws Exception {
     writeAngularComponent();
 
-    Answer answer = get("/component-map");
+    Answer answer = get(AGENT + "/component-map");
 
     assertEquals(200, answer.status());
     assertEquals("angular", answer.body().getString("framework"));
@@ -339,7 +309,7 @@ class WorkspaceApiTest {
         """);
 
     JsonObject selector =
-        get("/component-map").body().getJsonArray("components").getJsonObject(0)
+        get(AGENT + "/component-map").body().getJsonArray("components").getJsonObject(0)
             .getJsonArray("selectors").getJsonObject(0);
     assertEquals("appHighlight", selector.getString("attribute"));
     assertNull(selector.getString("element"));
@@ -347,64 +317,10 @@ class WorkspaceApiTest {
 
   @Test
   void componentMapOfANonAngularTreeIsEmptyNotAnError() throws Exception {
-    Answer answer = get("/component-map");
+    Answer answer = get(AGENT + "/component-map");
 
     assertEquals(200, answer.status());
     assertEquals(new JsonArray(), answer.body().getJsonArray("components"));
-  }
-
-  // --- the two write routes ------------------------------------------------------------------
-
-  @Test
-  void integratingTheParentAnswersGitsOwnText() throws Exception {
-    wireOriginSync(argv -> new GitRunner.Result(0, "Updating 1a2b3c4..5d6e7f8\nFast-forward\n"));
-
-    Answer ff = post("/fast-forward?parent=main");
-    assertEquals(200, ff.status());
-    // `output` is the host DTO's component name, kept so the frontend contract did not move with
-    // the endpoint. It is git's text verbatim, shown exactly as the docker-exec output used to be.
-    assertEquals("Updating 1a2b3c4..5d6e7f8\nFast-forward\n", ff.body().getString("output"));
-
-    Answer merge = post("/update-from-parent?parent=main");
-    assertEquals(200, merge.status());
-    assertFalse(merge.body().getString("output").isBlank());
-  }
-
-  @Test
-  void aRefusedIntegrationIs400WithGitsReason() throws Exception {
-    // "This branch has diverged" is an answer the UI acts on, not a server fault — the same reason
-    // an unresolvable path is a 400 rather than a 500.
-    wireOriginSync(
-        argv ->
-            "fetch".equals(argv[1])
-                ? new GitRunner.Result(0, "")
-                : new GitRunner.Result(1, "fatal: Not possible to fast-forward, aborting."));
-
-    Answer answer = post("/fast-forward?parent=main");
-    assertEquals(400, answer.status());
-    assertTrue(answer.body().getString("message").contains("fast-forward"));
-  }
-
-  @Test
-  void integratingBeforeTheCheckoutIsProvisionedIs503() throws Exception {
-    // The daemon is up but has nothing to run git in yet, and the caller should retry rather than
-    // treat it as a failure.
-    wireOriginSync(null);
-
-    Answer answer = post("/fast-forward?parent=main");
-    assertEquals(503, answer.status());
-    assertFalse(answer.body().getString("message").isBlank());
-  }
-
-  @Test
-  void theWriteRoutesArePostOnlyAndAGetNeverReachesGit() throws Exception {
-    wireOriginSync(
-        argv -> {
-          throw new AssertionError("a GET must never reach git");
-        });
-
-    assertEquals(405, get("/fast-forward?parent=main").status());
-    assertEquals(405, get("/update-from-parent?parent=main").status());
   }
 
   // --- error mapping -------------------------------------------------------------------------
@@ -415,28 +331,28 @@ class WorkspaceApiTest {
     Files.createSymbolicLink(root.resolve("escape"), outside);
 
     // the lexical guards
-    assertEquals(400, get("/files/content?path=../etc/passwd").status());
-    assertEquals(400, get("/files/content?path=/etc/passwd").status());
-    assertEquals(400, get("/files?path=../..").status());
+    assertEquals(400, get(AGENT + "/files/content?path=../etc/passwd").status());
+    assertEquals(400, get(AGENT + "/files/content?path=/etc/passwd").status());
+    assertEquals(400, get(AGENT + "/files?path=../..").status());
     // a committed symlink named outright — rejected on its lstat type, never dereferenced
-    assertEquals(400, get("/files?path=escape").status());
+    assertEquals(400, get(AGENT + "/files?path=escape").status());
     // the one no lexical check can see: an intermediate symlinked directory, transparently
     // followed by path resolution, so the final segment lstats as an ordinary file
-    assertEquals(400, get("/files/content?path=escape/secret.txt").status());
+    assertEquals(400, get(AGENT + "/files/content?path=escape/secret.txt").status());
     // .git is off limits even though it is squarely inside the root
-    assertEquals(400, get("/files?path=.git").status());
-    assertFalse(get("/files/content?path=../etc/passwd").body().getString("message").isBlank());
+    assertEquals(400, get(AGENT + "/files?path=.git").status());
+    assertFalse(get(AGENT + "/files/content?path=../etc/passwd").body().getString("message").isBlank());
   }
 
   @Test
   void missingFileIs404() throws Exception {
-    assertEquals(404, get("/files/content?path=nope.txt").status());
-    assertEquals(404, get("/files?path=nope").status());
+    assertEquals(404, get(AGENT + "/files/content?path=nope.txt").status());
+    assertEquals(404, get(AGENT + "/files?path=nope").status());
   }
 
   @Test
   void contentWithoutAPathIs400() throws Exception {
-    assertEquals(400, get("/files/content").status());
+    assertEquals(400, get(AGENT + "/files/content").status());
   }
 
   @Test
@@ -444,6 +360,15 @@ class WorkspaceApiTest {
     Answer answer = get("/nope");
     assertEquals(404, answer.status());
     assertFalse(answer.body().getString("message").isBlank());
+    // The checkout-wide routes went with the single checkout (qits-1152).
+    assertEquals(404, get("/files").status());
+    assertEquals(404, get("/fast-forward?parent=main").status());
+  }
+
+  @Test
+  void anAgentWithNoWorktreeHasNoFiles() throws Exception {
+    assertEquals(404, get("/agent-worktrees/agent-2/files").status());
+    assertEquals(404, get("/agent-worktrees/..%2Fescape/files").status());
   }
 
   @Test
@@ -452,7 +377,7 @@ class WorkspaceApiTest {
     ctx.runOnContext(
         v ->
             client
-                .request(HttpMethod.POST, port, "127.0.0.1", "/files")
+                .request(HttpMethod.POST, port, "127.0.0.1", AGENT + "/files")
                 .compose(
                     request ->
                         request.putHeader("Authorization", "Bearer " + TOKEN).send("{\"x\":1}"))
@@ -466,7 +391,12 @@ class WorkspaceApiTest {
   @Test
   void rejectsEveryEndpointWithoutTheToken() throws Exception {
     for (String uri :
-        List.of("/files", "/files/content?path=README.md", "/detection", "/component-map")) {
+        List.of(
+            AGENT + "/files",
+            AGENT + "/files/content?path=README.md",
+            AGENT + "/detection",
+            AGENT + "/component-map",
+            "/agent-worktrees")) {
       assertEquals(401, get(uri, null).status(), uri);
       assertEquals(401, get(uri, "Bearer wrong-token").status(), uri);
       assertEquals(401, get(uri, TOKEN).status(), uri); // right secret, no Bearer scheme
@@ -493,7 +423,7 @@ class WorkspaceApiTest {
     // A missing file and an existing one must be indistinguishable before the token is presented,
     // or the port becomes a file-existence oracle for anything on qits-net.
     assertEquals(
-        get("/files/content?path=README.md", null).body(),
-        get("/files/content?path=nope.txt", null).body());
+        get(AGENT + "/files/content?path=README.md", null).body(),
+        get(AGENT + "/files/content?path=nope.txt", null).body());
   }
 }

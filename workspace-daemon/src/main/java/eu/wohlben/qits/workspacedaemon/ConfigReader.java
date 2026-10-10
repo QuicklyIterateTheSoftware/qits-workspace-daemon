@@ -5,8 +5,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 
 /**
- * Reads the branch's checkout's qits config — {@code /workspace/.config/qits/repository.yml},
- * falling back to the legacy {@code /workspace/.qits-config.yml} — and parses it into the
+ * Reads the base clone's qits config — {@code /workspace/base/.config/qits/repository.yml},
+ * falling back to the legacy {@code /workspace/base/.qits-config.yml} — and parses it into the
  * wire-ready {@link State} the daemon holds and answers {@link
  * eu.wohlben.qits.workspacedaemon.protocol.DescribeConfig} from (docs/epics/qits-workspace-daemon/
  * Part 2). "Degrade loudly, never block": an absent/blank file yields the empty config with no
@@ -18,8 +18,11 @@ import java.nio.file.Files;
  */
 public final class ConfigReader {
 
-  private static final File CONFIG_FILE = new File("/workspace/.config/qits/repository.yml");
-  private static final File LEGACY_CONFIG_FILE = new File("/workspace/.qits-config.yml");
+  // The base clone's: a workspace has no checkout of its own since qits-1152, and the base clone is
+  // never moved, so this is the wrapper's config as of the clone.
+  private static final File CONFIG_FILE =
+      new File(Provisioner.BASE_DIR, ".config/qits/repository.yml");
+  private static final File LEGACY_CONFIG_FILE = new File(Provisioner.BASE_DIR, ".qits-config.yml");
 
   /**
    * The parsed config, held three ways: the framework-free {@link DaemonQitsConfig} tree the daemon
@@ -33,8 +36,8 @@ public final class ConfigReader {
   private ConfigReader() {}
 
   /**
-   * Read + parse the checkout's config file: {@code /workspace/.config/qits/repository.yml} if
-   * present, else the legacy {@code /workspace/.qits-config.yml}.
+   * Read + parse the base clone's config file: {@code /workspace/base/.config/qits/repository.yml} if
+   * present, else the legacy {@code /workspace/base/.qits-config.yml}.
    */
   public static State read() {
     return read(CONFIG_FILE, LEGACY_CONFIG_FILE);

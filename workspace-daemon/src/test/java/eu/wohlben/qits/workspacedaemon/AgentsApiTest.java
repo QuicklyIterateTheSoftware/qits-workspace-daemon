@@ -1,12 +1,13 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import static eu.wohlben.qits.workspacedaemon.GitFixtures.CHILD;
+import static eu.wohlben.qits.workspacedaemon.GitFixtures.WRAPPER;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.agents.AgentCommands;
 import eu.wohlben.qits.agents.AgentConfigurationDocument;
 import eu.wohlben.qits.agents.AgentDefaults;
 import eu.wohlben.qits.agents.AgentLaunchService;
@@ -24,15 +25,13 @@ import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.AgentSessionRef;
 import eu.wohlben.qits.commands.AgentSessionSource;
-import eu.wohlben.qits.commands.ChatProtocol;
-import eu.wohlben.qits.commands.ChatWire;
-import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -44,12 +43,12 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,12 +59,19 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * The coding-agent surface over a real Vert.x server, mirroring {@link CommandsApiTest}.
+ * The agent surface over a real Vert.x server, mirroring {@link CommandsApiTest}: the workspace-wide
+ * routes (sign-in, plugins, sessions, refinement) and the agent worktrees (qits-1152).
  *
- * <p>The JSON keys are asserted as <strong>literal strings</strong> for the reason that test states:
- * they deserialize into the host's existing {@code AgentSessionNodeDto}, {@code AgentSubagentDto} and
- * {@code InstalledPluginDto} records and the SPA consumes them unchanged, so a test that read the
- * names off the records would rename itself along with the bug.
+ * <p>The agent worktrees are real: a wrapper and a submodule with bare origins and a base clone
+ * ({@link GitFixtures}). So is the harness process, as far as this daemon can see: a fake {@code
+ * claude} on the {@code PATH} of the launch's login shell records its arguments, its working
+ * directory, its credential and what it is sent, and stays running like a harness does. That is
+ * what lets these tests prove the three things only a real launch shows — the harness runs in the
+ * agent's worktree, carries the agent's credential and nothing else, and resumes its session.
+ *
+ * <p>The JSON keys are asserted as <strong>literal strings</strong>, for the reason {@link
+ * CommandsApiTest} states: they are a wire contract with the host, and a test that read the names
+ * off the records would rename itself along with the bug.
  */
 @EnabledOnOs(OS.LINUX)
 class AgentsApiTest {
@@ -75,6 +81,7 @@ class AgentsApiTest {
   private static final String PROJECT = "22222222-2222-2222-2222-222222222222";
   private static final int HOOKS_PORT = 13337;
   private static final String IMAGE_VERSION = "2026.909.111643";
+  private static final String BRANCH = "ticket/qits-1";
 
   /**
    * A boot-time capability report, as {@link eu.wohlben.qits.agents.HarnessCapabilityService} would
@@ -87,28 +94,32 @@ class AgentsApiTest {
               .withAuth(true, "Signed in on the shared credential volume."),
           eu.wohlben.qits.agents.HarnessCapabilities.shipped(AgentType.KIMI, "not probed here"));
 
+  /** The commands layer's root: the workspace volume. */
   @TempDir Path root;
+
   @TempDir Path claudeMount;
+  @TempDir Path estateDir;
 
   private Vertx vertx;
   private HttpClient client;
 
   /** The one context every client call is issued on; see {@code send}. */
   private Context ctx;
+
   private WorkspaceApi api;
   private int port;
   private CommandStore store;
   private CommandLifecycleService lifecycle;
   private AgentSessionStore sessionStore;
+
+  /** The workspace's own launch service: the sign-in terminal's. */
   private AgentLaunchService launch;
 
-  /**
-   * The same {@link CommandService} the API is wired with, kept as a field so the turn tests can
-   * stand up a <em>real</em> running command for the route to find. They cannot go through {@code
-   * POST /agents}: the harness binary is absent here, so a launched agent exits immediately and
-   * there is nothing standing for a turn to reach.
-   */
-  private CommandService commands;
+  private AgentWorktrees worktrees;
+  private AgentRuntime runtime;
+
+  /** Where the fake harness writes what it saw: {@code <log>.args}, {@code .cwd}, … */
+  private Path fakeLog;
 
   private static final WorkspaceContext WORKSPACE =
       new WorkspaceContext() {
@@ -124,12 +135,12 @@ class AgentsApiTest {
 
         @Override
         public String branch() {
-          return "feature/x";
+          return "";
         }
 
         @Override
         public String commitHash() {
-          return "0123456789abcdef0123456789abcdef01234567";
+          return "";
         }
       };
 
@@ -175,50 +186,33 @@ class AgentsApiTest {
 
   @BeforeEach
   void startServer() throws Exception {
+    GitFixtures.Estate estate = GitFixtures.estate(estateDir);
+    worktrees = new AgentWorktrees(estate.base(), estate.agents(), WRAPPER);
+    worktrees.installGuards();
+    fakeLog = estateDir.resolve("harness");
+    installFakeHarness();
+
     vertx = Vertx.vertx();
     api = new WorkspaceApi();
     api.vertx = vertx;
-    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker-1"));
+    await(api.listen(vertx, "127.0.0.1", 0, TOKEN, worktrees, List::of));
     port = api.actualPort();
 
     store = new CommandStore();
-    CommandLogService logs = new CommandLogService(store, null);
     lifecycle = new CommandLifecycleService(store, null);
     sessionStore = new AgentSessionStore();
-    CommandRegistry registry = new CommandRegistry(root, 2_000);
-    commands = new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
-    AgentTranscriptService transcripts =
-        new AgentTranscriptService(store, logs, sessionStore, claudeMount.toString(), null);
-    AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
-    AgentCommands agentCommands = new CommandsAgentCommands(commands, registry, store);
-    launch =
-        new AgentLaunchService(
-            agentCommands,
-            new eu.wohlben.qits.agents.AgentAuthStatus(
-                PROCESSES, claudeMount.toString(), root),
-            transcripts,
-            tail,
-            DEFAULTS,
-            new WorkspaceMcpServers(
-                ENDPOINTS, REPO, "feature-x", java.util.Optional.empty(), java.util.Optional.empty()),
-            WORKSPACE,
-            claudeMount.toString(),
-            HOOKS_PORT);
-    api.wireCommands(commands, registry, WORKSPACE);
-    api.wireAgents(
-        launch,
-        new AgentSessionQueryService(store, sessionStore),
-        new AgentPluginService(PROCESSES, claudeMount.toString(), root, DEFAULTS),
-        new PromptRefinementService(PROCESSES, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
-        DEFAULTS,
-        IMAGE_VERSION,
-        () -> CAPABILITIES);
+    wireWith(PROCESSES, DEFAULTS);
     client = vertx.createHttpClient();
     ctx = vertx.getOrCreateContext();
   }
 
   @AfterEach
   void stopServer() throws Exception {
+    for (AgentRuntime.View view : runtime.list()) {
+      if (view.commandId() != null) {
+        post("/commands/" + view.commandId() + "/terminate", new JsonObject());
+      }
+    }
     api.close();
     if (client != null) {
       client.close();
@@ -229,53 +223,86 @@ class AgentsApiTest {
   }
 
   /**
-   * A runner on whose volume nobody has signed in: {@code claude auth status} fails and the kimi
-   * credential probe finds nothing.
+   * A {@code claude} that records what a real one would have been given, and then stays up reading
+   * its input like a chat harness does. The launch's login shell finds it through {@code
+   * ~/.bash_profile}: the library points {@code HOME} at the credential volume, which here is a
+   * temporary directory.
    */
-  private static ProcessRunner signedOut() {
-    return (command, cwd, env, timeout) ->
-        new ProcessRunner.Result(1, "", "Not logged in", false);
-  }
-
-  /** Rebuild the agent surface on a different {@link ProcessRunner}, leaving everything else. */
-  private void rewireWith(ProcessRunner processes) {
-    rewireWith(processes, DEFAULTS);
+  private void installFakeHarness() throws Exception {
+    Path bin = Files.createDirectories(claudeMount.resolve("fake-bin"));
+    Path claude = bin.resolve("claude");
+    Files.writeString(
+        claude,
+        """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "$QITS_FAKE_LOG.args"
+        pwd >> "$QITS_FAKE_LOG.cwd"
+        printf '%s\\n' "$QITS_TOKEN" >> "$QITS_FAKE_LOG.token"
+        exec cat >> "$QITS_FAKE_LOG.stdin"
+        """);
+    Files.setPosixFilePermissions(claude, PosixFilePermissions.fromString("rwxr-xr-x"));
+    Files.writeString(claudeMount.resolve(".bash_profile"), "PATH=" + bin + ":$PATH\n");
   }
 
   /**
-   * Rebuild the agent surface on a different {@link ProcessRunner} and a different {@link
-   * AgentDefaults} — which is how a container "born with a configuration document" is expressed
-   * here, since the document reaches a launch through {@code AgentDefaults.surfaceConfigurations()}
-   * and nowhere else.
+   * Build the agent surface on {@code processes} and {@code defaults} — the second is how a
+   * container "born with a configuration document" is expressed here, since the document reaches a
+   * launch through {@code AgentDefaults.surfaceConfigurations()} and nowhere else.
    */
-  private void rewireWith(ProcessRunner processes, AgentDefaults defaults) {
+  private void wireWith(ProcessRunner processes, AgentDefaults defaults) {
     CommandLogService logs = new CommandLogService(store, null);
     CommandRegistry registry = new CommandRegistry(root, 2_000);
-    commands = new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
+    CommandService commands =
+        new CommandService(store, registry, lifecycle, logs, WORKSPACE, new NoActions());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(store, logs, sessionStore, claudeMount.toString(), null);
     AgentTranscriptTailService tail = new AgentTranscriptTailService(transcripts, logs);
-    AgentLaunchService rewired =
+    eu.wohlben.qits.agents.AgentAuthStatus auth =
+        new eu.wohlben.qits.agents.AgentAuthStatus(processes, claudeMount.toString(), root);
+    WorkspaceMcpServers mcp =
+        new WorkspaceMcpServers(ENDPOINTS, REPO, "feature-x", Optional.empty(), Optional.empty());
+    CommandsAgentCommands shared = new CommandsAgentCommands(commands, registry, store);
+    launch =
         new AgentLaunchService(
-            new CommandsAgentCommands(commands, registry, store),
-            new eu.wohlben.qits.agents.AgentAuthStatus(processes, claudeMount.toString(), root),
-            transcripts,
-            tail,
-            defaults,
-            new WorkspaceMcpServers(
-                ENDPOINTS, REPO, "feature-x", java.util.Optional.empty(), java.util.Optional.empty()),
-            WORKSPACE,
-            claudeMount.toString(),
+            shared, auth, transcripts, tail, defaults, mcp, WORKSPACE, claudeMount.toString(),
             HOOKS_PORT);
+    runtime =
+        new AgentRuntime(
+            worktrees,
+            store,
+            registry,
+            shared,
+            seat ->
+                new AgentLaunchService(
+                    seat.commands(),
+                    auth,
+                    transcripts,
+                    tail,
+                    defaults,
+                    mcp,
+                    WORKSPACE,
+                    claudeMount.toString(),
+                    HOOKS_PORT),
+            claudeMount.toString());
     api.wireCommands(commands, registry, WORKSPACE);
     api.wireAgents(
-        rewired,
+        runtime,
+        launch,
         new AgentSessionQueryService(store, sessionStore),
         new AgentPluginService(processes, claudeMount.toString(), root, defaults),
         new PromptRefinementService(processes, WORKSPACE, defaults, claudeMount.toString(), root),
         defaults,
         IMAGE_VERSION,
         () -> CAPABILITIES);
+  }
+
+  /**
+   * A runner on whose volume nobody has signed in: {@code claude auth status} fails and the kimi
+   * credential probe finds nothing.
+   */
+  private static ProcessRunner signedOut() {
+    return (command, cwd, env, timeout) ->
+        new ProcessRunner.Result(1, "", "Not logged in", false);
   }
 
   /** The one catalog entry these tests attach, and the credential nothing may ever serve. */
@@ -367,8 +394,7 @@ class AgentsApiTest {
   }
 
   /** This workspace declares no actions; agents are launched, not resolved from config. */
-  private record NoActions()
-      implements eu.wohlben.qits.commands.ActionResolver {
+  private record NoActions() implements eu.wohlben.qits.commands.ActionResolver {
     @Override
     public Optional<ResolvedAction> resolve(String actionId) {
       return Optional.empty();
@@ -380,7 +406,7 @@ class AgentsApiTest {
     }
   }
 
-  // --- the surface ------------------------------------------------------------------------------
+  // --- the workspace-wide surface ---------------------------------------------------------------
 
   @Test
   void availableListsEveryHarnessAndTheResolvedDefault() throws Exception {
@@ -432,6 +458,7 @@ class AgentsApiTest {
     // The probe runs off the boot thread, so a request can beat it. An empty list is a cache miss
     // to the host — it keeps what it had — where an absent key would be a decode surprise.
     api.wireAgents(
+        runtime,
         launch,
         new AgentSessionQueryService(store, sessionStore),
         new AgentPluginService(PROCESSES, claudeMount.toString(), root, DEFAULTS),
@@ -562,102 +589,6 @@ class AgentsApiTest {
   }
 
   @Test
-  void aLaunchAnswersTheCommandEnvelopeAndTakesItsSeedInline() throws Exception {
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "workspace.agent")
-                .put("mode", "INTERACTIVE")
-                .put("agentType", "CLAUDE")
-                .put("initialContext", "look at the README")
-                .put("fork", false)
-                .put("deliverTaskPrompt", false));
-
-    assertEquals(200, answer.status());
-    // The same `{command: …}` envelope POST /commands answers with, so one client-side decoder
-    // serves both launch paths. The harness binary is absent in the suite, so the process exits
-    // immediately — what is under test here is the request contract and the response shape.
-    JsonObject command = answer.body().getJsonObject("command");
-    assertEquals("feature-x", command.getString("workspaceId"));
-    // The launch mode maps onto the command kind the frontend routes its view on: INTERACTIVE is a
-    // PTY (TERMINAL, xterm.js), CHAT is line-delimited JSON on pipes (see the sibling test).
-    assertEquals("TERMINAL", command.getString("kind"));
-    assertEquals(true, command.getBoolean("interactive"), "INTERACTIVE renders onto a PTY");
-    assertNotNull(command.getString("id"));
-
-    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
-  }
-
-  @Test
-  void aChatLaunchIsNotInteractive() throws Exception {
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "workspace.chat")
-                .put("mode", "CHAT")
-                .put("fork", false));
-
-    assertEquals(200, answer.status());
-    assertEquals(false, answer.body().getJsonObject("command").getBoolean("interactive"));
-    post("/commands/" + answer.body().getJsonObject("command").getString("id") + "/terminate",
-        new JsonObject());
-  }
-
-  @Test
-  void aForkWithoutASessionToForkFromIsAFourHundred() throws Exception {
-    // The two request fields that only make sense together, and the message names both.
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject().put("scope", "REPOSITORY").put("mode", "CHAT").put("fork", true));
-
-    assertEquals(400, answer.status());
-    assertEquals("fork requires resumeSessionId", answer.body().getString("message"));
-  }
-
-  @Test
-  void resumingASessionThisContainerDoesNotOwnIsRefused() throws Exception {
-    // Fails closed: the store that would vouch for the session did not survive the container, so
-    // resuming a vanished id would exit instantly with "no conversation found".
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "workspace.chat")
-                .put("mode", "CHAT")
-                .put("resumeSessionId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
-
-    assertEquals(400, answer.status());
-    assertTrue(
-        answer.body().getString("message").contains("3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
-        answer.body().encode());
-  }
-
-  @Test
-  void anUnknownModeOrAgentTypeIsAFourHundredToo() throws Exception {
-    assertTrue(
-        post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "SIDEWAYS"))
-            .body()
-            .getString("message")
-            .contains("mode"));
-    assertTrue(
-        post(
-                "/agents",
-                new JsonObject()
-                    .put("scope", "REPOSITORY")
-                    .put("mode", "CHAT")
-                    .put("agentType", "NOBODY"))
-            .body()
-            .getString("message")
-            .contains("agentType"));
-  }
-
-  @Test
   void refinementTakesAPreambleBesideTheTranscript() throws Exception {
     Answer answer =
         post(
@@ -668,61 +599,6 @@ class AgentsApiTest {
 
     assertEquals(200, answer.status());
     assertEquals("refined prompt", answer.body().getString("prompt"));
-  }
-
-  @Test
-  void anUnknownScopeIsAFourHundredRatherThanASilentDefault() throws Exception {
-    Answer answer = post("/agents", new JsonObject().put("scope", "EVERYTHING"));
-
-    assertEquals(400, answer.status());
-    assertTrue(answer.body().getString("message").contains("scope"), answer.body().encode());
-  }
-
-  @Test
-  void aMissingScopeIsAFourHundred() throws Exception {
-    assertEquals(400, post("/agents", new JsonObject()).status());
-  }
-
-  @Test
-  void anUnauthenticatedLaunchIsRefusedRatherThanSwappedForASignInTerminal() throws Exception {
-    // The substitution this replaced: launchChat used to answer launchLogin's bare REPL, and the
-    // caller redirected you into it. You asked for a chat about an epic and got a login terminal,
-    // and nothing in the answer said so.
-    rewireWith(signedOut());
-
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "workspace.chat")
-                .put("mode", "CHAT"));
-
-    // 409, not 500 and not 400: the request was well-formed and the caller cannot fix it by asking
-    // differently. A 500 would have shown "Internal error" for a state one click fixes.
-    assertEquals(409, answer.status());
-    // The DISCRIMINATOR is the contract, asserted as a literal — the sentence beside it is not, and
-    // matching prose is the display-string-as-contract mistake this epic exists to delete.
-    assertEquals("not-signed-in", answer.body().getString("error"));
-    assertEquals("CLAUDE", answer.body().getString("agentType"));
-    assertNotNull(answer.body().getString("message"));
-  }
-
-  @Test
-  void anUnattendedDispatchIsRefusedTheSameWayRatherThanOpeningATerminalNobodyWatches()
-      throws Exception {
-    rewireWith(signedOut());
-
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "ticket.dispatch")
-                .put("mode", "INTERACTIVE"));
-
-    assertEquals(409, answer.status());
-    assertEquals("not-signed-in", answer.body().getString("error"));
   }
 
   @Test
@@ -757,183 +633,6 @@ class AgentsApiTest {
   }
 
   @Test
-  void theSurfaceComesBackOnTheCommandItLaunched() throws Exception {
-    // The parameter earns its keep here and nowhere else: epic.chat and workspace.chat send
-    // byte-identical requests to two containers, so until this field travelled nothing downstream
-    // could tell one of this daemon's four surfaces from another.
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "epic.chat")
-                .put("mode", "CHAT"));
-
-    assertEquals(200, answer.status());
-    JsonObject command = answer.body().getJsonObject("command");
-    assertEquals("epic.chat", command.getString("agentSurface"));
-
-    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
-  }
-
-  @Test
-  void aMissingSurfaceIsRefusedRatherThanGuessedFromTheRequestShape() throws Exception {
-    // The crutch that let this daemon ship before the frontends, now removed. It was lossy exactly
-    // where the field exists to fix — an epic's agent tab read as workspace.agent — and it made a
-    // caller that had forgotten the field indistinguishable from one that had shipped it.
-    Answer answer =
-        post("/agents", new JsonObject().put("scope", "REPOSITORY").put("mode", "INTERACTIVE"));
-
-    assertEquals(400, answer.status());
-    assertTrue(answer.body().getString("message").contains("surface"), answer.body().encode());
-  }
-
-  @Test
-  void anUnknownSurfaceIsAFourHundredRatherThanASilentDefault() throws Exception {
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject().put("scope", "REPOSITORY").put("surface", "workspace.telepathy"));
-
-    assertEquals(400, answer.status());
-    assertTrue(answer.body().getString("message").contains("surface"), answer.body().encode());
-  }
-
-  @Test
-  void aTicketDispatchNamesItsOwnSurface() throws Exception {
-    // A workspace cut for a ticket: nobody presses a button for it, and it is configured on the
-    // same footing as the four a human starts.
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "ticket.dispatch")
-                .put("mode", "INTERACTIVE"));
-
-    assertEquals(200, answer.status());
-    JsonObject command = answer.body().getJsonObject("command");
-    assertEquals("ticket.dispatch", command.getString("agentSurface"));
-
-    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
-  }
-
-  @Test
-  void aLaunchRecordsWhatItRanWithAndAnswersItOnEveryReadOfTheCommand() throws Exception {
-    // A container keeps the document it was born with, and an edit in qits-projects applies to the
-    // next one — so the store cannot answer what THIS session ran with. Only the record can, and
-    // until it was on the wire it was written inside the container and readable by nobody.
-    rewireWith(PROCESSES, bornWith(document()));
-
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "workspace.chat")
-                .put("mode", "CHAT"));
-
-    assertEquals(200, answer.status());
-    String commandId = answer.body().getJsonObject("command").getString("id");
-
-    // The keys are asserted as LITERAL STRINGS, like every other field on this wire: a test that
-    // read them off the record would rename itself along with the bug.
-    JsonObject record = answer.body().getJsonObject("command").getJsonObject("agentLaunchRecord");
-    assertNotNull(record, answer.body().encode());
-    assertEquals("workspace.chat", record.getString("surface"));
-    assertEquals("CLAUDE", record.getString("harness"));
-    assertEquals("opus", record.getString("model"));
-    assertEquals("high", record.getString("effort"));
-    assertEquals("SKIP_PERMISSIONS", record.getString("permissionMode"));
-    assertEquals(false, record.getBoolean("remoteControl"));
-    assertEquals("", record.getString("remoteControlName"));
-    assertEquals(true, record.getBoolean("activityTracking"));
-    assertEquals(
-        true,
-        record.getBoolean("configured"),
-        "this container was born with a document, which is what `configured` says — the difference"
-            + " between a surface configured this way and one nobody had configured");
-    assertNotNull(record.getJsonArray("notes"));
-    JsonObject attached = record.getJsonArray("mcpServers").getJsonObject(0);
-    assertEquals("repository", attached.getString("server"));
-    assertEquals(false, attached.getBoolean("readOnly"));
-    JsonArray recorded = record.getJsonArray("mcpServers");
-    JsonObject browser = recorded.getJsonObject(recorded.size() - 1);
-    assertEquals("browser", browser.getString("server"), "the image's browser comes last");
-    assertEquals(false, browser.getBoolean("readOnly"));
-
-    // The same object on both reads: the list and the single command go through one serializer, and
-    // the epic's per-surface verification reads whichever it has an id for.
-    JsonObject fromRead = get("/commands/" + commandId).body().getJsonObject("agentLaunchRecord");
-    assertEquals(record, fromRead);
-    JsonObject fromList =
-        get("/commands").body().getJsonArray("entries").getJsonObject(0).getJsonObject("command");
-    assertEquals(commandId, fromList.getString("id"));
-    assertEquals(record, fromList.getJsonObject("agentLaunchRecord"));
-
-    post("/commands/" + commandId + "/terminate", new JsonObject());
-  }
-
-  @Test
-  void anAttachedExternalServerIsRecordedByKeyAndItsCredentialAppearsNowhere() throws Exception {
-    // The record was built to have NO SHAPE a credential could travel in — external servers are
-    // named by key, not by url with a header stripped and not by a redacted value. This asserts
-    // that on what the API actually serves, over the whole body rather than field by field, so a
-    // field added later that reintroduced a url or a header value would fail here.
-    rewireWith(PROCESSES, bornWith(document(EXTERNAL_SERVER)));
-
-    Answer answer =
-        post(
-            "/agents",
-            new JsonObject()
-                .put("scope", "REPOSITORY")
-                .put("surface", "workspace.chat")
-                .put("mode", "CHAT"));
-
-    assertEquals(200, answer.status());
-    JsonObject command = answer.body().getJsonObject("command");
-    assertEquals(
-        new JsonArray().add("stripe"),
-        command.getJsonObject("agentLaunchRecord").getJsonArray("externalMcpServers"));
-
-    String served = get("/commands/" + command.getString("id")).body().encode();
-    assertFalse(served.contains(EXTERNAL_HEADER_VALUE), "a header value must never be served");
-    assertFalse(
-        served.contains(EXTERNAL_HEADER_NAME),
-        "not even the header it would be presented in");
-    assertFalse(served.contains(EXTERNAL_URL), "nor the url, which can itself carry a credential");
-    assertTrue(served.contains("stripe"), served);
-
-    // The key set whole, so a field added upstream that reintroduced a url, a header name or a
-    // header value fails here rather than shipping quietly.
-    assertEquals(
-        Set.of(
-            "surface",
-            "harness",
-            "model",
-            "effort",
-            "permissionMode",
-            "remoteControl",
-            "remoteControlName",
-            "activityTracking",
-            "mcpServers",
-            "externalMcpServers",
-            "configured",
-            "notes"),
-        command.getJsonObject("agentLaunchRecord").fieldNames());
-    assertEquals(
-        Set.of("server", "readOnly"),
-        command
-            .getJsonObject("agentLaunchRecord")
-            .getJsonArray("mcpServers")
-            .getJsonObject(0)
-            .fieldNames(),
-        "an attached platform server is named and fenced, never addressed — no url is served");
-
-    post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
-  }
-
-  @Test
   void aCommandThatIsNotAConfiguredSessionCarriesNoRecordAtAll() throws Exception {
     // Absent, not null. A sign-in terminal is nobody's surface and runs from no configuration, and
     // so does an agent command launched before a launch recorded itself — both must stay
@@ -947,304 +646,12 @@ class AgentsApiTest {
     post("/commands/" + command.getString("id") + "/terminate", new JsonObject());
   }
 
-  // --- turns into a session that is already running ---------------------------------------------
-
-  @Test
-  @Timeout(60)
-  void aTurnReachesTheRunningChatSession() throws Exception {
-    List<String> turns = new CopyOnWriteArrayList<>();
-    // `sleep` rather than the harness: what is under test is that the route finds the running chat
-    // and hands the text to the protocol, and the harness binary is not in this image anyway.
-    Command chat = launchChatThatRecords("chat-1", turns);
-
-    Answer answer = post("/agents/turn", new JsonObject().put("text", "keep going"));
-
-    assertEquals(200, answer.status());
-    // Literal keys, like every other field on this wire.
-    assertEquals(true, answer.body().getBoolean("delivered"));
-    assertEquals(chat.id(), answer.body().getString("commandId"), "the host logs what it spoke to");
-    assertEquals("CHAT", answer.body().getString("kind"), "which arm carried it");
-    assertNull(answer.body().getString("reason"), "a delivered turn carries no reason");
-    assertEquals(List.of("keep going"), turns, "verbatim — the daemon templates nothing");
-
-    post("/commands/" + chat.id() + "/terminate", new JsonObject());
-  }
-
-  @Test
-  @Timeout(60)
-  void aTurnIntoARunningTerminalSessionArrivesAsKeystrokes() throws Exception {
-    // `cat` reading the PTY and writing what it is typed to a file is the simplest proof that the
-    // keystrokes crossed into the terminal — the same trick CommandSocketsTest uses for the socket.
-    Path typed = root.resolve("typed.txt");
-    Command terminal =
-        commands.launchAgent(
-            "Agent",
-            "cat > typed.txt",
-            true,
-            Map.of(),
-            "term-1",
-            // An interactive run is an agent run to the RUNNING probe only once it has a session
-            // recorded, so the narrowing this route shares with it needs one here.
-            new AgentSessionRef("s-term", AgentSessionSource.PINNED, null, null, Instant.EPOCH),
-            (id, code, killed) -> {},
-            "CLAUDE");
-
-    Answer answer = post("/agents/turn", new JsonObject().put("text", "carry on"));
-
-    assertEquals(200, answer.status());
-    assertEquals(true, answer.body().getBoolean("delivered"));
-    assertEquals(terminal.id(), answer.body().getString("commandId"));
-    assertEquals("TERMINAL", answer.body().getString("kind"));
-    // The carriage return is what makes it a turn rather than a half-typed line: CR is what a
-    // terminal sends for Enter, and the tty translates it into the newline `cat` needs to flush.
-    awaitContains(typed, "carry on");
-
-    post("/commands/" + terminal.id() + "/terminate", new JsonObject());
-  }
-
-  @Test
-  void withNoAgentRunningATurnIsAnAnsweredAbsenceRatherThanAFourOhFour() throws Exception {
-    // 200, not 404. The caller's next move is to launch, and an absence it can act on is an answer;
-    // a 404 would say the endpoint does not exist, which is the one thing that is not true.
-    Answer answer = post("/agents/turn", new JsonObject().put("text", "anybody there"));
-
-    assertEquals(200, answer.status());
-    assertEquals(false, answer.body().getBoolean("delivered"));
-    assertEquals("no agent is running", answer.body().getString("reason"));
-    assertNull(answer.body().getString("commandId"), "omitted — there is no command to name");
-    assertNull(answer.body().getString("kind"));
-  }
-
-  @Test
-  void aBlankTurnIsAFourHundred() throws Exception {
-    // Not a delivered no-op: an empty chat turn is one the harness will answer, and an empty
-    // terminal turn is a bare Enter into whatever holds the prompt.
-    assertEquals(400, post("/agents/turn", new JsonObject().put("text", "   ")).status());
-    assertEquals(400, post("/agents/turn", new JsonObject()).status());
-  }
-
-  @Test
-  void theTurnRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
-    assertEquals(405, get("/agents/turn").status());
-  }
-
-  @Test
-  void settingBlockedCallsSetBlockedAndAnswersTheRenamedCount() throws Exception {
-    // No live Claude Remote Control session is standing, so the real AgentLaunchService.setBlocked
-    // has nothing to rename — proving the route reaches it and relays the count, which is 0 here and
-    // would be the harness library's own count with one running. The rename mechanics themselves are
-    // proven in that library's suite, not duplicated here.
-    Answer answer = post("/agents/blocked", new JsonObject().put("blocked", true));
-
-    assertEquals(200, answer.status());
-    assertEquals(true, answer.body().getBoolean("blocked"));
-    assertEquals(0, answer.body().getInteger("renamed"));
-    assertTrue(launch.blocked());
-
-    Answer unblocked = post("/agents/blocked", new JsonObject().put("blocked", false));
-    assertEquals(200, unblocked.status());
-    assertEquals(false, unblocked.body().getBoolean("blocked"));
-    assertFalse(launch.blocked());
-  }
-
-  @Test
-  void aMissingOrNonBooleanBlockedFieldIsAFourHundred() throws Exception {
-    assertEquals(400, post("/agents/blocked", new JsonObject()).status());
-    assertEquals(400, post("/agents/blocked", new JsonObject().put("blocked", "true")).status());
-  }
-
-  @Test
-  void theBlockedRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
-    assertEquals(405, get("/agents/blocked").status());
-  }
-
-  @Test
-  void settingTheEntityCallsSetEntityAndAnswersTheFactsAndTheRenamedCount() throws Exception {
-    // As with /agents/blocked: nothing live to rename, so the count is the real library's 0 and what
-    // is proven here is that the route reaches setEntity with exactly the facts it was sent.
-    Answer answer =
-        post(
-            "/agents/entity",
-            new JsonObject()
-                .put("title", "Session names carry status")
-                .put("status", "IMPLEMENTING")
-                .put("blocked", true));
-
-    assertEquals(200, answer.status());
-    assertEquals("Session names carry status", answer.body().getString("title"));
-    assertEquals("IMPLEMENTING", answer.body().getString("status"));
-    assertEquals(true, answer.body().getBoolean("blocked"));
-    assertEquals(0, answer.body().getInteger("renamed"));
-    assertEquals(
-        new EntityFacts("Session names carry status", "IMPLEMENTING", true), launch.entity());
-
-    // Null and absent both clear — the body is the whole of what the host knows — and the answer
-    // still names both fields, as null.
-    Answer cleared =
-        post("/agents/entity", new JsonObject().putNull("title").put("blocked", false));
-    assertEquals(200, cleared.status());
-    assertTrue(cleared.body().containsKey("title"));
-    assertTrue(cleared.body().containsKey("status"));
-    assertNull(cleared.body().getString("title"));
-    assertNull(cleared.body().getString("status"));
-    assertEquals(new EntityFacts(null, null, false), launch.entity());
-  }
-
-  @Test
-  void aMistypedEntityBodyIsAFourHundredAndMovesNothing() throws Exception {
-    post("/agents/entity", new JsonObject().put("title", "kept").put("blocked", false));
-
-    assertEquals(400, post("/agents/entity", new JsonObject().put("title", "t")).status());
-    assertEquals(
-        400, post("/agents/entity", new JsonObject().put("blocked", "true")).status());
-    assertEquals(
-        400,
-        post("/agents/entity", new JsonObject().put("title", 7).put("blocked", true)).status());
-    assertEquals(
-        400,
-        post("/agents/entity", new JsonObject().put("status", false).put("blocked", true))
-            .status());
-
-    assertEquals(new EntityFacts("kept", null, false), launch.entity());
-  }
-
-  @Test
-  void theEntityRoutePassesTheBlockSourceThroughAndAbsentIsExplicit() throws Exception {
-    Answer waiting =
-        post(
-            "/agents/entity",
-            new JsonObject()
-                .put("title", "A title")
-                .put("status", "IMPLEMENTING")
-                .put("blocked", true)
-                .put("blockSource", "AGENT_WAITING"));
-
-    assertEquals(200, waiting.status());
-    assertEquals("AGENT_WAITING", waiting.body().getString("blockSource"));
-    assertEquals(
-        new EntityFacts("A title", "IMPLEMENTING", true, "AGENT_WAITING"), launch.entity());
-    assertTrue(launch.entity().waitingOnAPerson());
-
-    Answer both =
-        post(
-            "/agents/entity",
-            new JsonObject()
-                .put("title", "A title")
-                .put("blocked", true)
-                .put("blockSource", "BOTH"));
-    assertEquals(200, both.status());
-    assertEquals(new EntityFacts("A title", null, true, "BOTH"), launch.entity());
-
-    Answer absent =
-        post("/agents/entity", new JsonObject().put("title", "A title").put("blocked", true));
-    assertEquals(200, absent.status());
-    assertTrue(absent.body().containsKey("blockSource"), "named, as null, like title and status");
-    assertNull(absent.body().getString("blockSource"));
-    assertEquals(new EntityFacts("A title", null, true, null), launch.entity());
-  }
-
-  @Test
-  void aNonStringBlockSourceIsAFourHundredAndMovesNothing() throws Exception {
-    post("/agents/entity", new JsonObject().put("title", "kept").put("blocked", false));
-
-    assertEquals(
-        400,
-        post("/agents/entity", new JsonObject().put("blocked", true).put("blockSource", 1))
-            .status());
-    assertEquals(
-        400,
-        post("/agents/blocked", new JsonObject().put("blocked", true).put("blockSource", true))
-            .status());
-
-    assertEquals(new EntityFacts("kept", null, false), launch.entity());
-  }
-
-  @Test
-  void theOlderBlockedRouteCarriesTheBlockSourceToo() throws Exception {
-    post(
-        "/agents/entity",
-        new JsonObject().put("title", "A title").put("status", "REFINED").put("blocked", false));
-
-    assertEquals(
-        200,
-        post(
-                "/agents/blocked",
-                new JsonObject().put("blocked", true).put("blockSource", "AGENT_WAITING"))
-            .status());
-    assertEquals(new EntityFacts("A title", "REFINED", true, "AGENT_WAITING"), launch.entity());
-
-    assertEquals(200, post("/agents/blocked", new JsonObject().put("blocked", true)).status());
-    assertEquals(
-        new EntityFacts("A title", "REFINED", true, null),
-        launch.entity(),
-        "absent is explicit, and replaces a derived source");
-  }
-
-  @Test
-  void theEntityRouteRejectsTheWrongMethodLikeEveryOtherRoute() throws Exception {
-    assertEquals(405, get("/agents/entity").status());
-  }
-
-  @Test
-  void theOlderBlockedRouteMovesOnlyTheFlagAndKeepsTheTitleAndStatus() throws Exception {
-    post(
-        "/agents/entity",
-        new JsonObject().put("title", "A title").put("status", "REFINED").put("blocked", false));
-
-    Answer answer = post("/agents/blocked", new JsonObject().put("blocked", true));
-
-    assertEquals(200, answer.status());
-    assertEquals(new EntityFacts("A title", "REFINED", true), launch.entity());
-  }
-
-  /**
-   * A running chat command whose protocol records the turns it is asked to send. A fake rather than
-   * the real {@code StreamJsonChatProtocol}: what is under test is which arm the route takes, and
-   * the protocol's own encoding is proven in the harness library's suite.
-   */
-  private Command launchChatThatRecords(String commandId, List<String> turns) {
-    return commands.launchChat(
-        "Chat",
-        "sleep 60",
-        Map.of(),
-        commandId,
-        null,
-        (id, code, killed) -> {},
-        process ->
-            new ChatProtocol() {
-              @Override
-              public void start(ChatWire wire, Runnable onClose) {}
-
-              @Override
-              public void sendUser(String text) {
-                turns.add(text);
-              }
-
-              @Override
-              public void close() {}
-            },
-        "CLAUDE");
-  }
-
-  /** Polls {@code file} until it holds {@code needle}; a turn crosses a process boundary. */
-  private static void awaitContains(Path file, String needle) throws Exception {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-    String seen = "";
-    while (System.nanoTime() < deadline) {
-      seen = Files.exists(file) ? Files.readString(file) : "";
-      if (seen.contains(needle)) {
-        return;
-      }
-      Thread.sleep(25);
-    }
-    throw new AssertionError("timed out waiting for '" + needle + "' in " + file + ": " + seen);
-  }
-
   @Test
   void wrongMethodsAreRejectedPerRoute() throws Exception {
     assertEquals(405, post("/agents/available", new JsonObject()).status());
     assertEquals(405, post("/agent-sessions", new JsonObject()).status());
-    assertEquals(405, get("/agents").status());
+    assertEquals(405, get("/agent-worktrees/agent-1/turn").status());
+    assertEquals(404, get("/agents").status(), "launching moved to /agent-worktrees");
     assertEquals(405, get("/prompt-refinements").status());
     assertEquals(405, put("/agent-sessions").status());
   }
@@ -1264,7 +671,7 @@ class AgentsApiTest {
   void agentsAreUnavailableUntilWired() throws Exception {
     WorkspaceApi unwired = new WorkspaceApi();
     unwired.vertx = vertx;
-    await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, root, List::of, () -> "marker"));
+    await(unwired.listen(vertx, "127.0.0.1", 0, TOKEN, null, List::of));
     int unwiredPort = unwired.actualPort();
     try {
       // Pinned to the same ctx as every other call: one context per test, not one per server.
@@ -1285,8 +692,6 @@ class AgentsApiTest {
     }
   }
 
-  // --- the one contract that spans two components -----------------------------------------------
-
   @Test
   void theRenderedHookUrlPointsAtThePortTheWebhookActuallyBinds() throws Exception {
     // AgentLaunchService renders this URL into every launch's hook curl and HookWebhook binds it.
@@ -1302,7 +707,506 @@ class AgentsApiTest {
     assertNotNull(webhook, "constructed with the same port the launch service was given");
   }
 
+  // --- agent worktrees: starting one -----------------------------------------------------------
+
+  /** A start body with everything a dispatch sends; tests remove or change what they are about. */
+  private JsonObject start(String agentId) {
+    return new JsonObject()
+        .put("agentId", agentId)
+        .put("workId", "qits-1")
+        .put("entityId", "qits-1")
+        .put("wrapperBranch", BRANCH)
+        .put("instruction", "fix the bug")
+        .put(
+            "env",
+            new JsonObject()
+                .put("QITS_TOKEN", "agent-token")
+                .put("QITS_FAKE_LOG", fakeLog.toString()));
+  }
+
+  private Path agentDir(String agentId) {
+    return worktrees.wrapperDir(agentId);
+  }
+
+  @Test
+  @Timeout(60)
+  void aStartMakesTheWorktreeAndRunsTheHarnessThereWithTheAgentsCredential() throws Exception {
+    Answer answer = post("/agent-worktrees", start("agent-1"));
+
+    assertEquals(200, answer.status(), answer.raw());
+    JsonObject body = answer.body();
+    assertEquals("agent-1", body.getString("agentId"));
+    assertEquals(agentDir("agent-1").toString(), body.getString("path"));
+    assertEquals(true, body.getBoolean("launched"));
+    assertEquals(false, body.getBoolean("resumed"));
+    assertNotNull(body.getString("sessionId"), "a fresh Claude session is pinned up front");
+    String commandId = body.getString("commandId");
+
+    JsonObject command = get("/commands/" + commandId).body();
+    assertEquals("CHAT", command.getString("kind"));
+    assertEquals("ticket.dispatch", command.getString("agentSurface"), "the dispatch surface");
+
+    awaitContains(fakeLog.resolveSibling("harness.cwd"), agentDir("agent-1").toString());
+    awaitContains(fakeLog.resolveSibling("harness.token"), "agent-token");
+    awaitContains(fakeLog.resolveSibling("harness.stdin"), "fix the bug");
+    assertTrue(
+        Files.exists(agentDir("agent-1").resolve(CHILD).resolve("lib.txt")),
+        "the submodule worktree is there too");
+  }
+
+  @Test
+  void theCredentialIsNeverWrittenBesideTheWorktree() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    String metadata =
+        Files.readString(worktrees.agentDir("agent-1").resolve(AgentRuntime.METADATA_FILE));
+    assertFalse(metadata.contains("agent-token"), metadata);
+    assertTrue(metadata.contains(BRANCH), metadata);
+  }
+
+  @Test
+  @Timeout(60)
+  void aSecondStartWhileTheHarnessRunsLaunchesNothing() throws Exception {
+    String first = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(first);
+
+    Answer again = post("/agent-worktrees", start("agent-1"));
+
+    assertEquals(200, again.status());
+    assertEquals(first, again.body().getString("commandId"));
+    assertEquals(false, again.body().getBoolean("launched"));
+  }
+
+  @Test
+  void anInteractiveStartRunsOnATerminal() throws Exception {
+    Answer answer = post("/agent-worktrees", start("agent-1").put("mode", "INTERACTIVE"));
+
+    assertEquals(200, answer.status(), answer.raw());
+    JsonObject command = get("/commands/" + answer.body().getString("commandId")).body();
+    assertEquals("TERMINAL", command.getString("kind"));
+    assertEquals(true, command.getBoolean("interactive"));
+  }
+
+  @Test
+  void theSurfaceANamedStartAsksForComesBackOnItsCommand() throws Exception {
+    Answer answer = post("/agent-worktrees", start("agent-1").put("surface", "workspace.chat"));
+
+    JsonObject command = get("/commands/" + answer.body().getString("commandId")).body();
+    assertEquals("workspace.chat", command.getString("agentSurface"));
+  }
+
+  @Test
+  void aMalformedStartIsAFourHundred() throws Exception {
+    assertEquals(400, post("/agent-worktrees", start("agent-1").put("mode", "SIDEWAYS")).status());
+    assertTrue(
+        post("/agent-worktrees", start("agent-1").put("harness", "NOBODY"))
+            .body()
+            .getString("message")
+            .contains("harness"));
+    assertTrue(
+        post("/agent-worktrees", start("agent-1").put("surface", "workspace.telepathy"))
+            .body()
+            .getString("message")
+            .contains("surface"));
+    assertEquals(400, post("/agent-worktrees", start("agent-1").putNull("workId")).status());
+    assertEquals(400, post("/agent-worktrees", start("agent-1").putNull("agentId")).status());
+    assertEquals(400, post("/agent-worktrees", start("agent-1").putNull("wrapperBranch")).status());
+    assertEquals(400, post("/agent-worktrees", start("../x")).status());
+    assertEquals(
+        400,
+        post("/agent-worktrees", start("agent-1").put("env", new JsonObject().put("N", 1)))
+            .status(),
+        "the credential becomes an environment, so it must be strings");
+    assertFalse(worktrees.exists("agent-1"), "a refused start makes nothing");
+  }
+
+  @Test
+  void aBranchAnotherAgentHoldsIsAConflict() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    Answer answer = post("/agent-worktrees", start("agent-2"));
+
+    assertEquals(409, answer.status());
+    assertTrue(answer.body().getString("message").contains(BRANCH), answer.raw());
+  }
+
+  @Test
+  void anUnauthenticatedHarnessIsRefusedRatherThanSwappedForASignInTerminal() throws Exception {
+    wireWith(signedOut(), DEFAULTS);
+
+    Answer answer = post("/agent-worktrees", start("agent-1"));
+
+    // 409, not 500: the request was well-formed and the caller cannot fix it by asking
+    // differently. The discriminator is the contract, the sentence beside it is not.
+    assertEquals(409, answer.status());
+    assertEquals("not-signed-in", answer.body().getString("error"));
+    assertEquals("CLAUDE", answer.body().getString("agentType"));
+    assertNotNull(answer.body().getString("message"));
+  }
+
+  @Test
+  void aLaunchRecordsWhatItRanWithAndAnswersItOnEveryReadOfTheCommand() throws Exception {
+    // A container keeps the document it was born with, and an edit in qits-projects applies to the
+    // next one — so the store cannot answer what THIS session ran with. Only the record can.
+    wireWith(PROCESSES, bornWith(document()));
+
+    Answer answer = post("/agent-worktrees", start("agent-1").put("surface", "workspace.chat"));
+    String commandId = answer.body().getString("commandId");
+
+    JsonObject record = get("/commands/" + commandId).body().getJsonObject("agentLaunchRecord");
+    assertNotNull(record);
+    assertEquals("workspace.chat", record.getString("surface"));
+    assertEquals("CLAUDE", record.getString("harness"));
+    assertEquals("opus", record.getString("model"));
+    assertEquals("high", record.getString("effort"));
+    assertEquals("SKIP_PERMISSIONS", record.getString("permissionMode"));
+    assertEquals(false, record.getBoolean("remoteControl"));
+    assertEquals(true, record.getBoolean("configured"));
+    JsonObject fromList =
+        get("/commands").body().getJsonArray("entries").getJsonObject(0).getJsonObject("command");
+    assertEquals(record, fromList.getJsonObject("agentLaunchRecord"));
+  }
+
+  @Test
+  void anAttachedExternalServerIsRecordedByKeyAndItsCredentialAppearsNowhere() throws Exception {
+    wireWith(PROCESSES, bornWith(document(EXTERNAL_SERVER)));
+
+    Answer answer = post("/agent-worktrees", start("agent-1").put("surface", "workspace.chat"));
+
+    String served = get("/commands/" + answer.body().getString("commandId")).raw();
+    assertTrue(served.contains("stripe"), served);
+    assertFalse(served.contains(EXTERNAL_HEADER_VALUE), "a header value must never be served");
+    assertFalse(served.contains(EXTERNAL_URL), "nor the url, which can itself carry a credential");
+    assertFalse(served.contains("agent-token"), "nor the agent's own credential");
+    assertEquals(
+        Set.of(
+            "surface",
+            "harness",
+            "model",
+            "effort",
+            "permissionMode",
+            "remoteControl",
+            "remoteControlName",
+            "activityTracking",
+            "mcpServers",
+            "externalMcpServers",
+            "configured",
+            "notes"),
+        new JsonObject(served).getJsonObject("agentLaunchRecord").fieldNames());
+  }
+
+  // --- yield, turn and resume -------------------------------------------------------------------
+
+  @Test
+  @Timeout(60)
+  void aTurnReachesTheRunningHarness() throws Exception {
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(commandId);
+
+    Answer answer = post("/agent-worktrees/agent-1/turn", new JsonObject().put("text", "go on"));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals(true, answer.body().getBoolean("delivered"));
+    assertEquals(false, answer.body().getBoolean("restarted"));
+    assertEquals(commandId, answer.body().getString("commandId"));
+    assertEquals("CHAT", answer.body().getString("kind"));
+    awaitContains(fakeLog.resolveSibling("harness.stdin"), "go on");
+  }
+
+  @Test
+  @Timeout(60)
+  void aYieldedAgentIsResumedWithItsSessionAndTheTurn() throws Exception {
+    JsonObject started = post("/agent-worktrees", start("agent-1")).body();
+    String session = started.getString("sessionId");
+    awaitRunning(started.getString("commandId"));
+    writeSessionFile("agent-1", session);
+
+    Answer yielded = post("/agent-worktrees/agent-1/yield", new JsonObject());
+    assertEquals(200, yielded.status());
+    assertEquals("agent-1", yielded.body().getString("agentId"));
+    assertEquals(true, yielded.body().getBoolean("yielded"));
+    awaitStopped(started.getString("commandId"));
+    assertEquals(false, list().getJsonObject(0).getBoolean("harnessRunning"));
+
+    Answer turn = post("/agent-worktrees/agent-1/turn", new JsonObject().put("text", "answered"));
+
+    assertEquals(true, turn.body().getBoolean("delivered"));
+    assertEquals(true, turn.body().getBoolean("restarted"));
+    awaitContains(fakeLog.resolveSibling("harness.args"), "--resume " + session);
+    awaitContains(fakeLog.resolveSibling("harness.stdin"), "answered");
+  }
+
+  @Test
+  @Timeout(60)
+  void aRestartedDaemonResumesTheSessionTheHostKept() throws Exception {
+    // A new runtime is what a container restart leaves: the worktree on the volume, the session
+    // files on the harness volume, and nothing in memory. The host hands the session id back.
+    String session = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+    worktrees.ensure("agent-1", BRANCH);
+    writeSessionFile("agent-1", session);
+    wireWith(PROCESSES, DEFAULTS);
+
+    Answer answer = post("/agent-worktrees", start("agent-1").put("sessionId", session));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals(true, answer.body().getBoolean("resumed"));
+    assertEquals(session, answer.body().getString("sessionId"));
+    awaitContains(fakeLog.resolveSibling("harness.args"), "--resume " + session);
+  }
+
+  @Test
+  void aSessionWhoseFilesAreGoneStartsAFreshOne() throws Exception {
+    String session = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
+    Answer answer = post("/agent-worktrees", start("agent-1").put("sessionId", session));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals(false, answer.body().getBoolean("resumed"));
+    assertFalse(session.equals(answer.body().getString("sessionId")));
+  }
+
+  @Test
+  void aTurnNeedsTextAndAKnownAgent() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    assertEquals(400, post("/agent-worktrees/agent-1/turn", new JsonObject()).status());
+    assertEquals(
+        400, post("/agent-worktrees/agent-1/turn", new JsonObject().put("text", " ")).status());
+    assertEquals(
+        404, post("/agent-worktrees/agent-9/turn", new JsonObject().put("text", "hi")).status());
+  }
+
+  /** Where Claude keeps a session's transcript: keyed by the escaped working directory. */
+  private void writeSessionFile(String agentId, String session) throws Exception {
+    String escaped = agentDir(agentId).toString().replaceAll("[^A-Za-z0-9]", "-");
+    Path file = claudeMount.resolve(".claude/projects").resolve(escaped).resolve(session + ".jsonl");
+    Files.createDirectories(file.getParent());
+    Files.writeString(file, "{}\n");
+  }
+
+  // --- the entity, per agent --------------------------------------------------------------------
+
+  @Test
+  void settingTheEntityRenamesThatAgentAndAnswersTheFacts() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    Answer answer =
+        post(
+            "/agent-worktrees/agent-1/entity",
+            new JsonObject()
+                .put("title", "Session names carry status")
+                .put("status", "IMPLEMENTING")
+                .put("blocked", true)
+                .put("blockSource", "AGENT_WAITING"));
+
+    assertEquals(200, answer.status());
+    assertEquals("Session names carry status", answer.body().getString("title"));
+    assertEquals("IMPLEMENTING", answer.body().getString("status"));
+    assertEquals(true, answer.body().getBoolean("blocked"));
+    assertEquals("AGENT_WAITING", answer.body().getString("blockSource"));
+    assertEquals(1, answer.body().getInteger("renamed"), "this agent's running chat, and no other");
+    assertEquals(
+        new EntityFacts("Session names carry status", "IMPLEMENTING", true, "AGENT_WAITING"),
+        runtime.entity("agent-1"));
+
+    Answer blocked =
+        post("/agent-worktrees/agent-1/blocked", new JsonObject().put("blocked", false));
+    assertEquals(200, blocked.status());
+    assertEquals(false, blocked.body().getBoolean("blocked"));
+    assertEquals(
+        new EntityFacts("Session names carry status", "IMPLEMENTING", false, null),
+        runtime.entity("agent-1"),
+        "the blocked route moves only the flag");
+  }
+
+  @Test
+  void aMistypedEntityBodyIsAFourHundredAndMovesNothing() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+    post(
+        "/agent-worktrees/agent-1/entity",
+        new JsonObject().put("title", "kept").put("blocked", false));
+
+    assertEquals(
+        400, post("/agent-worktrees/agent-1/entity", new JsonObject().put("title", "t")).status());
+    assertEquals(
+        400,
+        post("/agent-worktrees/agent-1/entity", new JsonObject().put("title", 7).put("blocked", true))
+            .status());
+    assertEquals(
+        400,
+        post("/agent-worktrees/agent-1/blocked", new JsonObject().put("blocked", "true")).status());
+    assertEquals(new EntityFacts("kept", null, false), runtime.entity("agent-1"));
+  }
+
+  @Test
+  void aStartCarriesTheEntityItIsNamedFor() throws Exception {
+    post(
+        "/agent-worktrees",
+        start("agent-1")
+            .put("entityTitle", "Fix it")
+            .put("entityStatus", "REFINED")
+            .put("entityBlocked", true)
+            .put("blockSource", "AGENT_WAITING"));
+
+    assertEquals(
+        new EntityFacts("Fix it", "REFINED", true, "AGENT_WAITING"), runtime.entity("agent-1"));
+    assertEquals(
+        400,
+        post("/agent-worktrees", start("agent-1").put("entityBlocked", "yes")).status(),
+        "a mistyped fact is refused, not coerced");
+  }
+
+  // --- listing, cleanup and removal ---------------------------------------------------------------
+
+  private JsonArray list() throws Exception {
+    Answer answer = get("/agent-worktrees");
+    assertEquals(200, answer.status(), answer.raw());
+    return answer.array();
+  }
+
+  @Test
+  void theListNamesEachAgentItsBranchesAndWhetherAnythingWouldBeLost() throws Exception {
+    JsonObject started = post("/agent-worktrees", start("agent-1")).body();
+    awaitRunning(started.getString("commandId"));
+    Path child = agentDir("agent-1").resolve(CHILD);
+    GitFixtures.git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    GitFixtures.git(child, "commit", "--quiet", "--allow-empty", "-m", "work");
+
+    JsonObject agent = list().getJsonObject(0);
+
+    assertEquals("agent-1", agent.getString("agentId"));
+    assertEquals("qits-1", agent.getString("workId"));
+    assertEquals(BRANCH, agent.getString("wrapperBranch"));
+    assertEquals(agentDir("agent-1").toString(), agent.getString("path"));
+    assertEquals(true, agent.getBoolean("harnessRunning"));
+    assertEquals(started.getString("commandId"), agent.getString("commandId"));
+    assertEquals(started.getString("sessionId"), agent.getString("sessionId"));
+    assertEquals(false, agent.getBoolean("dirty"));
+    assertEquals(true, agent.getBoolean("unpushed"));
+    JsonArray branches = agent.getJsonArray("branches");
+    assertEquals(2, branches.size());
+    JsonObject wrapper = branches.getJsonObject(0);
+    assertEquals(WRAPPER, wrapper.getString("repository"));
+    assertEquals("", wrapper.getString("path"));
+    assertEquals(BRANCH, wrapper.getString("branch"));
+    assertNotNull(wrapper.getString("head"));
+    assertEquals(false, wrapper.getBoolean("pushed"));
+    JsonObject sub = branches.getJsonObject(1);
+    assertEquals("child", sub.getString("repository"));
+    assertEquals(CHILD, sub.getString("path"));
+    assertEquals(BRANCH + "-fix", sub.getString("branch"));
+    assertEquals(get("/agent-worktrees/agent-1").body(), agent, "one agent reads the same");
+  }
+
+  @Test
+  void anAgentWithWorkThatWouldBeLostIsNotRemovedUnlessForced() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+    Files.writeString(agentDir("agent-1").resolve("notes.md"), "unfinished\n");
+
+    Answer check = get("/agent-worktrees/agent-1/cleanup-check");
+    assertEquals(200, check.status());
+    assertEquals(false, check.body().getBoolean("clean"));
+    assertEquals(new JsonArray().add(WRAPPER), check.body().getJsonArray("dirty"));
+    assertEquals(new JsonArray(), check.body().getJsonArray("unpushed"));
+
+    Answer refused = delete("/agent-worktrees/agent-1");
+    assertEquals(409, refused.status());
+    assertEquals(check.body(), refused.body(), "the refusal is the check");
+    assertTrue(worktrees.exists("agent-1"));
+
+    Answer forced = delete("/agent-worktrees/agent-1?force=true");
+    assertEquals(200, forced.status());
+    assertEquals(true, forced.body().getBoolean("removed"));
+    assertFalse(worktrees.exists("agent-1"));
+    assertEquals(new JsonArray(), list());
+  }
+
+  @Test
+  void anUnpushedCommitIsReportedWithItsRepositoryAndBranch() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+    Path child = agentDir("agent-1").resolve(CHILD);
+    GitFixtures.git(child, "commit", "--quiet", "--allow-empty", "--no-verify", "-m", "stray");
+
+    JsonObject leftover =
+        get("/agent-worktrees/agent-1/cleanup-check").body().getJsonArray("unpushed").getJsonObject(0);
+
+    assertEquals("child", leftover.getString("repository"));
+    assertTrue(leftover.containsKey("branch"), "named, as null: a detached HEAD");
+    assertNull(leftover.getString("branch"));
+    assertEquals(1, leftover.getInteger("commits"));
+  }
+
+  @Test
+  void aCleanAgentIsRemoved() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    Answer removed = delete("/agent-worktrees/agent-1");
+
+    assertEquals(200, removed.status(), removed.raw());
+    assertEquals("agent-1", removed.body().getString("agentId"));
+    assertFalse(Files.exists(worktrees.agentDir("agent-1")));
+    assertEquals(404, get("/agent-worktrees/agent-1").status());
+  }
+
+  @Test
+  void anAgentsFilesAreItsOwnWorktree() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+    Files.writeString(agentDir("agent-1").resolve("mine.txt"), "agent one\n");
+
+    Answer content = get("/agent-worktrees/agent-1/files/content?path=mine.txt");
+
+    assertEquals(200, content.status(), content.raw());
+    assertEquals("agent one\n", content.body().getString("content"));
+    assertTrue(
+        get("/agent-worktrees/agent-1/files").body().getJsonArray("paths").contains("README.md"));
+  }
+
+  @Test
+  void anActivityFrameNamesItsAgentAndKeepsItsSessionCurrent() throws Exception {
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+
+    AgentActivity tagged =
+        (AgentActivity)
+            runtime.tag(
+                new AgentActivity(commandId, "s-switched", "IDLE", "SessionStart", null, null, 1L));
+
+    assertEquals("agent-1", tagged.agentId());
+    assertEquals("s-switched", list().getJsonObject(0).getString("sessionId"));
+    AgentActivity foreign = new AgentActivity("not-an-agent", null, "IDLE", "Stop", null, null, 1L);
+    assertNull(((AgentActivity) runtime.tag(foreign)).agentId(), "the sign-in terminal, say");
+  }
+
   // --- helpers ----------------------------------------------------------------------------------
+
+  /** Polls {@code file} until it holds {@code needle}; a launch crosses a process boundary. */
+  private static void awaitContains(Path file, String needle) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    String seen = "";
+    while (System.nanoTime() < deadline) {
+      seen = Files.exists(file) ? Files.readString(file) : "";
+      if (seen.contains(needle)) {
+        return;
+      }
+      Thread.sleep(25);
+    }
+    throw new AssertionError("timed out waiting for '" + needle + "' in " + file + ": " + seen);
+  }
+
+  /** Waits until the fake harness has started reading its input. */
+  private void awaitRunning(String commandId) throws Exception {
+    awaitContains(fakeLog.resolveSibling("harness.cwd"), "/");
+    assertTrue(store.find(commandId).orElseThrow().isRunning(), "the harness stays up");
+  }
+
+  private void awaitStopped(String commandId) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    while (store.find(commandId).orElseThrow().isRunning()) {
+      if (System.nanoTime() > deadline) {
+        throw new AssertionError("the harness did not stop");
+      }
+      Thread.sleep(25);
+    }
+  }
 
   private static <T> T await(Future<T> future) throws Exception {
     return future.toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
@@ -1322,6 +1226,10 @@ class AgentsApiTest {
 
   private Answer post(String uri, JsonObject body) throws Exception {
     return send(HttpMethod.POST, uri, "Bearer " + TOKEN, body);
+  }
+
+  private Answer delete(String uri) throws Exception {
+    return send(HttpMethod.DELETE, uri, "Bearer " + TOKEN, null);
   }
 
   /**
@@ -1350,8 +1258,17 @@ class AgentsApiTest {
   }
 
   private static Future<Answer> answerOf(HttpClientResponse response) {
-    return response.body().map(body -> new Answer(response.statusCode(), new JsonObject(body)));
+    return response.body().map(body -> new Answer(response.statusCode(), body.toString()));
   }
 
-  private record Answer(int status, JsonObject body) {}
+  /** One answer: its status and its body, read as an object or, for a list, an array. */
+  private record Answer(int status, String raw) {
+    JsonObject body() {
+      return new JsonObject(raw);
+    }
+
+    JsonArray array() {
+      return new JsonArray(raw);
+    }
+  }
 }

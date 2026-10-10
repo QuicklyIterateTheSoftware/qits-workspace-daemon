@@ -22,16 +22,15 @@ import org.jboss.logging.Logger;
  * {@code curl}s {@code http://127.0.0.1:<port>/hooks/claude-code?commandId=<id>} with the hook's
  * stdin JSON ({@code hook_event_name}, {@code session_id}, {@code transcript_path}, {@code
  * source}); this maps the event to an {@link AgentState} and relays an unsolicited {@link
- * AgentActivity} home over the control socket — the agent-activity analogue of {@link
- * GitStatusMonitor}'s working-tree reports.
+ * AgentActivity} home over the control socket. {@code ControlSocket} names the agent on each frame
+ * on its way out ({@code AgentRuntime.tag}), since a workspace hosts several.
  *
  * <p>Bound to {@code 127.0.0.1} only (the hook and the daemon share the container's network
  * namespace, so loopback reaches it and nothing outside the container can). The response is a bare
  * {@code 200} returned as soon as the body is read — a hook must never add latency to a turn.
  *
  * <p>The last state per {@code commandId} is retained so {@link #reportCurrent()} can replay it on
- * a socket reconnect (a qits restart that lost its in-memory projection rebuilds it), mirroring
- * {@link GitStatusMonitor#reportCurrent()}. {@code Stop} maps to {@code IDLE} (turn finished) but
+ * a socket reconnect (a qits restart that lost its in-memory projection rebuilds it). {@code Stop} maps to {@code IDLE} (turn finished) but
  * also fires when Claude pauses to ask the user — so a {@code Stop} arriving while the stored state
  * is {@code WAITING} (a preceding {@code Notification}) is dropped, keeping the permission-prompt
  * signal.
@@ -169,7 +168,7 @@ final class HookWebhook {
   /**
    * Maps one hook payload to an {@link AgentActivity} and relays it. Package-private so a test can
    * drive the event→state mapping, the Notification override, and the reconnect replay without a
-   * real HTTP fork (mirrors {@link GitStatusMonitor}'s {@code settle} seam). Uninteresting events
+   * real HTTP fork. Uninteresting events
    * ({@code SubagentStop}, {@code PreToolUse}, …) and payloads with no command correlation are
    * dropped. Every event that is not dropped first cancels the command's pending background-shell
    * grace: it is newer news than the {@code Stop} that armed it.

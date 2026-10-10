@@ -127,34 +127,6 @@ final class WorkspaceJson {
   }
 
   /**
-   * {@code GET /bootstrap-commands} — the chain this checkout declares, in the order it runs.
-   *
-   * <p>The {@code execute} and {@code check} scripts are deliberately not returned. They come from
-   * an untrusted checkout, and the caller's use for this list is to name a step to run, not to read
-   * what that step will do.
-   */
-  static JsonObject bootstrapCommands(List<DaemonQitsConfig.BootstrapDecl> chain) {
-    JsonArray steps = new JsonArray();
-    for (DaemonQitsConfig.BootstrapDecl step : chain) {
-      JsonObject json = new JsonObject().put("name", step.name());
-      putIfPresent(json, "id", step.id());
-      putIfPresent(json, "description", step.description());
-      steps.add(json);
-    }
-    return new JsonObject().put("steps", steps);
-  }
-
-  /**
-   * The body every write on the bootstrap surface answers with. There is nothing else to return —
-   * the chain reports its progress and its outcome over the control socket — so the useful
-   * answer is "the request was taken", and giving it a shape rather than an empty body keeps the
-   * client's JSON parse unconditional across every route on this server.
-   */
-  static JsonObject accepted() {
-    return new JsonObject().put("accepted", true);
-  }
-
-  /**
    * The one error shape every non-2xx answer uses: {@code {"message": …}}. A single field on
    * purpose — the daemon serves an untrusted checkout to a caller that is not the end user, so the
    * body carries what the browser UI needs to render its "invalid path"/"not found" states and
@@ -162,16 +134,6 @@ final class WorkspaceJson {
    */
   static JsonObject error(String message) {
     return new JsonObject().put("message", message);
-  }
-
-  /**
-   * The body the two parent-integration routes answer with: {@code {"output": …}}, git's own text
-   * from the merge. The field name matches the host DTO these replaced ({@code
-   * FastForwardWorkspaceRequest.Response.output} / {@code UpdateFromParentRequest.Response.output}),
-   * so the frontend contract does not move with the endpoint — the same rule the read API followed.
-   */
-  static JsonObject output(String output) {
-    return new JsonObject().put("output", output == null ? "" : output);
   }
 
   private static void putIfPresent(JsonObject json, String key, Object value) {

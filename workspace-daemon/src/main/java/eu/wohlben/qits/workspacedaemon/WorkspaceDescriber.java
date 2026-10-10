@@ -13,8 +13,12 @@ import java.util.concurrent.TimeUnit;
  */
 public final class WorkspaceDescriber {
 
-  /** Where the branch clones live in every workspace container (image {@code WORKDIR}). */
-  private static final File WORKSPACE_DIR = new File("/workspace");
+  /**
+   * The base clone ({@code /workspace/base}). Since qits-1152 a workspace has no branch of its own;
+   * a describe reports the base clone, and agents' worktrees are reported by {@code GET
+   * agent-worktrees}.
+   */
+  private static final File WORKSPACE_DIR = Provisioner.BASE_DIR;
 
   private WorkspaceDescriber() {}
 
@@ -51,7 +55,7 @@ public final class WorkspaceDescriber {
     return new WorkspaceInfo(workspaceId, repoId, branch, parent, head, dirty);
   }
 
-  /** Run a git command in {@code /workspace} and return its stdout, or "" on any failure. */
+  /** Run a git command in the base clone and return its stdout, or "" on any failure. */
   private static String capture(String... argv) {
     try {
       // Discard stderr to the OS null rather than a pipe: reading stdout to completion before

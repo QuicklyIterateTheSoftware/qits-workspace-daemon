@@ -28,10 +28,8 @@ import eu.wohlben.qits.commands.CheckoutContext;
  * commit. All five were consequences of launching into a workspace from outside it.
  *
  * <p>Inside the container none of them are questions. The daemon was told which workspace it is at
- * provisioning, the checkout is its own working directory, and it already watches HEAD — {@code
- * GitStatusMonitor} reports {@code head} on every change, which is where {@link #commitHash} comes
- * from rather than a fresh git process per launch. The traversal check goes with them: there is no
- * id being interpolated into a path any more.
+ * provisioning, and an agent's branch and HEAD are read from its own worktree at launch (qits-1152).
+ * The traversal check goes with them: there is no id being interpolated into a path any more.
  *
  * <p>Implemented by {@link DaemonWorkspaceContext}; every method is read at launch time, so a
  * workspace that changes branch mid-session is reflected on the next command rather than being
