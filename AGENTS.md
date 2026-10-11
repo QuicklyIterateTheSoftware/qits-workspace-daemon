@@ -55,10 +55,7 @@ What stays here is what is genuinely this daemon's, and each of them is a seam t
   `qits` server (`QITS_PLATFORM_MCP_URL`, never derived) and the image's browser (qits-1174).
 - `DaemonAgentDefaults implements AgentDefaults` — the default harness, activity tracking, the
   refinement model, the mounted configuration document, and this container's ambient facts.
-- `AgentConfigurationFile` — writing the injected document to disk at boot, and dropping
-  attachments of the retired `repository`, `observability` and `actions` servers that stored
-  surfaces still carry: the pinned library would refuse those launches. Remove that once the pinned
-  library is the qits-1174 release, which skips them itself.
+- `AgentConfigurationFile` — writing the injected document to disk at boot.
 
 ## Module conventions
 

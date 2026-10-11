@@ -423,8 +423,7 @@ public class ControlSocket {
             .map(
                 path -> {
                   LOG.infof("Agent configuration document materialized at %s", path);
-                  return AgentConfigurationFile.withoutRetiredServers(
-                      AgentSurfaceConfigurations.readFrom(path));
+                  return AgentSurfaceConfigurations.readFrom(path);
                 })
             .orElseGet(
                 () -> {
