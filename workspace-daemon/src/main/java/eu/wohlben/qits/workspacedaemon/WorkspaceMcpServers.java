@@ -86,15 +86,6 @@ final class WorkspaceMcpServers implements AgentMcpServers {
     return List.of(BROWSER);
   }
 
-  /**
-   * True: {@code qits} takes no url narrowing, so there is none to ignore. Without this, the pinned
-   * library notes on every configured launch that its narrowing was not honoured.
-   */
-  @Override
-  public boolean honoursNarrowing() {
-    return true;
-  }
-
   /** {@code Authorization: Bearer <token>} when this agent has a token, empty otherwise. */
   @Override
   public Map<String, String> platformHeaders() {
