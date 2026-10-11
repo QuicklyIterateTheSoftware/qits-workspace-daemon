@@ -385,6 +385,14 @@ The three move as one version by construction — the jar's `${project.version}`
 the binary's coordinate are the same string, filtered in rather than written down. Do not add a way
 to publish one without the others.
 
+**The daemon jar is not byte-reproducible, so a release step that runs twice burns the version.**
+The jar compiles in its build time (`qits.workspace-daemon.build.time`, sent as `daemonBuildTime`),
+and Quarkus writes uber-jar entries in a parallel, varying order. qits-artifacts refuses a second,
+different jar for a version it already holds. A qits-ci restart in the middle of a release reruns
+step 0 (qits-1190), so 2026.1011.81850 and 2026.1011.115738 both failed this way: the first attempt
+published, the rerun was refused. A retry cannot pass; the release needs a new commit and a new
+version. Release while no qits-ci release is deploying.
+
 ## Formatting
 
 `google-java-format`, 100 columns, two-space indent. Javadoc explains *why* — the tradeoff, the
