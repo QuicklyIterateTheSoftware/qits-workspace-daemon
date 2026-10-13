@@ -264,7 +264,12 @@ in each repository's common git dir that refuses commits on the default branch o
 `AgentRuntime` holds the agents: one launch service each (its own entity name, its own context),
 one shared commands layer. Several agents can run at once; whether only one does is the host's
 decision. Yield stops the harness; a turn or a start resumes it with the stored session id when the
-session's files are on the harness volume (`/claude-home`, shared and persistent). The library's
+session's files are on the harness volume (`/claude-home`, shared and persistent). Since qits-1212
+the host (qits-workspaces-service) no longer calls `/yield`: a yield there frees the agent's slot
+and nothing else, and the harness keeps running. The route is kept but unused. A start is
+idempotent: an agent whose harness still runs is answered as started (`launched: false`, the same
+`commandId`) and nothing is launched, which the host relies on when it starts its placed agents
+again after a reconnect or its own restart (`aSecondStartWhileTheHarnessRunsLaunchesNothing`). The library's
 `ownsSession` check would refuse a session the container has not seen; `AgentScopedCommands`
 vouches for the session the host handed back, which is what makes a resume after a restart work.
 
