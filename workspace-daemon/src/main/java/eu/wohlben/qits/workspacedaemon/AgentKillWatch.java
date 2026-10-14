@@ -42,6 +42,12 @@ import org.jboss.logging.Logger;
  *       counter is reported as a plain SIGKILL, never guessed to be an OOM.
  *   <li><b>Each command is reported once</b>, and forgotten when the store evicts it.
  * </ul>
+ *
+ * <p><b>Every agent exit is logged, not only the kills</b> (qits-1233): one INFO line per agent
+ * command as it settles — its agent, the command, the status ({@code EXITED}, {@code TERMINATED},
+ * …) and the exit code, and whether it was this daemon's own remove or yield that stopped it. The
+ * exit listener belongs to the harness library, so without this a harness that ended any other way
+ * left no trace in the daemon's log at all. Only the log: what is reported home is unchanged.
  */
 final class AgentKillWatch {
 
@@ -56,9 +62,23 @@ final class AgentKillWatch {
     void killed(String commandId, String hookEvent, int exitCode, String message);
   }
 
+  /**
+   * Who an agent command ran for, for the exit log: the agent, and how this daemon stopped it when
+   * it did ({@code "remove"}, {@code "yield"}), else null.
+   */
+  record Owner(String agentId, String stoppedBy) {}
+
+  /** Looks up an agent command's {@link Owner} — {@code AgentRuntime} in production. */
+  @FunctionalInterface
+  interface Owners {
+    /** The owner of {@code commandId}, or null when no agent of this daemon ran it. */
+    Owner of(String commandId);
+  }
+
   private final CommandStore store;
   private final CgroupMemory cgroup;
   private final Sink sink;
+  private final Owners owners;
 
   /** The {@code oom_kill} count when each running agent command was first seen; -1 unreadable. */
   private final Map<String, Long> baselines = new HashMap<>();
@@ -67,9 +87,14 @@ final class AgentKillWatch {
   private final Set<String> settled = new HashSet<>();
 
   AgentKillWatch(CommandStore store, CgroupMemory cgroup, Sink sink) {
+    this(store, cgroup, sink, commandId -> null);
+  }
+
+  AgentKillWatch(CommandStore store, CgroupMemory cgroup, Sink sink, Owners owners) {
     this.store = store;
     this.cgroup = cgroup;
     this.sink = sink;
+    this.owners = owners;
   }
 
   /**
@@ -101,6 +126,7 @@ final class AgentKillWatch {
       }
       settled.add(command.id());
       Long baseline = baselines.remove(command.id());
+      logExit(command);
       if (command.status() == CommandStatus.EXITED
           && command.exitCode() != null
           && command.exitCode() == SIGKILL_EXIT) {
@@ -110,6 +136,33 @@ final class AgentKillWatch {
     // The store evicts the oldest commands past its bound; nothing about them is left to report.
     baselines.keySet().retainAll(present);
     settled.retainAll(present);
+  }
+
+  /** The one INFO line every agent exit gets; see the class javadoc. */
+  private void logExit(Command command) {
+    LOG.infof("workspace-daemon: %s", exitLine(command, owners.of(command.id())));
+  }
+
+  /** What {@link #logExit} says about {@code command}; a seam so a test can read it. */
+  static String exitLine(Command command, Owner owner) {
+    String agent = owner == null || owner.agentId() == null ? "(none)" : owner.agentId();
+    String stopped =
+        owner == null || owner.stoppedBy() == null
+            ? ""
+            : ", stopped by the daemon's own " + owner.stoppedBy();
+    return "agent "
+        + agent
+        + "'s "
+        + command.agentType()
+        + " harness exited: "
+        + command.kind()
+        + " command "
+        + command.id()
+        + ", status "
+        + command.status()
+        + ", exit code "
+        + command.exitCode()
+        + stopped;
   }
 
   private void report(Command command, Long baseline) {

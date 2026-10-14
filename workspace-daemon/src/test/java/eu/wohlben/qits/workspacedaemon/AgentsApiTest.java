@@ -1227,6 +1227,31 @@ class AgentsApiTest {
   }
 
   @Test
+  @Timeout(60)
+  void theExitLogLearnsWhichAgentAHarnessRanForAndThatTheDaemonStoppedIt() throws Exception {
+    String yielded = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(yielded);
+    post("/agent-worktrees/agent-1/yield", new JsonObject());
+    awaitStopped(yielded);
+
+    assertEquals(new AgentKillWatch.Owner("agent-1", "yield"), runtime.exitOwner(yielded));
+    assertEquals(
+        new AgentKillWatch.Owner("agent-1", null),
+        runtime.exitOwner(yielded),
+        "the stop is told once; the agent is still known");
+
+    String removed =
+        post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    delete("/agent-worktrees/agent-1?force=true");
+    awaitStopped(removed);
+    assertEquals(
+        new AgentKillWatch.Owner("agent-1", "remove"),
+        runtime.exitOwner(removed),
+        "known although the removal forgot the agent's commands");
+    assertNull(runtime.exitOwner("not-an-agents"), "the sign-in terminal, say");
+  }
+
+  @Test
   void anAgentsFilesAreItsOwnWorktree() throws Exception {
     post("/agent-worktrees", start("agent-1"));
     Files.writeString(agentDir("agent-1").resolve("mine.txt"), "agent one\n");

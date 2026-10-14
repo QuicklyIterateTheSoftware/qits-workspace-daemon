@@ -163,6 +163,14 @@ final class AgentRuntime implements AutoCloseable {
 
   private final Map<String, Agent> agents = new ConcurrentHashMap<>();
 
+  /**
+   * The harness commands this runtime terminated itself, by {@code "remove"} or {@code "yield"},
+   * and for which agent — kept apart from {@link #commandAgents} because a removal forgets the
+   * agent's commands before the exit may have been seen. Taken once by the exit log ({@link
+   * #exitOwner}).
+   */
+  private final Map<String, AgentKillWatch.Owner> stopped = new ConcurrentHashMap<>();
+
   /** Which agent a command belongs to; filled before the spawn so an early hook finds it. */
   private final Map<String, String> commandAgents = new ConcurrentHashMap<>();
 
@@ -355,6 +363,7 @@ final class AgentRuntime implements AutoCloseable {
     if (running == null) {
       return false;
     }
+    stopped.put(running.id(), new AgentKillWatch.Owner(agentId, "yield"));
     registry.terminate(running.id());
     return true;
   }
@@ -433,6 +442,7 @@ final class AgentRuntime implements AutoCloseable {
     if (agent != null) {
       Command running = running(agent);
       if (running != null) {
+        stopped.put(running.id(), new AgentKillWatch.Owner(agentId, "remove"));
         registry.terminate(running.id());
       }
     }
@@ -470,6 +480,23 @@ final class AgentRuntime implements AutoCloseable {
         agent == null ? null : agent.commandId,
         agent != null ? agent.sessionId : stored.map(m -> m.getString("sessionId")).orElse(null),
         worktrees.status(agentId));
+  }
+
+  /**
+   * Who an exited command ran for, for {@link AgentKillWatch}'s exit log: the agent, and whether
+   * this runtime stopped it itself. Forgets the stop, as the exit is seen once. Null for a command
+   * that is no agent's here (the sign-in terminal).
+   */
+  AgentKillWatch.Owner exitOwner(String commandId) {
+    if (commandId == null) {
+      return null;
+    }
+    AgentKillWatch.Owner stop = stopped.remove(commandId);
+    if (stop != null) {
+      return stop;
+    }
+    String agentId = agentOf(commandId);
+    return agentId == null ? null : new AgentKillWatch.Owner(agentId, null);
   }
 
   /** The agent a command runs for, or null. */

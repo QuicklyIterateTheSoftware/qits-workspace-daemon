@@ -601,7 +601,8 @@ public class ControlSocket {
     CommandStore store = new CommandStore();
     CommandLogService logs = new CommandLogService(store, null);
     AgentKillWatch kills =
-        new AgentKillWatch(store, new CgroupMemory(CgroupMemory.CONTAINER), this::reportKill);
+        new AgentKillWatch(
+            store, new CgroupMemory(CgroupMemory.CONTAINER), this::reportKill, this::exitOwner);
     CommandLifecycleService lifecycle =
         new CommandLifecycleService(
             store,
@@ -746,6 +747,15 @@ public class ControlSocket {
   private static String head(java.nio.file.Path directory) {
     GitExec.Out out = GitExec.git(directory, "rev-parse", "HEAD");
     return out.ok() ? out.line() : "";
+  }
+
+  /**
+   * Who an exited agent command ran for, for {@link AgentKillWatch}'s exit log. The watch is wired
+   * before {@link #wireAgents} sets the runtime, so it is read at the exit, not at wiring.
+   */
+  private AgentKillWatch.Owner exitOwner(String commandId) {
+    AgentRuntime runtime = agents;
+    return runtime == null ? null : runtime.exitOwner(commandId);
   }
 
   /**

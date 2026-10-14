@@ -147,6 +147,55 @@ class AgentKillWatchTest {
   }
 
   @Test
+  void everyAgentExitIsLoggedOnceWithItsAgentStatusAndCodeAndOnlyTheKillIsReported()
+      throws IOException {
+    // The owner lookup is what the log line is made from, so who was asked is who was logged.
+    List<String> logged = new ArrayList<>();
+    oomKills(0);
+    AgentKillWatch watch =
+        new AgentKillWatch(
+            store,
+            new CgroupMemory(cgroup),
+            (id, event, code, message) -> reported.add(id + "=" + event + ":" + code),
+            id -> {
+              logged.add(id);
+              return switch (id) {
+                case "removed" -> new AgentKillWatch.Owner("agent-1", "remove");
+                case "finished", "killed" -> new AgentKillWatch.Owner("agent-2", null);
+                default -> null;
+              };
+            });
+    CommandLifecycleService lifecycle = new CommandLifecycleService(store, watch::commandsChanged);
+    launch(lifecycle, "removed", "claude");
+    launch(lifecycle, "finished", "claude");
+    launch(lifecycle, "killed", "claude");
+    launch(lifecycle, "sign-in", "claude");
+    launch(lifecycle, "shell", null);
+
+    lifecycle.markTerminated("removed", 143);
+    lifecycle.markExited("finished", 0);
+    lifecycle.markExited("killed", 137);
+    lifecycle.markExited("sign-in", 1);
+    lifecycle.markExited("shell", 0);
+    launch(lifecycle, "later", "claude"); // the list changes again: nothing is logged twice
+
+    assertEquals(List.of("removed", "finished", "killed", "sign-in"), logged);
+    assertEquals(List.of("killed=" + AgentEvent.KILLED + ":137"), reported, "only the kill");
+    assertEquals(
+        "agent agent-1's claude harness exited: CHAT command removed, status TERMINATED, exit code"
+            + " 143, stopped by the daemon's own remove",
+        AgentKillWatch.exitLine(
+            store.find("removed").orElseThrow(), new AgentKillWatch.Owner("agent-1", "remove")));
+    assertEquals(
+        "agent agent-2's claude harness exited: CHAT command finished, status EXITED, exit code 0",
+        AgentKillWatch.exitLine(
+            store.find("finished").orElseThrow(), new AgentKillWatch.Owner("agent-2", null)));
+    assertTrue(
+        AgentKillWatch.exitLine(store.find("sign-in").orElseThrow(), null)
+            .startsWith("agent (none)'s"));
+  }
+
+  @Test
   void aCapIsDescribedTheWayAPersonReadsIt() throws IOException {
     assertEquals("4 GiB", CgroupMemory.describe(FOUR_GIB));
     assertEquals("512 MiB", CgroupMemory.describe(512L << 20));
