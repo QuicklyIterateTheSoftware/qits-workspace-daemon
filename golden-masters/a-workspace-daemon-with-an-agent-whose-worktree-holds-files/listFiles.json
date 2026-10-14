@@ -1,0 +1,18 @@
+{
+  "paths": [
+    ".gitignore",
+    ".gitmodules",
+    "README.md",
+    "libs/child/lib.txt",
+    "pom.xml",
+    "src/main/java/app/Login.java",
+    "src/test/java/app/LoginTest.java"
+  ],
+  "lazyDirs": [
+    {
+      "path": "node_modules",
+      "childCount": 2
+    }
+  ],
+  "generation": "59bb15ec43e0e8bf5300b596f5aa2f1cf0a9cbc751e53b8bc7516aaf09146d5f"
+}

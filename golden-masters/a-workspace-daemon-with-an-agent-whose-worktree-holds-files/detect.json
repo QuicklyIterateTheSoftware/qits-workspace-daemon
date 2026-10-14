@@ -1,0 +1,36 @@
+{
+  "projects": [
+    {
+      "root": "",
+      "frameworkId": "java-quarkus",
+      "label": "Java / Quarkus"
+    }
+  ],
+  "frameworks": [
+    {
+      "frameworkId": "java-quarkus",
+      "root": "",
+      "label": "Java / Quarkus",
+      "memberPaths": [
+        "pom.xml",
+        "src/main/java/app/Login.java",
+        "src/test/java/app/LoginTest.java"
+      ]
+    }
+  ],
+  "links": [
+    {
+      "path": "src/main/java/app/Login.java",
+      "tests": [
+        {
+          "path": "src/test/java/app/LoginTest.java",
+          "kinds": [
+            "junit"
+          ]
+        }
+      ],
+      "projectRoot": ""
+    }
+  ],
+  "generation": "59bb15ec43e0e8bf5300b596f5aa2f1cf0a9cbc751e53b8bc7516aaf09146d5f"
+}

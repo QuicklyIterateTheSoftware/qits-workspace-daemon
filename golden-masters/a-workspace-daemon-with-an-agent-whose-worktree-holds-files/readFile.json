@@ -1,0 +1,5 @@
+{
+  "path": "src/main/java/app/Login.java",
+  "binary": false,
+  "content": "package app;\n\nclass Login {\n  String user(String name) {\n    return name.strip();\n  }\n}\n"
+}

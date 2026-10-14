@@ -27,6 +27,14 @@ final class StubHarness implements AgentCommands {
 
   static final String SCRIPT = "exec cat > /dev/null";
 
+  /**
+   * The chat stub: the same, deaf to {@code SIGTERM}. A chat's terminate closes its input and then
+   * signals the group, so a plain {@code cat} exits on whichever lands first — 0 on the EOF, 143 on
+   * the signal — and the answer a recording freezes would depend on the scheduler. Ignoring the
+   * signal (an ignored disposition survives the {@code exec}) leaves the EOF as the only way out.
+   */
+  static final String CHAT_SCRIPT = "trap '' TERM; exec cat > /dev/null";
+
   private final AgentCommands real;
 
   StubHarness(AgentCommands real) {
@@ -58,7 +66,7 @@ final class StubHarness implements AgentCommands {
       ChatProtocolFactory protocolFactory,
       AgentLaunchMetadata agent) {
     return real.launchChat(
-        name, SCRIPT, environment, commandId, agentSession, onExit, protocolFactory, agent);
+        name, CHAT_SCRIPT, environment, commandId, agentSession, onExit, protocolFactory, agent);
   }
 
   @Override

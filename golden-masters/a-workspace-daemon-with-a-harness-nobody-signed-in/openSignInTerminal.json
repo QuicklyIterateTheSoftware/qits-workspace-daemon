@@ -1,0 +1,16 @@
+{
+  "command": {
+    "id": "00000000-0000-4000-8000-000000000100",
+    "repoId": "00000000-0000-4000-8000-000000000003",
+    "workspaceId": "ticket-contract-1",
+    "branch": "ticket/contract-1",
+    "actionName": "Claude sign-in",
+    "status": "RUNNING",
+    "interactive": true,
+    "kind": "TERMINAL",
+    "launchedAt": "2026-01-01T00:00:00Z",
+    "agentSessions": [],
+    "commitHash": "0123456789abcdef0123456789abcdef01234567",
+    "shortCommitHash": "0123456"
+  }
+}

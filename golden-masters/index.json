@@ -3,6 +3,53 @@
   "provider": "qits-workspace-daemon",
   "states": [
     {
+      "name": "a workspace daemon with a harness nobody signed in",
+      "slug": "a-workspace-daemon-with-a-harness-nobody-signed-in",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "availableAgents",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agents/available",
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-harness-nobody-signed-in/availableAgents.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "openSignInTerminal",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agents/sign-in",
+          "body": {
+            "agentType": "CLAUDE"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-harness-nobody-signed-in/openSignInTerminal.json",
+          "frozen": {
+            "ids": [
+              "$.command.id",
+              "$.command.repoId"
+            ],
+            "instants": [
+              "$.command.launchedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
       "name": "a workspace daemon with a signed-in harness",
       "slug": "a-workspace-daemon-with-a-signed-in-harness",
       "params": {
@@ -11,6 +58,52 @@
       },
       "dependsOn": [],
       "operations": [
+        {
+          "operationId": "availableAgents",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agents/available",
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/availableAgents.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "getAgentWorktree",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
+          "status": 404,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/getAgentWorktree.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "refinePrompt",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/prompt-refinements",
+          "body": {
+            "transcript": "uh so the login um it fails when the name has spaces",
+            "preamble": "Fix the login"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/refinePrompt.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
         {
           "operationId": "startAgentWorktree",
           "method": "POST",
@@ -45,10 +138,67 @@
       ]
     },
     {
+      "name": "a workspace daemon with an agent chatting",
+      "slug": "a-workspace-daemon-with-an-agent-chatting",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "listCommands",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/commands",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-chatting/listCommands.json",
+          "frozen": {
+            "ids": [
+              "$.entries[*].command.id",
+              "$.entries[*].command.repoId",
+              "$.entries[*].command.agentSessions[*].sessionId"
+            ],
+            "instants": [
+              "$.entries[*].command.launchedAt",
+              "$.entries[*].command.agentSessions[*].recordedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "terminateCommand",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/commands/{commandId}/terminate",
+          "body": {},
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-chatting/terminateCommand.json",
+          "frozen": {
+            "ids": [
+              "$.id",
+              "$.repoId",
+              "$.agentSessions[*].sessionId"
+            ],
+            "instants": [
+              "$.launchedAt",
+              "$.agentSessions[*].recordedAt",
+              "$.finishedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
       "name": "a workspace daemon with an agent running",
       "slug": "a-workspace-daemon-with-an-agent-running",
       "params": {
         "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
         "workspaceRowId": "1"
       },
       "dependsOn": [],
@@ -81,6 +231,49 @@
               "$.commandId"
             ],
             "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "getAgentWorktree",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/getAgentWorktree.json",
+          "frozen": {
+            "ids": [
+              "$.agentId",
+              "$.workId",
+              "$.commandId",
+              "$.sessionId"
+            ],
+            "instants": [],
+            "strings": [
+              "$.path",
+              "$.branches[*].head"
+            ],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listCommands",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/commands",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/listCommands.json",
+          "frozen": {
+            "ids": [
+              "$.entries[*].command.id",
+              "$.entries[*].command.repoId",
+              "$.entries[*].command.agentSessions[*].sessionId"
+            ],
+            "instants": [
+              "$.entries[*].command.launchedAt",
+              "$.entries[*].command.agentSessions[*].recordedAt"
+            ],
             "strings": [],
             "numbers": [],
             "listFilteredTo": null
@@ -132,6 +325,180 @@
             "ids": [
               "$.agentId"
             ],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent that has taken turns",
+      "slug": "a-workspace-daemon-with-an-agent-that-has-taken-turns",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getCommandLog",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/commands/{commandId}/log",
+          "query": {
+            "channel": "TRANSCRIPT"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-that-has-taken-turns/getCommandLog.json",
+          "frozen": {
+            "ids": [],
+            "instants": [
+              "$.lines[*].timestamp"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent whose worktree has an ignored directory",
+      "slug": "a-workspace-daemon-with-an-agent-whose-worktree-has-an-ignored-directory",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "listFiles",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/files",
+          "query": {
+            "path": "node_modules"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-has-an-ignored-directory/listFiles.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "readFile",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/files/content",
+          "query": {
+            "path": "node_modules/missing.js"
+          },
+          "status": 404,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-has-an-ignored-directory/readFile.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent whose worktree holds files",
+      "slug": "a-workspace-daemon-with-an-agent-whose-worktree-holds-files",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "detect",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/detection",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-files/detect.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listFiles",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/files",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-files/listFiles.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "readFile",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/files/content",
+          "query": {
+            "path": "src/main/java/app/Login.java"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-files/readFile.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with plugins installed",
+      "slug": "a-workspace-daemon-with-plugins-installed",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "installPlugin",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-plugins/pyright-lsp/install",
+          "body": {},
+          "status": 200,
+          "file": "a-workspace-daemon-with-plugins-installed/installPlugin.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listPlugins",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-plugins",
+          "status": 200,
+          "file": "a-workspace-daemon-with-plugins-installed/listPlugins.json",
+          "frozen": {
+            "ids": [],
             "instants": [],
             "strings": [],
             "numbers": [],

@@ -1,0 +1,12 @@
+{
+  "installed": [
+    {
+      "pluginId": "jdtls-lsp@claude-plugins-official",
+      "enabled": true
+    },
+    {
+      "pluginId": "typescript-lsp@claude-plugins-official",
+      "enabled": false
+    }
+  ]
+}

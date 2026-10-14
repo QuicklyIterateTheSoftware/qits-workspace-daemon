@@ -115,6 +115,36 @@ class ConsumerPactVerificationTest {
     return daemon.setUp(ProviderStates.AGENT_RUNNING);
   }
 
+  @State(ProviderStates.SIGNED_OUT)
+  Map<String, String> signedOut() {
+    return daemon.setUp(ProviderStates.SIGNED_OUT);
+  }
+
+  @State(ProviderStates.AGENT_CHATTING)
+  Map<String, String> anAgentChatting() {
+    return daemon.setUp(ProviderStates.AGENT_CHATTING);
+  }
+
+  @State(ProviderStates.AGENT_WITH_TRANSCRIPT)
+  Map<String, String> anAgentWithATranscript() {
+    return daemon.setUp(ProviderStates.AGENT_WITH_TRANSCRIPT);
+  }
+
+  @State(ProviderStates.AGENT_WITH_FILES)
+  Map<String, String> anAgentWithFiles() {
+    return daemon.setUp(ProviderStates.AGENT_WITH_FILES);
+  }
+
+  @State(ProviderStates.AGENT_WITH_IGNORED_DIRECTORY)
+  Map<String, String> anAgentWithAnIgnoredDirectory() {
+    return daemon.setUp(ProviderStates.AGENT_WITH_IGNORED_DIRECTORY);
+  }
+
+  @State(ProviderStates.PLUGINS_INSTALLED)
+  Map<String, String> pluginsInstalled() {
+    return daemon.setUp(ProviderStates.PLUGINS_INSTALLED);
+  }
+
   /** The daemon's loopback port, with the daemon token on every request. */
   static final class DaemonTarget extends HttpTestTarget {
 

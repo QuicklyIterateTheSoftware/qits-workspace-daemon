@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -26,7 +27,15 @@ import java.util.regex.Pattern;
  *   <li><b>Strings carrying an id</b> get it replaced in place. Listed in {@link #stringPaths}.
  *   <li><b>Strings carrying a temporary path</b> get it replaced by the path it stands for, as
  *       the state names it ({@link #Freezer(Map)}). Listed in {@link #stringPaths} too.
+ *   <li><b>Commit hashes.</b> A string that is a whole 40-hex object name becomes {@code 000…01NN},
+ *       numbered by first appearance — git's own hashes move with every run, because the fixture's
+ *       {@code .gitmodules} names a temporary origin. A hash the state names as a literal (its
+ *       fixed workspace commit) stays as the state names it. Listed in {@link #stringPaths}, not
+ *       among the ids: a consumer reads an id as a UUID.
  * </ul>
+ *
+ * <p>A state's params go through {@link #freezeParams} first, so an id a state mints at runtime — a
+ * command id — is frozen in the index to the same value the answer carries.
  */
 final class Freezer {
 
@@ -40,10 +49,13 @@ final class Freezer {
 
   static final String FROZEN_INSTANT = "2026-01-01T00:00:00Z";
 
+  static final Pattern COMMIT_HASH = Pattern.compile("[0-9a-f]{40}");
+
   /** Literal text to replace, and what replaces it: a state's temporary paths. */
   private final Map<String, String> literals;
 
   private final Map<String, String> ids = new HashMap<>();
+  private final Map<String, String> hashes = new HashMap<>();
   private final Set<String> idPaths = new LinkedHashSet<>();
   private final Set<String> instantPaths = new LinkedHashSet<>();
   private final Set<String> stringPaths = new LinkedHashSet<>();
@@ -58,6 +70,16 @@ final class Freezer {
 
   Object freeze(Object value) {
     return freeze(value, "$");
+  }
+
+  /**
+   * A state's params with their ids frozen, sharing this freezer's numbering, and recording no
+   * path: a param is not part of the answer.
+   */
+  Map<String, String> freezeParams(Map<String, String> params) {
+    Map<String, String> frozen = new TreeMap<>();
+    params.forEach((name, value) -> frozen.put(name, freezeIds(value)));
+    return frozen;
   }
 
   List<String> idPaths() {
@@ -101,6 +123,16 @@ final class Freezer {
     if (UUID.matcher(value).matches()) {
       idPaths.add(path);
       return freezeIds(value);
+    }
+    if (COMMIT_HASH.matcher(value).matches()) {
+      String frozen =
+          literals.containsKey(value)
+              ? literals.get(value)
+              : hashes.computeIfAbsent(value, k -> String.format("%040x", 0x100 + hashes.size()));
+      if (!frozen.equals(value)) {
+        stringPaths.add(path);
+      }
+      return frozen;
     }
     String result = freezeIds(value);
     for (Map.Entry<String, String> literal : literals.entrySet()) {

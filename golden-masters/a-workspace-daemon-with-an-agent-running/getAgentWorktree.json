@@ -1,0 +1,20 @@
+{
+  "agentId": "00000000-0000-4000-8000-0000000000a1",
+  "workId": "00000000-0000-4000-8000-000000000001",
+  "wrapperBranch": "ticket/contract-00000001-10",
+  "path": "/workspace/agents/00000000-0000-4000-8000-0000000000a1/wrapper",
+  "harnessRunning": true,
+  "commandId": "00000000-0000-4000-8000-000000000100",
+  "sessionId": "00000000-0000-4000-8000-000000000101",
+  "branches": [
+    {
+      "repository": "wrapper",
+      "path": "",
+      "branch": "ticket/contract-00000001-10",
+      "head": "0000000000000000000000000000000000000100",
+      "pushed": false
+    }
+  ],
+  "dirty": false,
+  "unpushed": false
+}
