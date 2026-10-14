@@ -1210,6 +1210,32 @@ class AgentsApiTest {
 
   @Test
   @Timeout(60)
+  void anIdlePromptAfterAStopWithARunningSubagentLeavesTheHarnessBusy() throws Exception {
+    // qits-1238: Claude Code sends an idle_prompt Notification about a minute after every Stop,
+    // and its frame carries no awaitingInput verdict — it must not unblock the removal.
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(commandId);
+    hooks.handle(
+        "Stop",
+        new JsonObject(
+            "{\"background_tasks\":[{\"id\":\"x\",\"type\":\"subagent\","
+                + "\"status\":\"running\"}],\"session_crons\":[]}"),
+        commandId);
+    hooks.handle(
+        "Notification",
+        new JsonObject(
+            "{\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\"}"),
+        commandId);
+
+    Answer refused = delete("/agent-worktrees/agent-1");
+    assertEquals(409, refused.status(), refused.raw());
+    assertEquals(true, refused.body().getBoolean("busy"));
+    assertTrue(worktrees.exists("agent-1"));
+    assertTrue(store.find(commandId).orElseThrow().isRunning(), "the harness keeps running");
+  }
+
+  @Test
+  @Timeout(60)
   void aHarnessThatStoppedWithNothingRunningIsNotBusyAndIsRemoved() throws Exception {
     String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
     awaitRunning(commandId);

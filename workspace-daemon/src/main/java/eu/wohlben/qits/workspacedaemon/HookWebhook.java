@@ -11,6 +11,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -62,23 +63,42 @@ import org.jboss.logging.Logger;
  * dev server does not mask the wait for good. When it expires, a synthesized copy of the stored
  * frame goes out with {@code awaitingInput} {@code true} and a fresh {@code at}, and replaces the
  * stored one so a reconnect replays the verdict; the activity listener is not told again, because
- * the state did not change. Any hook for the command — or a {@link #killed} frame — cancels the
- * pending grace before doing its own work. A subagent, a monitor, an unknown or missing type, a
- * non-object element, or a non-empty {@code session_crons} all count as in flight and give {@code
- * false} with no grace. Either array absent or not a JSON array is {@code null} — an older
- * harness that does not report them, read as "unknown" rather than guessed. A {@code Notification}
- * is {@code true} only for a {@code permission_prompt} or {@code elicitation_dialog} {@code
- * notification_type}; any other type is {@code null}, not {@code false} — a notification this
- * daemon does not recognise might still be one the user has to answer. {@code UserPromptSubmit} is
- * always {@code false} (a turn was just handed to the agent). {@code SessionStart} is always
- * {@code null} (nothing has happened yet to have an opinion about). {@code SessionEnd}, and a
- * {@link #killed} frame, are always {@code true} — there is no next turn to wait out, so "blocked
- * on the user" and "session over" coincide.
+ * the state did not change. Any hook for the command except a {@code Notification} — or a {@link
+ * #killed} frame — cancels the pending grace before doing its own work. A {@code Notification}
+ * does not, because it says nothing about the background work: Claude Code sends an {@code
+ * idle_prompt} one about a minute after every {@code Stop}, so letting it cancel would mean a
+ * shell-only {@code Stop}'s grace never fires at all (qits-1238). A subagent, a monitor, an
+ * unknown or missing type, a non-object element, or a non-empty {@code session_crons} all count
+ * as in flight and give {@code false} with no grace. Either array absent or not a JSON array is
+ * {@code null} — an older harness that does not report them, read as "unknown" rather than
+ * guessed. A {@code Notification} is {@code true} only for a {@code permission_prompt} or {@code
+ * elicitation_dialog} {@code notification_type}; any other type is {@code null}, not {@code
+ * false} — a notification this daemon does not recognise might still be one the user has to
+ * answer. {@code UserPromptSubmit} is always {@code false} (a turn was just handed to the agent).
+ * {@code SessionStart} is always {@code null} (nothing has happened yet to have an opinion about).
+ * {@code SessionEnd}, and a {@link #killed} frame, are always {@code true} — there is no next turn
+ * to wait out, so "blocked on the user" and "session over" coincide.
  *
  * <p>The Stop-during-{@code WAITING} hold path below sends no wire frame at all — see its own
  * comment — so {@code awaitingInput} is never computed for it: the frame that already went out
  * was the preceding {@code Notification}'s, which carried {@code true}, and that is still the
- * latest thing the backend or a reconnect replay has seen.
+ * latest thing the backend or a reconnect replay has seen. Its {@code background_tasks} are still
+ * read, though, into the background-work verdict below, and a shell-only one still arms the grace —
+ * otherwise the verdict it records would have nothing to clear it until the next turn. Should that
+ * grace expire under a standing permission prompt, the stored frame already says {@code true} and
+ * nothing goes out; it only clears the verdict.
+ *
+ * <p><b>The background-work verdict (qits-1238)</b> is kept per command beside the stored frame,
+ * not in it, because the stored frame is replaced by every hook that is not dropped — and the
+ * {@code idle_prompt} {@code Notification} Claude Code sends about a minute after a {@code Stop}
+ * carries {@code awaitingInput} {@code null}, which would otherwise erase the {@code Stop}'s word
+ * that a subagent is still running. A {@code Stop} sets it from its own body, on the hold path too:
+ * present when its {@code awaitingInput} is {@code false} or its only in-flight work is background
+ * shells, absent when nothing is running or the harness does not report the arrays. It is cleared
+ * by {@code UserPromptSubmit} (a new turn; its own {@code BUSY} and the {@code Stop} that ends it
+ * take over), {@code SessionEnd}, a {@link #killed} frame and the expiry of the background-shell
+ * grace — never by a {@code Notification} or a {@code SessionStart}, neither of which knows
+ * anything about the background work. {@link #inFlight} reads it; the wire frames do not carry it.
  */
 final class HookWebhook {
 
@@ -104,6 +124,13 @@ final class HookWebhook {
    * command — a newer hook may have cancelled it and armed another between scheduling and firing.
    */
   private final Map<String, Long> graceTimers = new ConcurrentHashMap<>();
+
+  /**
+   * The command ids whose latest {@code Stop} left background work running — the background-work
+   * verdict (qits-1238), kept apart from {@link #lastByCommand} so a later {@code Notification}
+   * cannot overwrite it; see the class javadoc for where it is set and cleared.
+   */
+  private final Set<String> backgroundByCommand = ConcurrentHashMap.newKeySet();
 
   private volatile HttpServer server;
 
@@ -170,24 +197,38 @@ final class HookWebhook {
    * drive the event→state mapping, the Notification override, and the reconnect replay without a
    * real HTTP fork. Uninteresting events
    * ({@code SubagentStop}, {@code PreToolUse}, …) and payloads with no command correlation are
-   * dropped. Every event that is not dropped first cancels the command's pending background-shell
-   * grace: it is newer news than the {@code Stop} that armed it.
+   * dropped. Every event that is not dropped, except a {@code Notification}, first cancels the
+   * command's pending background-shell grace: it is newer news than the {@code Stop} that armed
+   * it. A {@code Notification} is not news about the background work (see the class javadoc).
    */
   void handle(String hookEvent, JsonObject body, String commandId) {
     String state = mapState(hookEvent);
     if (state == null || commandId == null || commandId.isBlank()) {
       return;
     }
-    cancelGrace(commandId);
+    if (!"Notification".equals(hookEvent)) {
+      cancelGrace(commandId);
+    }
+    boolean stop = "Stop".equals(hookEvent);
+    boolean onlyBackgroundShells = stop && onlyBackgroundShells(body);
+    if (stop) {
+      recordBackground(commandId, body, onlyBackgroundShells);
+    } else if ("UserPromptSubmit".equals(hookEvent) || AgentState.ENDED.equals(state)) {
+      backgroundByCommand.remove(commandId);
+    }
     // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins). No
     // frame goes out on this path — see the class javadoc's "hold path" paragraph — so
     // awaitingInput is never computed for it; the Notification frame already sent carried true.
+    // Its background work was recorded above, and a shell-only one still gets its grace, so the
+    // verdict it left clears in time rather than at the next turn.
     AgentActivity current = lastByCommand.get(commandId);
-    if ("Stop".equals(hookEvent) && current != null && AgentState.WAITING.equals(current.state())) {
+    if (stop && current != null && AgentState.WAITING.equals(current.state())) {
       forward(commandId, current.state());
+      if (onlyBackgroundShells) {
+        armGrace(commandId);
+      }
       return;
     }
-    boolean onlyBackgroundShells = "Stop".equals(hookEvent) && onlyBackgroundShells(body);
     AgentActivity activity =
         new AgentActivity(
             commandId,
@@ -211,6 +252,20 @@ final class HookWebhook {
   }
 
   /**
+   * Sets or clears {@code commandId}'s background-work verdict from a {@code Stop}'s own body:
+   * set when its payload says work is still running ({@code awaitingInput} {@code false}) or when
+   * the only work is background shells, cleared otherwise — nothing running, or a harness that does
+   * not report it.
+   */
+  private void recordBackground(String commandId, JsonObject body, boolean onlyBackgroundShells) {
+    if (onlyBackgroundShells || Boolean.FALSE.equals(awaitingInputForStop(body))) {
+      backgroundByCommand.add(commandId);
+    } else {
+      backgroundByCommand.remove(commandId);
+    }
+  }
+
+  /**
    * Schedules the background-shell grace for {@code commandId}. The callback re-checks that its
    * timer is still the command's current one ({@code remove(key, value)} is the atomic form of that
    * check), so a timer a newer hook cancelled too late to stop it firing sends nothing. The id is
@@ -230,15 +285,24 @@ final class HookWebhook {
   }
 
   /**
-   * Relays the stored frame again with {@code awaitingInput} {@code true} and a fresh {@code at},
-   * and stores the copy so {@link #reportCurrent()} replays the verdict. The activity listener is
-   * deliberately not told: the state is the stored {@code IDLE} it already heard, and a second
-   * {@code IDLE} would re-trigger whatever it does on one.
+   * Clears the command's background-work verdict, then relays the stored frame again with {@code
+   * awaitingInput} {@code true} and a fresh {@code at}, and stores the copy so {@link
+   * #reportCurrent()} replays the verdict. The stored frame is the shell-only {@code Stop}'s, or
+   * a {@code Notification} that arrived after it (which did not cancel the grace); either way the
+   * copy keeps its state and goes out as {@code hookEvent} {@code Stop}, since it is that {@code
+   * Stop}'s delayed verdict. A stored frame already saying {@code true} — a permission prompt the
+   * {@code Stop} was held under — is left alone and nothing is sent. The activity listener is
+   * deliberately not told: the state is the stored one it already heard, and a second {@code IDLE}
+   * would re-trigger whatever it does on one.
    */
   private void graceExpired(String commandId) {
+    backgroundByCommand.remove(commandId);
     AgentActivity last = lastByCommand.get(commandId);
     if (last == null) {
       return; // evicted since the Stop — nothing left to call waiting
+    }
+    if (Boolean.TRUE.equals(last.awaitingInput())) {
+      return; // already reads as waiting — a held Stop under a permission prompt
     }
     AgentActivity waiting =
         new AgentActivity(
@@ -270,13 +334,15 @@ final class HookWebhook {
    * {@code SessionEnd} evicts it, so a reconnect cannot replay a dead agent's {@code BUSY} or {@code
    * IDLE} over the truth. The session identity is carried from the last frame, when there was one.
    * A pending background-shell grace is cancelled first, as any hook cancels it: a dead agent is
-   * not one to call waiting twenty-five minutes later.
+   * not one to call waiting twenty-five minutes later, and its background-work verdict is cleared:
+   * whatever it left running died with it.
    */
   void killed(String commandId, String hookEvent, int exitCode, String message) {
     if (commandId == null || commandId.isBlank()) {
       return;
     }
     cancelGrace(commandId);
+    backgroundByCommand.remove(commandId);
     AgentActivity last = lastByCommand.remove(commandId);
     AgentActivity activity =
         new AgentActivity(
@@ -308,16 +374,25 @@ final class HookWebhook {
   }
 
   /**
-   * Whether {@code commandId}'s harness has work in flight by its last stored frame (qits-1233): a
-   * turn running ({@code BUSY}), or a frame that says outright it is <em>not</em> awaiting input —
-   * a {@code Stop} that left a subagent, a monitor, a session cron or a background shell running,
-   * which still maps to {@code IDLE}. Once the background-shell grace has flipped such a frame to
-   * {@code awaitingInput} {@code true} it no longer reads as in flight. No frame at all, a {@code
-   * null} verdict (an older harness, an unrecognised notification) and an ended command are not in
-   * flight: this is asked before stopping a harness, and only a positive signal may hold that up.
+   * Whether {@code commandId}'s harness has work in flight (qits-1233): by its last stored frame, a
+   * turn running ({@code BUSY}) or a frame that says outright it is <em>not</em> awaiting input;
+   * or by its background-work verdict, a {@code Stop} that left a subagent, a monitor, a session
+   * cron or a background shell running, which still maps to {@code IDLE}. The verdict is read
+   * separately because the frame alone does not survive the {@code idle_prompt} {@code
+   * Notification} that follows such a {@code Stop} (qits-1238). Once the background-shell grace
+   * has expired the shell case no longer reads as in flight. No frame at all, a {@code null}
+   * verdict (an older harness, an unrecognised notification) with no background work recorded, and
+   * an ended command are not in flight: this is asked before stopping a harness, and only a
+   * positive signal may hold that up.
    */
   boolean inFlight(String commandId) {
-    AgentActivity last = commandId == null ? null : lastByCommand.get(commandId);
+    if (commandId == null) {
+      return false;
+    }
+    if (backgroundByCommand.contains(commandId)) {
+      return true;
+    }
+    AgentActivity last = lastByCommand.get(commandId);
     return last != null
         && (AgentState.BUSY.equals(last.state()) || Boolean.FALSE.equals(last.awaitingInput()));
   }

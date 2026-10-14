@@ -405,6 +405,102 @@ class HookWebhookTest {
     assertFalse(webhook.inFlight("cmd-2"), "killed");
   }
 
+  // --- the background-work verdict survives a Notification (qits-1238) ------------------------
+
+  private static JsonObject subagentStop() {
+    return new JsonObject(
+        "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"x\","
+            + "\"type\":\"subagent\",\"status\":\"running\"}],\"session_crons\":[]}");
+  }
+
+  private static JsonObject nothingRunningStop() {
+    return new JsonObject(
+        "{\"hook_event_name\":\"Stop\",\"background_tasks\":[],\"session_crons\":[]}");
+  }
+
+  private JsonObject idlePrompt() {
+    return payload("Notification").put("notification_type", "idle_prompt");
+  }
+
+  @Test
+  void anIdlePromptAfterAStopWithARunningSubagentLeavesItInFlight() {
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+
+    assertNull(lastSent().awaitingInput(), "the Notification's own frame is unchanged");
+    assertTrue(webhook.inFlight("cmd-1"), "the subagent is still running");
+  }
+
+  @Test
+  void aStopHeldUnderAPermissionPromptStillRecordsItsRunningSubagent() {
+    webhook.handle(
+        "Notification",
+        payload("Notification").put("notification_type", "permission_prompt"),
+        "cmd-1");
+    int before = sent.size();
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    assertEquals(before, sent.size(), "the hold path still sends no frame");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+
+    assertTrue(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aNewTurnThenAStopWithNothingRunningClearsTheBackgroundVerdict() {
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+
+    assertFalse(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aNewTurnClearsTheBackgroundVerdictBeforeItsOwnStopArrives() {
+    // The prompt is the end of the previous turn's verdict, not the next Stop: a Notification
+    // landing mid-turn replaces the BUSY frame, and must not let the old verdict show through.
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+
+    assertFalse(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aSessionEndClearsTheBackgroundVerdict() {
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    webhook.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+
+    assertFalse(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aKilledFrameClearsTheBackgroundVerdict() {
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    webhook.killed("cmd-1", AgentEvent.KILLED, 137, "killed by SIGKILL");
+
+    assertFalse(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aLaterStopWithNothingRunningClearsTheBackgroundVerdict() {
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+
+    assertFalse(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aSessionStartDoesNotClearTheBackgroundVerdict() {
+    webhook.handle("Stop", subagentStop(), "cmd-1");
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+
+    assertTrue(webhook.inFlight("cmd-1"));
+  }
+
   @Test
   void reportCurrentReplaysAwaitingInputToo() {
     JsonObject body =
@@ -563,6 +659,45 @@ class HookWebhookTest {
     graced.reportCurrent();
     assertEquals(1, gracedSent.size());
     assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
+    graced.close();
+  }
+
+  @Test
+  void anIdlePromptNeitherCancelsTheShellGraceNorEndsInFlightBeforeIt()
+      throws InterruptedException {
+    HookWebhook graced = graced(SHORT_GRACE);
+    graced.handle("Stop", shellOnlyStop(), "cmd-1");
+    graced.handle("Notification", idlePrompt(), "cmd-1");
+    assertEquals(2, gracedSent.size());
+    assertNull(lastGraced().awaitingInput(), "the Notification's own frame is unchanged");
+    assertTrue(graced.inFlight("cmd-1"), "the shell's grace is still running");
+
+    await(() -> gracedSent.size() == 3);
+    AgentActivity waiting = lastGraced();
+    assertEquals(Boolean.TRUE, waiting.awaitingInput());
+    assertEquals("cmd-1", waiting.commandId());
+    assertFalse(graced.inFlight("cmd-1"), "the grace expired");
+
+    gracedSent.clear();
+    graced.reportCurrent();
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput(), "and a reconnect replays it");
+    graced.close();
+  }
+
+  @Test
+  void aShellOnlyStopHeldUnderAPermissionPromptClearsWithItsGraceAndSendsNothing()
+      throws InterruptedException {
+    HookWebhook graced = graced(SHORT_GRACE);
+    graced.handle(
+        "Notification",
+        payload("Notification").put("notification_type", "permission_prompt"),
+        "cmd-1");
+    graced.handle("Stop", shellOnlyStop(), "cmd-1");
+    assertTrue(graced.inFlight("cmd-1"));
+
+    await(() -> !graced.inFlight("cmd-1"));
+    outlastTheGrace();
+    assertEquals(1, gracedSent.size(), "the standing prompt already reads as waiting");
     graced.close();
   }
 
