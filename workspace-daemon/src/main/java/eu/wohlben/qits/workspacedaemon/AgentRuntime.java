@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 import org.jboss.logging.Logger;
 
@@ -154,6 +155,12 @@ final class AgentRuntime implements AutoCloseable {
   private final String claudeMount;
   private final TerminalTurnGate terminalTurns;
 
+  /**
+   * Whether a harness command has work in flight by its hooks ({@link HookWebhook#inFlight}): what
+   * fills {@link AgentWorktrees.CleanupCheck#busy()}.
+   */
+  private final Predicate<String> inFlight;
+
   private final Map<String, Agent> agents = new ConcurrentHashMap<>();
 
   /** Which agent a command belongs to; filled before the spawn so an early hook finds it. */
@@ -173,12 +180,15 @@ final class AgentRuntime implements AutoCloseable {
         commands,
         factory,
         claudeMount,
-        TerminalTurnGate.DEFAULT_TIMEOUT);
+        TerminalTurnGate.DEFAULT_TIMEOUT,
+        commandId -> false);
   }
 
   /**
    * @param readyTimeout how long a turn for an interactive harness waits for its {@code
    *     SessionStart} before it is typed anyway
+   * @param inFlight whether a harness command still has work in flight ({@link
+   *     HookWebhook#inFlight} in production); a busy harness holds up a removal that is not forced
    */
   AgentRuntime(
       AgentWorktrees worktrees,
@@ -187,7 +197,9 @@ final class AgentRuntime implements AutoCloseable {
       AgentCommands commands,
       LaunchFactory factory,
       String claudeMount,
-      java.time.Duration readyTimeout) {
+      java.time.Duration readyTimeout,
+      Predicate<String> inFlight) {
+    this.inFlight = inFlight;
     this.worktrees = worktrees;
     this.store = store;
     this.registry = registry;
@@ -385,23 +397,35 @@ final class AgentRuntime implements AutoCloseable {
     return known(agentId).launch.entity();
   }
 
-  /** The cleanup check for one agent. */
+  /** The cleanup check for one agent: git's verdict, and whether its harness is busy. */
   AgentWorktrees.CleanupCheck cleanupCheck(String agentId) {
     requireExists(agentId);
-    return worktrees.cleanupCheck(agentId);
+    return worktrees.cleanupCheck(agentId).withBusy(busy(agentId));
+  }
+
+  /**
+   * Whether the agent's running harness has work in flight (qits-1233). A background subagent runs
+   * inside the one harness process, and its {@code Stop} maps to {@code IDLE}: git sees nothing
+   * unfinished, and only the hooks know the harness is still working.
+   */
+  private boolean busy(String agentId) {
+    Agent agent = agents.get(agentId);
+    Command running = agent == null ? null : running(agent);
+    return running != null && inFlight.test(running.id());
   }
 
   /**
    * Remove the agent: stop its harness, remove its worktrees and local branches, forget it. Refused
-   * while there is work that would be lost, unless {@code force}.
+   * while there is work that would be lost, or while its harness is busy — stopping it would cut a
+   * tool call or a background task off mid-way — unless {@code force}.
    *
    * @return the cleanup check that refused it, or null when it was removed
    */
   synchronized AgentWorktrees.CleanupCheck remove(String agentId, boolean force) {
     requireExists(agentId);
     if (!force) {
-      AgentWorktrees.CleanupCheck check = worktrees.cleanupCheck(agentId);
-      if (!check.clean()) {
+      AgentWorktrees.CleanupCheck check = cleanupCheck(agentId);
+      if (!check.clean() || check.busy()) {
         return check;
       }
     }

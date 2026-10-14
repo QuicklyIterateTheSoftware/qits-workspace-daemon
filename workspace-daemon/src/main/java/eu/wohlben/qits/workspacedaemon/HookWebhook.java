@@ -307,6 +307,21 @@ final class HookWebhook {
     }
   }
 
+  /**
+   * Whether {@code commandId}'s harness has work in flight by its last stored frame (qits-1233): a
+   * turn running ({@code BUSY}), or a frame that says outright it is <em>not</em> awaiting input —
+   * a {@code Stop} that left a subagent, a monitor, a session cron or a background shell running,
+   * which still maps to {@code IDLE}. Once the background-shell grace has flipped such a frame to
+   * {@code awaitingInput} {@code true} it no longer reads as in flight. No frame at all, a {@code
+   * null} verdict (an older harness, an unrecognised notification) and an ended command are not in
+   * flight: this is asked before stopping a harness, and only a positive signal may hold that up.
+   */
+  boolean inFlight(String commandId) {
+    AgentActivity last = commandId == null ? null : lastByCommand.get(commandId);
+    return last != null
+        && (AgentState.BUSY.equals(last.state()) || Boolean.FALSE.equals(last.awaitingInput()));
+  }
+
   /** Re-send the last known activity for every still-tracked command (reconnect adoption). */
   void reportCurrent() {
     for (AgentActivity activity : lastByCommand.values()) {

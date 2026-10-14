@@ -74,7 +74,8 @@ final class AgentWorktreeJson {
     return new JsonObject()
         .put("clean", check.clean())
         .put("dirty", new JsonArray(check.dirty()))
-        .put("unpushed", unpushed);
+        .put("unpushed", unpushed)
+        .put("busy", check.busy());
   }
 
   /** {@code POST agent-worktrees/{agentId}/yield}. */

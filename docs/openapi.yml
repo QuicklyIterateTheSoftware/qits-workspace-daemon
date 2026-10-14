@@ -514,9 +514,12 @@ paths:
       summary: Stop the agent and remove its worktrees and local branches.
       description: |
         **Refused while work would be lost**: uncommitted changes, or commits no remote branch has
-        (a commit on a detached HEAD included). The `409` carries the cleanup check, so the caller
-        can hand the leftovers back to the agent. `force=true` removes it anyway — for a person's
-        explicit discard, never for the cleanup sweep.
+        (a commit on a detached HEAD included). **Refused too while the harness is busy**
+        (`busy: true`): a turn is running, or a background task — a subagent, say — is still going
+        after the harness's `Stop`; removing the agent would kill it mid-way. The `409` carries the
+        cleanup check, so the caller can hand the leftovers back to the agent, or try again once
+        the harness is done. `force=true` removes it anyway — for a person's explicit discard, never
+        for the cleanup sweep.
       parameters:
         - $ref: "#/components/parameters/AgentId"
         - name: force
@@ -689,6 +692,11 @@ paths:
         detached HEAD is unpushed work too, reported with no `branch`. In the wrapper a moved
         gitlink does not count: it is the trace of submodule work, and each submodule is checked on
         its own. `clean` is true when both lists are empty.
+
+        `busy` is the harness, not git: its hooks say a turn is running, or that its last `Stop`
+        left a background task going (a subagent, a monitor, a session cron, or a background shell
+        within its grace). It does not change `clean`, but a `DELETE` without `force` is refused
+        while it is true.
       parameters:
         - $ref: "#/components/parameters/AgentId"
       responses:
@@ -1814,7 +1822,7 @@ components:
 
     CleanupCheck:
       type: object
-      required: [clean, dirty, unpushed]
+      required: [clean, dirty, unpushed, busy]
       properties:
         clean:
           type: boolean
@@ -1826,6 +1834,12 @@ components:
         unpushed:
           type: array
           items: { $ref: "#/components/schemas/UnpushedWork" }
+        busy:
+          type: boolean
+          description: |
+            The agent's running harness has work in flight by its hooks — a turn, or a background
+            task left running after a `Stop`. Independent of `clean`; a removal without `force` is
+            refused while it is true. A daemon before qits-1233 omits it, which reads as false.
 
     UnpushedWork:
       type: object

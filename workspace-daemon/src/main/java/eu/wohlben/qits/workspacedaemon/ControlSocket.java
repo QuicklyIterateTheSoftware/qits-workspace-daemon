@@ -698,7 +698,8 @@ public class ControlSocket {
                     claudeMount,
                     hooksPort),
             claudeMount,
-            agentReadyTimeout);
+            agentReadyTimeout,
+            this::harnessInFlight);
     agents = runtime;
     // The sign-in terminal is nobody's agent: a launch service of the workspace's own serves it.
     AgentLaunchService workspaceLaunch =
@@ -745,6 +746,16 @@ public class ControlSocket {
   private static String head(java.nio.file.Path directory) {
     GitExec.Out out = GitExec.git(directory, "rev-parse", "HEAD");
     return out.ok() ? out.line() : "";
+  }
+
+  /**
+   * Whether a harness command's hooks say it still has work in flight ({@link
+   * HookWebhook#inFlight}); asked by {@link AgentRuntime}'s cleanup check. No webhook is no hook
+   * heard, which is never in flight.
+   */
+  private boolean harnessInFlight(String commandId) {
+    HookWebhook h = hooks;
+    return h != null && h.inFlight(commandId);
   }
 
   /**

@@ -73,9 +73,23 @@ final class AgentWorktrees {
   /** What {@link #cleanupCheck} found. */
   record Leftover(String repository, String branch, int commits) {}
 
-  record CleanupCheck(List<String> dirty, List<Leftover> unpushed) {
+  /**
+   * {@code busy} is the harness, not git (qits-1233): its work is still in flight — a turn, or a
+   * background task left running after a {@code Stop}. It is filled by {@code AgentRuntime}, which
+   * knows the harness; this class only reads git and always answers {@code false}. {@link #clean()}
+   * stays git-only, because nothing the harness is doing is work a removal would lose from disk.
+   */
+  record CleanupCheck(List<String> dirty, List<Leftover> unpushed, boolean busy) {
+    CleanupCheck(List<String> dirty, List<Leftover> unpushed) {
+      this(dirty, unpushed, false);
+    }
+
     boolean clean() {
       return dirty.isEmpty() && unpushed.isEmpty();
+    }
+
+    CleanupCheck withBusy(boolean busy) {
+      return new CleanupCheck(dirty, unpushed, busy);
     }
   }
 

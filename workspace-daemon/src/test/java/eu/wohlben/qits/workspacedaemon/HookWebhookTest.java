@@ -357,6 +357,54 @@ class HookWebhookTest {
     assertEquals(Boolean.TRUE, lastSent().awaitingInput());
   }
 
+  // --- inFlight (qits-1233) -------------------------------------------------------------------
+
+  @Test
+  void aStopThatLeftABackgroundSubagentRunningIsInFlight() {
+    webhook.handle(
+        "Stop",
+        new JsonObject(
+            "{\"background_tasks\":[{\"id\":\"999e3548\",\"type\":\"subagent\","
+                + "\"status\":\"running\"}],\"session_crons\":[]}"),
+        "cmd-1");
+    assertEquals(AgentState.IDLE, lastSent().state(), "still IDLE on the wire");
+    assertTrue(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void aRunningTurnIsInFlight() {
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    assertTrue(webhook.inFlight("cmd-1"));
+  }
+
+  @Test
+  void anIdleWaitingUnknownEndedOrUnheardHarnessIsNotInFlight() {
+    assertFalse(webhook.inFlight("cmd-1"), "no hook heard");
+    assertFalse(webhook.inFlight(null));
+
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    assertFalse(webhook.inFlight("cmd-1"), "awaitingInput unknown");
+
+    JsonObject nothingRunning =
+        payload("Stop")
+            .put("background_tasks", new JsonArray())
+            .put("session_crons", new JsonArray());
+    webhook.handle("Stop", nothingRunning, "cmd-1");
+    assertFalse(webhook.inFlight("cmd-1"), "nothing left running");
+
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    JsonObject prompt = payload("Notification").put("notification_type", "permission_prompt");
+    webhook.handle("Notification", prompt, "cmd-1");
+    assertFalse(webhook.inFlight("cmd-1"), "blocked on the user");
+
+    webhook.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+    assertFalse(webhook.inFlight("cmd-1"), "ended");
+
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-2");
+    webhook.killed("cmd-2", AgentEvent.KILLED, 137, "killed by SIGKILL");
+    assertFalse(webhook.inFlight("cmd-2"), "killed");
+  }
+
   @Test
   void reportCurrentReplaysAwaitingInputToo() {
     JsonObject body =
@@ -447,6 +495,17 @@ class HookWebhookTest {
     assertTrue(waiting.at() >= stop.at());
     // The state did not change, so the listener is not told a second IDLE.
     assertEquals(List.of("cmd-1=IDLE"), gracedForwarded);
+    graced.close();
+  }
+
+  @Test
+  void aShellOnlyStopIsInFlightUntilTheGraceExpires() throws InterruptedException {
+    HookWebhook graced = graced(SHORT_GRACE);
+    graced.handle("Stop", shellOnlyStop(), "cmd-1");
+    assertTrue(graced.inFlight("cmd-1"));
+
+    await(() -> gracedSent.size() == 2);
+    assertFalse(graced.inFlight("cmd-1"), "the grace flipped it to waiting");
     graced.close();
   }
 

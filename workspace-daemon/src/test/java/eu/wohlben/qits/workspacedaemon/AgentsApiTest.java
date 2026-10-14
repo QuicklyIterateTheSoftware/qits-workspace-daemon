@@ -116,6 +116,12 @@ class AgentsApiTest {
   private AgentWorktrees worktrees;
   private AgentRuntime runtime;
 
+  /**
+   * The hooks the runtime asks whether a harness is busy; never bound, its {@code handle} seam is
+   * driven directly.
+   */
+  private HookWebhook hooks;
+
   /** Where the fake harness writes what it saw: {@code <log>.args}, {@code .cwd}, … */
   private Path fakeLog;
 
@@ -248,6 +254,7 @@ class AgentsApiTest {
     WorkspaceMcpServers mcp =
         new WorkspaceMcpServers(Optional.of(PLATFORM_MCP_URL), Optional.empty());
     CommandsAgentCommands shared = new CommandsAgentCommands(commands, registry, store);
+    hooks = new HookWebhook(vertx, HOOKS_PORT, message -> {});
     launch =
         new AgentLaunchService(
             shared, auth, transcripts, tail, defaults, mcp, WORKSPACE, claudeMount.toString(),
@@ -269,7 +276,9 @@ class AgentsApiTest {
                     WORKSPACE,
                     claudeMount.toString(),
                     HOOKS_PORT),
-            claudeMount.toString());
+            claudeMount.toString(),
+            TerminalTurnGate.DEFAULT_TIMEOUT,
+            hooks::inFlight);
     api.wireCommands(commands, registry, WORKSPACE);
     api.wireAgents(
         runtime,
@@ -1160,6 +1169,61 @@ class AgentsApiTest {
     assertEquals("agent-1", removed.body().getString("agentId"));
     assertFalse(Files.exists(worktrees.agentDir("agent-1")));
     assertEquals(404, get("/agent-worktrees/agent-1").status());
+  }
+
+  @Test
+  @Timeout(60)
+  void aHarnessWithABackgroundSubagentRunningIsBusyAndNotRemovedUnlessForced() throws Exception {
+    // qits-1233: the subagent runs inside the one harness process and its Stop maps to IDLE, so git
+    // sees nothing unfinished — only the hooks know the harness is still working.
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(commandId);
+    hooks.handle(
+        "Stop",
+        new JsonObject(
+            "{\"background_tasks\":[{\"id\":\"999e3548\",\"type\":\"subagent\","
+                + "\"status\":\"running\"}],\"session_crons\":[]}"),
+        commandId);
+
+    Answer check = get("/agent-worktrees/agent-1/cleanup-check");
+    assertEquals(200, check.status(), check.raw());
+    assertEquals(
+        new JsonObject()
+            .put("clean", true)
+            .put("dirty", new JsonArray())
+            .put("unpushed", new JsonArray())
+            .put("busy", true),
+        check.body(),
+        "busy is the harness, and clean stays git's");
+
+    Answer refused = delete("/agent-worktrees/agent-1");
+    assertEquals(409, refused.status(), refused.raw());
+    assertEquals(check.body(), refused.body(), "the refusal is the check");
+    assertTrue(worktrees.exists("agent-1"));
+    assertTrue(store.find(commandId).orElseThrow().isRunning(), "the harness keeps running");
+
+    Answer forced = delete("/agent-worktrees/agent-1?force=true");
+    assertEquals(200, forced.status(), forced.raw());
+    assertFalse(worktrees.exists("agent-1"));
+    awaitStopped(commandId);
+  }
+
+  @Test
+  @Timeout(60)
+  void aHarnessThatStoppedWithNothingRunningIsNotBusyAndIsRemoved() throws Exception {
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(commandId);
+    hooks.handle(
+        "Stop", new JsonObject("{\"background_tasks\":[],\"session_crons\":[]}"), commandId);
+
+    JsonObject check = get("/agent-worktrees/agent-1/cleanup-check").body();
+    assertEquals(true, check.getBoolean("clean"));
+    assertEquals(false, check.getBoolean("busy"));
+
+    Answer removed = delete("/agent-worktrees/agent-1");
+    assertEquals(200, removed.status(), removed.raw());
+    assertFalse(worktrees.exists("agent-1"));
+    awaitStopped(commandId);
   }
 
   @Test

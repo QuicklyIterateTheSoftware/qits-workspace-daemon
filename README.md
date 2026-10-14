@@ -104,8 +104,9 @@ before targets existed. A name the daemon has no listener for is refused and log
 starts its harness there unless it runs — resuming the session id it is handed when the session's
 files are still on the harness volume. Its `env` (the agent's credential) reaches the harness
 process and the agent's pushes, and is never written to disk. `DELETE` refuses while work would be
-lost (uncommitted, or commits no remote branch has) and answers the cleanup check; `force=true`
-removes anyway.
+lost (uncommitted, or commits no remote branch has), or while the harness is busy by its hooks (a
+turn running, or a background task such as a subagent still going after its `Stop`), and answers
+the cleanup check, whose `busy` says which; `force=true` removes anyway.
 
 **Which credential each process carries.** No git process the daemon starts inherits a secret of
 the workspace (its token, commissioned client, API token, agent configuration), and every one runs

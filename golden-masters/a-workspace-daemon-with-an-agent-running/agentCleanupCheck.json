@@ -1,5 +1,6 @@
 {
   "clean": true,
   "dirty": [],
-  "unpushed": []
+  "unpushed": [],
+  "busy": false
 }
