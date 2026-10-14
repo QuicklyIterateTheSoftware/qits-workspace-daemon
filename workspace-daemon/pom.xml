@@ -116,6 +116,15 @@
             <artifactId>qits-idp-golden-masters</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- The landing app's consumer pact against this daemon (ticket qits-1230), verified by
+                 ConsumerPactVerificationTest. Pulled in purely for the pact file it carries on its
+                 classpath. The pinned jar IS the source of the pact; nothing is copied into this
+                 tree. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-landing-app-pacts-qits-workspace-daemon</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

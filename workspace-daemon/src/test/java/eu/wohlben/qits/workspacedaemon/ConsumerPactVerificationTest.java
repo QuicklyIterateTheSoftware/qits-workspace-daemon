@@ -8,7 +8,6 @@ import au.com.dius.pact.core.model.ProviderState;
 import au.com.dius.pact.provider.junit5.HttpTestTarget;
 import au.com.dius.pact.provider.junit5.PactVerificationContext;
 import au.com.dius.pact.provider.junit5.PactVerificationInvocationContextProvider;
-import au.com.dius.pact.provider.junitsupport.IgnoreNoPactsToVerify;
 import au.com.dius.pact.provider.junitsupport.Provider;
 import au.com.dius.pact.provider.junitsupport.State;
 import au.com.dius.pact.provider.junitsupport.loader.PactSource;
@@ -30,9 +29,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  *
  * <p>The pacts come off the test classpath ({@link ClasspathPactLoader}): a consumer publishes
  * {@code pacts/<consumer>_qits-workspace-daemon.json} in a jar, and this repository pins that jar
- * as a test dependency. <b>No consumer pins one yet</b>, so {@code @IgnoreNoPactsToVerify} lets an
- * empty classpath pass. When the first is pinned, drop the annotation and set {@link
- * ClasspathPactLoader#REQUIRED} to true.
+ * as a test dependency. <b>The landing app is the first consumer pinned</b>
+ * ({@code qits-landing-app-pacts-qits-workspace-daemon}), so {@link ClasspathPactLoader#REQUIRED} is
+ * true and an empty classpath now fails the build instead of passing silently.
  *
  * <p>Each interaction gets a fresh daemon ({@link ProviderStates}) on an ephemeral port, and every
  * request carries the daemon token, as qits-workspaces' proxy sends it: a consumer's pact does not
@@ -41,7 +40,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 @EnabledOnOs(OS.LINUX)
 @Provider(ConsumerPactVerificationTest.PROVIDER)
 @PactSource(ClasspathPactLoader.class)
-@IgnoreNoPactsToVerify
 class ConsumerPactVerificationTest {
 
   /** The provider as a consumer pact names it: the repository name. */
@@ -56,9 +54,6 @@ class ConsumerPactVerificationTest {
 
   @BeforeEach
   void target(PactVerificationContext context, Pact pact, Interaction interaction) {
-    if (context == null) {
-      return; // no pact to verify: @IgnoreNoPactsToVerify's single empty run
-    }
     String consumer = pact.getConsumer().getName();
     for (ProviderState state : interaction.getProviderStates()) {
       if (!ProviderStates.names().contains(state.getName())) {
@@ -100,9 +95,7 @@ class ConsumerPactVerificationTest {
   @TestTemplate
   @ExtendWith(PactVerificationInvocationContextProvider.class)
   void consumerPactHolds(PactVerificationContext context) {
-    if (context != null) {
-      context.verifyInteraction();
-    }
+    context.verifyInteraction();
   }
 
   @State(ProviderStates.SIGNED_IN)

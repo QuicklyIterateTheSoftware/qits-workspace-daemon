@@ -31,18 +31,18 @@ import org.jboss.logging.Logger;
  * qits-workspaces-service_qits-workspace-daemon.json}); a file under any other name is not loaded.
  * A copy of qits-edge-service's loader.
  *
- * <p><b>Finding nothing is allowed until the first consumer pins.</b> While {@link #REQUIRED} is
- * false, an empty classpath verifies nothing and says so in the log. When the first consumer's pact
- * jar is pinned in the pom, set {@link #REQUIRED} to true and drop {@code @IgnoreNoPactsToVerify}
- * from {@link ConsumerPactVerificationTest}: from then on finding nothing is an error, because a
- * provider whose pinned pacts vanished has lost its dependency.
+ * <p><b>Finding nothing is no longer allowed.</b> The landing app's pact jar,
+ * {@code qits-landing-app-pacts-qits-workspace-daemon}, is pinned in the pom, and {@link #REQUIRED}
+ * is true: an empty classpath is now an error, because a provider whose pinned pacts vanished has
+ * lost its dependency. {@link ConsumerPactVerificationTest} no longer carries
+ * {@code @IgnoreNoPactsToVerify} for the same reason.
  */
 public class ClasspathPactLoader implements PactLoader {
 
   static final String DIRECTORY = "pacts/";
 
-  /** Whether an empty classpath fails the build. False until the first consumer pact is pinned. */
-  static final boolean REQUIRED = false;
+  /** Whether an empty classpath fails the build. True now that a consumer pact is pinned. */
+  static final boolean REQUIRED = true;
 
   private static final Logger LOG = Logger.getLogger(ClasspathPactLoader.class);
 
