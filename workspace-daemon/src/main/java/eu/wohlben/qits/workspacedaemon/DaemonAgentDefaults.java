@@ -4,9 +4,12 @@ import eu.wohlben.qits.agents.AgentDefaults;
 import eu.wohlben.qits.agents.AgentPromptTemplate;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.WorkLinkProjects;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.function.Supplier;
 
 /**
@@ -39,6 +42,8 @@ final class DaemonAgentDefaults implements AgentDefaults {
   private final boolean entityBlocked;
   private final String entityTitle;
   private final String entityStatus;
+  private final Optional<String> platformDomain;
+  private final WorkLinkProjects workLinkProjects;
 
   DaemonAgentDefaults(
       Supplier<DaemonQitsConfig> config,
@@ -109,6 +114,43 @@ final class DaemonAgentDefaults implements AgentDefaults {
       boolean entityBlocked,
       String entityTitle,
       String entityStatus) {
+    // No domain, no shared project-slug fetcher: the pre-qits-1204 shape, kept so every call site
+    // and test that does not yet care about work links keeps compiling unchanged.
+    this(
+        config,
+        daemonDefault,
+        activityTrackingDefault,
+        refinementModel,
+        surfaces,
+        ambientFacts,
+        entityId,
+        entityBlocked,
+        entityTitle,
+        entityStatus,
+        null,
+        null);
+  }
+
+  /**
+   * The full constructor (qits-1204): adds the two inputs {@link #workLinkProjects()} unions —
+   * {@code domain} for {@link #platformDomain()} and the shared {@code workLinkProjects} fetcher
+   * this daemon holds one of for its whole lifetime (see {@code ControlSocket}'s {@code
+   * WorkLinkProjects} field). Both are nullable so the shorter, pre-qits-1204 overload above can
+   * delegate here without a caller that does not have them to hand.
+   */
+  DaemonAgentDefaults(
+      Supplier<DaemonQitsConfig> config,
+      Optional<String> daemonDefault,
+      boolean activityTrackingDefault,
+      Optional<String> refinementModel,
+      AgentSurfaceConfigurations surfaces,
+      Map<String, String> ambientFacts,
+      String entityId,
+      boolean entityBlocked,
+      String entityTitle,
+      String entityStatus,
+      String domain,
+      WorkLinkProjects workLinkProjects) {
     this.config = config;
     this.daemonDefault = AgentType.parse(daemonDefault.orElse(null)).orElse(AgentType.CLAUDE);
     this.activityTrackingDefault = activityTrackingDefault;
@@ -119,6 +161,9 @@ final class DaemonAgentDefaults implements AgentDefaults {
     this.entityBlocked = entityBlocked;
     this.entityTitle = entityTitle == null ? "" : entityTitle.trim();
     this.entityStatus = entityStatus == null ? "" : entityStatus.trim();
+    this.platformDomain =
+        domain == null || domain.isBlank() ? Optional.empty() : Optional.of(domain.trim());
+    this.workLinkProjects = workLinkProjects;
   }
 
   @Override
@@ -143,6 +188,37 @@ final class DaemonAgentDefaults implements AgentDefaults {
       return Optional.of(declared.refinementModel());
     }
     return refinementModel.filter(model -> !model.isBlank());
+  }
+
+  /**
+   * The platform domain ({@code QITS_DOMAIN}) this container was created with (qits-1204) — read
+   * once at boot by {@code ControlSocket}, exactly like {@link #entityId()}, and held for the life
+   * of the container. Empty when the container was not handed one, which leaves the work-link
+   * footer out rather than pointed at a guessed host.
+   */
+  @Override
+  public Optional<String> platformDomain() {
+    return platformDomain;
+  }
+
+  /**
+   * The union of the entity-derived slug {@link AgentDefaults#workLinkProjects() the interface's
+   * default} answers and whatever {@link #workLinkProjects} — the one {@link WorkLinkProjects}
+   * {@code ControlSocket} holds for this daemon's whole lifetime — currently has cached (qits-1204).
+   * Sorted and distinct: a {@link TreeSet} both unions and orders in one pass, and a session's
+   * footer reads the same whichever source named a project twice.
+   *
+   * <p>{@code workLinkProjects} is nullable because the shorter, pre-qits-1204 constructor overload
+   * passes none: a daemon that has not wired a fetcher still gets its own entity-derived slug, which
+   * is the interface default's whole point.
+   */
+  @Override
+  public List<String> workLinkProjects() {
+    TreeSet<String> union = new TreeSet<>(AgentDefaults.super.workLinkProjects());
+    if (workLinkProjects != null) {
+      union.addAll(workLinkProjects.slugs());
+    }
+    return List.copyOf(union);
   }
 
   /**

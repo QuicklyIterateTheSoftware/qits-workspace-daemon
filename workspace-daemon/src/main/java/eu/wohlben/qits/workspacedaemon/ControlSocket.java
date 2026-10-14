@@ -15,6 +15,7 @@ import eu.wohlben.qits.agents.HarnessCapabilityService;
 import eu.wohlben.qits.agents.LocalProcessExecutor;
 import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.PromptRefinementService;
+import eu.wohlben.qits.agents.WorkLinkProjects;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
@@ -232,6 +233,17 @@ public class ControlSocket {
   Optional<String> refinementModel;
 
   /**
+   * The platform's public domain ({@code QITS_DOMAIN}), for {@link DaemonAgentDefaults#
+   * platformDomain()} (qits-1204) — the same key qits-workspaces' {@code WorkspaceContainerFactory}
+   * already injects into every workspace container for the image's npm/Maven tooling, read here
+   * under its own key for the same reason every other setting is: the harness library is
+   * framework-free and this class is the single reader. Unset or blank leaves the work-link footer
+   * out rather than pointed at a guessed host.
+   */
+  @ConfigProperty(name = "qits.workspace-daemon.domain")
+  Optional<String> domain;
+
+  /**
    * The per-surface agent configuration this container was created with, and where to write it.
    *
    * <p>Two keys, both or neither — {@link AgentConfigurationFile} has the whole arrangement and why
@@ -412,6 +424,13 @@ public class ControlSocket {
     repositoryId = repositoryIdConfig.orElse("");
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
+    // One fetcher for the daemon's whole life (qits-1204), started now rather than at the first
+    // agent launch so the first session after boot can carry cross-project links too — see
+    // WorkLinkProjects#start(). The bearer is the workspace token's own config read, not a second
+    // System.getenv("QITS_TOKEN"): two independent reads of one key is how they could disagree.
+    workLinkProjects =
+        new WorkLinkProjects(domain.orElse(null), () -> token.filter(value -> !value.isBlank()))
+            .start();
     // THE AGENT CONFIGURATION DOCUMENT, BEFORE ANYTHING ELSE STARTS. The host hands it over as
     // bytes plus a path; this writes one to the other and parses it, so a malformed document kills
     // the container here — in the first lines of its log, where an operator is looking — rather
@@ -730,7 +749,9 @@ public class ControlSocket {
   /**
    * The agent defaults for one agent, or for the workspace itself when every argument is null. The
    * entity facts seed the session name; the wrapper branch fills the {@code ticket}/{@code epic}
-   * prompt facts.
+   * prompt facts. {@link #domain} and {@link #workLinkProjects} (qits-1204) are the same for every
+   * call — this daemon's whole-lifetime domain and project-slug fetcher — so every agent's, and the
+   * workspace's own, footer links resolve against the one cache.
    */
   private DaemonAgentDefaults defaultsFor(
       String wrapperBranch, String entityId, EntityFacts entity) {
@@ -745,7 +766,9 @@ public class ControlSocket {
         entityId,
         entity != null && entity.blocked(),
         entity == null ? null : entity.title(),
-        entity == null ? null : entity.status());
+        entity == null ? null : entity.status(),
+        domain.orElse(null),
+        workLinkProjects);
   }
 
   /** {@code HEAD} of a worktree, or blank. */
@@ -889,6 +912,16 @@ public class ControlSocket {
    */
   private volatile AgentSurfaceConfigurations surfaceConfigurations =
       AgentSurfaceConfigurations.shipped();
+
+  /**
+   * One per daemon, for {@link DaemonAgentDefaults#workLinkProjects()} (qits-1204): every project on
+   * the estate, cached and refreshed in the background so a launch never waits on it. Built and
+   * {@link WorkLinkProjects#start() started} once in {@link #start()} and handed to every {@link
+   * #defaultsFor} call — a daemon-wide cache, not a per-agent one, because the projects list is the
+   * platform's and does not vary by agent. {@code domain} blank or the workspace token absent simply
+   * keeps it answering no slugs; see its own javadoc.
+   */
+  private WorkLinkProjects workLinkProjects;
 
   /**
    * What the harnesses in this image reported, or empty until the boot probe lands (and if it

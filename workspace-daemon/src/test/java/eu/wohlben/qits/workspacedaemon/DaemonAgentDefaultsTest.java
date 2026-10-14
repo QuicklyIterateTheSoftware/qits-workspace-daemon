@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.agents.AgentPromptTemplate;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
+import eu.wohlben.qits.agents.WorkLinkProjects;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -185,5 +187,68 @@ class DaemonAgentDefaultsTest {
     assertTrue(defaultsWithEntityBlocked(true).entityTitle().isEmpty());
     assertTrue(defaultsWithEntityBlocked(true).entityStatus().isEmpty());
     assertTrue(defaultsWithEntityId("qits-614").entityTitle().isEmpty());
+  }
+
+  // --- platformDomain() / workLinkProjects() (qits-1204) ----------------------------------------
+
+  private static DaemonAgentDefaults defaultsWithDomainAndWorkLinks(
+      String entityId, String domain, WorkLinkProjects workLinkProjects) {
+    return new DaemonAgentDefaults(
+        () -> null,
+        Optional.empty(),
+        true,
+        Optional.empty(),
+        AgentSurfaceConfigurations.shipped(),
+        Map.of(),
+        entityId,
+        false,
+        null,
+        null,
+        domain,
+        workLinkProjects);
+  }
+
+  @Test
+  void theInjectedDomainIsAnsweredTrimmed() {
+    assertEquals(
+        Optional.of("qits.example.com"),
+        defaultsWithDomainAndWorkLinks("qits-614", "  qits.example.com  ", null).platformDomain());
+  }
+
+  @Test
+  void aBlankOrNullDomainIsAbsentRatherThanAnEmptyValue() {
+    assertTrue(defaultsWithDomainAndWorkLinks("qits-614", "   ", null).platformDomain().isEmpty());
+    assertTrue(defaultsWithDomainAndWorkLinks("qits-614", null, null).platformDomain().isEmpty());
+  }
+
+  @Test
+  void theShorterConstructorsLeaveTheDomainAbsent() {
+    assertTrue(defaultsWithEntityId("qits-614").platformDomain().isEmpty());
+    assertTrue(defaultsWithEntityBlocked(true).platformDomain().isEmpty());
+  }
+
+  @Test
+  void workLinkProjectsAnswersTheEntityDerivedSlugWithNoSharedFetcher() {
+    // The pre-qits-1204 constructors pass no WorkLinkProjects at all, so the interface default —
+    // the project of entityId() — is the whole answer.
+    assertEquals(List.of("qits"), defaultsWithEntityId("qits-1204").workLinkProjects());
+  }
+
+  @Test
+  void workLinkProjectsUnionsTheEntityDerivedSlugWithTheSharedFetchersCache() {
+    // A blank domain keeps WorkLinkProjects from ever fetching (its own javadoc), so slugs() is
+    // always empty — this exercises the union path (not just the null-fetcher path above) without
+    // reaching for its test-only fetch/clock constructor, which is package-private to
+    // eu.wohlben.qits.agents and not visible from here.
+    WorkLinkProjects neverFetches = new WorkLinkProjects("", Optional::empty);
+    assertEquals(
+        List.of("qits"),
+        defaultsWithDomainAndWorkLinks("qits-1204", null, neverFetches).workLinkProjects());
+  }
+
+  @Test
+  void workLinkProjectsIsEmptyWithNeitherAnEntityNorAFetcher() {
+    assertEquals(
+        List.of(), defaultsWithDomainAndWorkLinks(null, null, null).workLinkProjects());
   }
 }
