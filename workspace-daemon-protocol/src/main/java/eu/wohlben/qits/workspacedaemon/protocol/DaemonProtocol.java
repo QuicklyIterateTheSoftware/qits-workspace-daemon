@@ -91,8 +91,18 @@ public final class DaemonProtocol {
    * branch. {@link GitStatus} is no longer sent. {@link PullBranch} is now only a hint that a ref
    * moved on the git host; the daemon answers it with a fetch of the base clone. A backend on 9
    * drops the two unknown frames and reads every other one as before.
+   *
+   * <p><b>11 added {@link AgentHarnessExit}</b> (qits-1236): one frame for every agent harness
+   * command that settles — its agent, status, exit code, and whether the daemon's own remove or
+   * yield, a SIGKILL, or the harness itself ended it. Before it only an exit 137 travelled home.
+   * Nothing gates on this number, in either direction. A backend on 10 does not know the tag and
+   * drops the frame — {@code DaemonCodec.decode} throws on an unknown type and {@code
+   * DaemonControlSocket} catches it, logs at DEBUG and keeps the connection — so it simply never
+   * hears of a plain exit, as before. The daemon cannot gate on the host's version anyway: {@link
+   * Ack} carries none. A host on 11 talking to a daemon on 10 just never receives one. The killed
+   * agent's {@link AgentActivity} {@code ENDED} is unchanged and still sent beside it.
    */
-  public static final int CAPABILITY_VERSION = 10;
+  public static final int CAPABILITY_VERSION = 11;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -128,6 +138,7 @@ public final class DaemonProtocol {
     public static final String AGENT_ACTIVITY = "agentActivity";
     public static final String WORKSPACE_CHANGED = "workspaceChanged";
     public static final String AGENT_BRANCH_PUSHED = "agentBranchPushed";
+    public static final String AGENT_HARNESS_EXIT = "agentHarnessExit";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
@@ -186,6 +197,11 @@ public final class DaemonProtocol {
     public static final String AGENT_ID = "agentId";
     public static final String REPOSITORY = "repository";
     public static final String SHA = "sha";
+    // AgentHarnessExit (qits-1236, capability 11). It also carries AGENT_ID, COMMAND_ID, EXIT_CODE
+    // (null when none was recorded) and AT (epoch millis, as on AgentActivity).
+    public static final String AGENT_TYPE = "agentType";
+    public static final String STATUS = "status";
+    public static final String STOPPED_BY = "stoppedBy";
 
     private Field() {}
   }

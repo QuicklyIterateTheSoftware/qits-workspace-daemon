@@ -158,7 +158,9 @@ rather than being a `commandsChanged` message precisely so the next thing that n
 nothing.
 
 An older backend drops a frame it cannot decode (`DaemonControlSocket` catches and logs), so adding
-a daemon→qits message degrades safely. The reverse is not true: a message qits sends that an older
+a daemon→qits message degrades safely — which is why `AgentHarnessExit` (capability 11) is sent
+ungated. The daemon could not gate on the host anyway: `Ack` carries no version, so a daemon never
+learns which one it is talking to. The reverse is not true: a message qits sends that an older
 daemon image does not know will not be handled at all.
 
 ## Addresses: what is injected, what is derived, what is still assumed
@@ -258,7 +260,10 @@ from it (`AgentWorktrees`): the wrapper at `/workspace/agents/<agentId>/<repoNam
 wrapper branch, and each submodule a detached worktree at its own `origin/main`. Objects are shared;
 nothing is cloned twice. `OriginSync` fetches every head into the base clone (timer, plus a
 `PullBranch` hint) and pushes every agent branch that has commits no remote has, with that agent's
-credential, reporting each push as `AgentBranchPushed`. `CommitGuard` installs a `pre-commit` hook
+credential, reporting each push as `AgentBranchPushed`. Every agent harness command that settles is
+logged and sent home as one `AgentHarnessExit` (`AgentKillWatch`), its `stoppedBy` one of
+`DAEMON_REMOVE`, `DAEMON_YIELD`, `KILLED` (exit 137 the daemon did not ask for) or `SELF`; a kill
+still also sends its `AgentActivity` `ENDED`, unchanged. `CommitGuard` installs a `pre-commit` hook
 in each repository's common git dir that refuses commits on the default branch or a detached HEAD.
 
 `AgentRuntime` holds the agents: one launch service each (its own entity name, its own context),

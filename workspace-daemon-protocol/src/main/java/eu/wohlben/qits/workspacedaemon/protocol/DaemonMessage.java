@@ -18,6 +18,7 @@ public sealed interface DaemonMessage
         GitStatus,
         AgentActivity,
         AgentBranchPushed,
+        AgentHarnessExit,
         WorkspaceChanged,
         Ack,
         RunCommand,

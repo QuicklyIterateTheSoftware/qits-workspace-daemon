@@ -2,6 +2,7 @@ package eu.wohlben.qits.workspacedaemon.protocol;
 
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.Field;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.Type;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -129,6 +130,16 @@ public final class DaemonCodec {
         map.put(Field.BRANCH, m.branch());
         map.put(Field.SHA, m.sha());
       }
+      case AgentHarnessExit m -> {
+        map.put(Field.TYPE, Type.AGENT_HARNESS_EXIT);
+        map.put(Field.AGENT_ID, m.agentId());
+        map.put(Field.COMMAND_ID, m.commandId());
+        map.put(Field.AGENT_TYPE, m.agentType());
+        map.put(Field.STATUS, m.status());
+        map.put(Field.EXIT_CODE, m.exitCode());
+        map.put(Field.STOPPED_BY, m.stoppedBy());
+        map.put(Field.AT, m.at() == null ? null : m.at().toEpochMilli());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -233,6 +244,15 @@ public final class DaemonCodec {
               str(map, Field.REPOSITORY),
               str(map, Field.BRANCH),
               str(map, Field.SHA));
+      case Type.AGENT_HARNESS_EXIT ->
+          new AgentHarnessExit(
+              str(map, Field.AGENT_ID),
+              str(map, Field.COMMAND_ID),
+              str(map, Field.AGENT_TYPE),
+              str(map, Field.STATUS),
+              intObj(map, Field.EXIT_CODE),
+              str(map, Field.STOPPED_BY),
+              instant(map, Field.AT));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -286,6 +306,12 @@ public final class DaemonCodec {
   private static Integer intObj(Map<String, Object> map, String key) {
     Object value = map.get(key);
     return value instanceof Number number ? number.intValue() : null;
+  }
+
+  /** Epoch milliseconds as an {@link Instant}; absent decodes to {@code null}. */
+  private static Instant instant(Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    return value instanceof Number number ? Instant.ofEpochMilli(number.longValue()) : null;
   }
 
   private static long longVal(Map<String, Object> map, String key) {

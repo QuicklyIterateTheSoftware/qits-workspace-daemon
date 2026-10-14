@@ -3,7 +3,9 @@ package eu.wohlben.qits.workspacedaemon;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentHarnessExit;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentEvent;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -47,7 +49,12 @@ import org.jboss.logging.Logger;
  * command as it settles — its agent, the command, the status ({@code EXITED}, {@code TERMINATED},
  * …) and the exit code, and whether it was this daemon's own remove or yield that stopped it. The
  * exit listener belongs to the harness library, so without this a harness that ended any other way
- * left no trace in the daemon's log at all. Only the log: what is reported home is unchanged.
+ * left no trace in the daemon's log at all.
+ *
+ * <p><b>And every one is sent home</b> (qits-1236): beside the log line, one {@link
+ * AgentHarnessExit} per settled agent command, saying in one of four words what ended it. A kill
+ * still also goes to the {@link Sink} as before — the two are independent, so the host's agent
+ * state is driven exactly as it was.
  */
 final class AgentKillWatch {
 
@@ -60,6 +67,12 @@ final class AgentKillWatch {
   @FunctionalInterface
   interface Sink {
     void killed(String commandId, String hookEvent, int exitCode, String message);
+  }
+
+  /** Where every settled agent exit is sent — {@code ControlSocket#send} in production. */
+  @FunctionalInterface
+  interface Exits {
+    void exited(AgentHarnessExit exit);
   }
 
   /**
@@ -79,6 +92,7 @@ final class AgentKillWatch {
   private final CgroupMemory cgroup;
   private final Sink sink;
   private final Owners owners;
+  private final Exits exits;
 
   /** The {@code oom_kill} count when each running agent command was first seen; -1 unreadable. */
   private final Map<String, Long> baselines = new HashMap<>();
@@ -87,14 +101,16 @@ final class AgentKillWatch {
   private final Set<String> settled = new HashSet<>();
 
   AgentKillWatch(CommandStore store, CgroupMemory cgroup, Sink sink) {
-    this(store, cgroup, sink, commandId -> null);
+    this(store, cgroup, sink, commandId -> null, exit -> {});
   }
 
-  AgentKillWatch(CommandStore store, CgroupMemory cgroup, Sink sink, Owners owners) {
+  AgentKillWatch(
+      CommandStore store, CgroupMemory cgroup, Sink sink, Owners owners, Exits exits) {
     this.store = store;
     this.cgroup = cgroup;
     this.sink = sink;
     this.owners = owners;
+    this.exits = exits;
   }
 
   /**
@@ -126,10 +142,10 @@ final class AgentKillWatch {
       }
       settled.add(command.id());
       Long baseline = baselines.remove(command.id());
-      logExit(command);
-      if (command.status() == CommandStatus.EXITED
-          && command.exitCode() != null
-          && command.exitCode() == SIGKILL_EXIT) {
+      Owner owner = owners.of(command.id());
+      LOG.infof("workspace-daemon: %s", exitLine(command, owner));
+      exits.exited(exitFrame(command, owner, Instant.now()));
+      if (killed(command)) {
         report(command, baseline);
       }
     }
@@ -138,12 +154,36 @@ final class AgentKillWatch {
     settled.retainAll(present);
   }
 
-  /** The one INFO line every agent exit gets; see the class javadoc. */
-  private void logExit(Command command) {
-    LOG.infof("workspace-daemon: %s", exitLine(command, owners.of(command.id())));
+  /** An agent command that died by SIGKILL on its own: exited, not terminated, with 137. */
+  private static boolean killed(Command command) {
+    return command.status() == CommandStatus.EXITED
+        && command.exitCode() != null
+        && command.exitCode() == SIGKILL_EXIT;
   }
 
-  /** What {@link #logExit} says about {@code command}; a seam so a test can read it. */
+  /**
+   * The frame every agent exit sends home. The daemon's own stop is asked first: whatever code a
+   * remove or yield ended in — a SIGTERM's, or the SIGKILL after its grace — it was asked for.
+   */
+  static AgentHarnessExit exitFrame(Command command, Owner owner, Instant at) {
+    String by = owner == null ? null : owner.stoppedBy();
+    String stoppedBy =
+        "remove".equals(by)
+            ? AgentHarnessExit.DAEMON_REMOVE
+            : "yield".equals(by)
+                ? AgentHarnessExit.DAEMON_YIELD
+                : killed(command) ? AgentHarnessExit.KILLED : AgentHarnessExit.SELF;
+    return new AgentHarnessExit(
+        owner == null ? null : owner.agentId(),
+        command.id(),
+        command.agentType(),
+        command.status() == null ? null : command.status().name(),
+        command.exitCode(),
+        stoppedBy,
+        at);
+  }
+
+  /** The one INFO line every agent exit gets; a seam so a test can read it. */
   static String exitLine(Command command, Owner owner) {
     String agent = owner == null || owner.agentId() == null ? "(none)" : owner.agentId();
     String stopped =

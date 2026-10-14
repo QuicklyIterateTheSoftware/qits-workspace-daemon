@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -467,9 +468,79 @@ class DaemonCodecTest {
 
   @Test
   void agentWorktreesLandedAtCapabilityTen() {
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 10);
+  }
+
+  @Test
+  void theHarnessExitLandedAtCapabilityEleven() {
     // A literal: the host records it, and a capability that moved without this line moving is a
     // contract nobody re-read.
-    assertEquals(10, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals(11, DaemonProtocol.CAPABILITY_VERSION);
+  }
+
+  @Test
+  void aHarnessExitRoundTripsWithItsSevenKeys() {
+    AgentHarnessExit exit =
+        new AgentHarnessExit(
+            "agent-1",
+            "cmd-1",
+            "claude",
+            "TERMINATED",
+            143,
+            AgentHarnessExit.DAEMON_REMOVE,
+            Instant.ofEpochMilli(1_760_000_000_123L));
+    assertEquals(exit, roundTrip(exit));
+    assertEquals(
+        Map.of(
+            "type", "agentHarnessExit",
+            "agentId", "agent-1",
+            "commandId", "cmd-1",
+            "agentType", "claude",
+            "status", "TERMINATED",
+            "exitCode", 143,
+            "stoppedBy", "DAEMON_REMOVE",
+            "at", 1_760_000_000_123L),
+        DaemonCodec.encode(exit));
+  }
+
+  @Test
+  void aHarnessExitWithNoAgentAndNoExitCodeDecodesThemAsNull() {
+    // The sign-in terminal is no agent's, and a command can settle with no code recorded.
+    AgentHarnessExit exit =
+        new AgentHarnessExit(
+            null, "cmd-2", "kimi", "FAILED", null, AgentHarnessExit.SELF, Instant.ofEpochMilli(7));
+    AgentHarnessExit decoded = (AgentHarnessExit) roundTrip(exit);
+    assertEquals(exit, decoded);
+    assertNull(decoded.agentId());
+    assertNull(decoded.exitCode());
+  }
+
+  @Test
+  void theStoppedByWordsAreTheFourTheHostMapsByName() {
+    assertEquals(
+        List.of("DAEMON_REMOVE", "DAEMON_YIELD", "KILLED", "SELF"),
+        List.of(
+            AgentHarnessExit.DAEMON_REMOVE,
+            AgentHarnessExit.DAEMON_YIELD,
+            AgentHarnessExit.KILLED,
+            AgentHarnessExit.SELF));
+  }
+
+  @Test
+  void aBackendThatPredatesTheHarnessExitRefusesItAsAnUnknownTypeNotSomethingElse() {
+    // Why the daemon sends the frame ungated (it has no gate: Ack carries no version). A backend on
+    // 10 meets a type its decoder's switch has no arm for, and DaemonCodec's default arm throws an
+    // IllegalArgumentException — a RuntimeException, which DaemonControlSocket.onMessage catches,
+    // logs at DEBUG and returns from, keeping the connection. Played here with the frame's wire map
+    // minus the one thing a 10 decoder lacks: its tag, swapped for one no version has ever known.
+    AgentHarnessExit exit =
+        new AgentHarnessExit(
+            "agent-1", "cmd-1", "claude", "EXITED", 0, AgentHarnessExit.SELF, Instant.EPOCH);
+    Map<String, Object> wire = new java.util.HashMap<>(DaemonCodec.encode(exit));
+    wire.put(DaemonProtocol.Field.TYPE, "agentHarnessExitAsAnOlderDecoderSeesIt");
+    RuntimeException refused =
+        assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(wire));
+    assertTrue(refused.getMessage().contains("unknown workspace-daemon message type"));
   }
 
   @Test

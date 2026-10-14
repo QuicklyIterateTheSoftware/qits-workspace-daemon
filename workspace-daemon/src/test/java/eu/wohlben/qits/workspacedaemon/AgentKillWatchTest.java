@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentHarnessExit;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentEvent;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -164,7 +165,8 @@ class AgentKillWatchTest {
                 case "finished", "killed" -> new AgentKillWatch.Owner("agent-2", null);
                 default -> null;
               };
-            });
+            },
+            exit -> {});
     CommandLifecycleService lifecycle = new CommandLifecycleService(store, watch::commandsChanged);
     launch(lifecycle, "removed", "claude");
     launch(lifecycle, "finished", "claude");
@@ -193,6 +195,66 @@ class AgentKillWatchTest {
     assertTrue(
         AgentKillWatch.exitLine(store.find("sign-in").orElseThrow(), null)
             .startsWith("agent (none)'s"));
+  }
+
+  @Test
+  void everySettledAgentExitSendsExactlyOneFrameNamingWhatEndedIt() throws IOException {
+    oomKills(0);
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    AgentKillWatch watch =
+        new AgentKillWatch(
+            store,
+            new CgroupMemory(cgroup),
+            (id, event, code, message) -> reported.add(id + "=" + event + ":" + code),
+            id ->
+                switch (id) {
+                  case "removed" -> new AgentKillWatch.Owner("agent-1", "remove");
+                  case "yielded" -> new AgentKillWatch.Owner("agent-2", "yield");
+                  case "killed", "finished" -> new AgentKillWatch.Owner("agent-3", null);
+                  default -> null;
+                },
+            sent::add);
+    CommandLifecycleService lifecycle = new CommandLifecycleService(store, watch::commandsChanged);
+    launch(lifecycle, "removed", "claude");
+    launch(lifecycle, "yielded", "claude");
+    launch(lifecycle, "killed", "claude");
+    launch(lifecycle, "finished", "kimi");
+    launch(lifecycle, "sign-in", "claude");
+    launch(lifecycle, "shell", null);
+
+    lifecycle.markTerminated("removed", 137); // the grace ran out: still the daemon's remove
+    lifecycle.markTerminated("yielded", 143);
+    lifecycle.markExited("killed", 137);
+    lifecycle.markExited("finished", 0);
+    lifecycle.markExited("sign-in", 1);
+    lifecycle.markExited("shell", 0);
+    launch(lifecycle, "later", "claude"); // the list changes again: nothing is sent twice
+
+    assertEquals(
+        List.of(
+            "agent-1 removed claude TERMINATED 137 " + AgentHarnessExit.DAEMON_REMOVE,
+            "agent-2 yielded claude TERMINATED 143 " + AgentHarnessExit.DAEMON_YIELD,
+            "agent-3 killed claude EXITED 137 " + AgentHarnessExit.KILLED,
+            "agent-3 finished kimi EXITED 0 " + AgentHarnessExit.SELF,
+            "null sign-in claude EXITED 1 " + AgentHarnessExit.SELF),
+        sent.stream()
+            .map(
+                e ->
+                    e.agentId()
+                        + " "
+                        + e.commandId()
+                        + " "
+                        + e.agentType()
+                        + " "
+                        + e.status()
+                        + " "
+                        + e.exitCode()
+                        + " "
+                        + e.stoppedBy())
+            .toList());
+    assertTrue(sent.stream().allMatch(e -> e.at() != null), sent.toString());
+    // The kill's own ENDED path is untouched, and still only for the kill.
+    assertEquals(List.of("killed=" + AgentEvent.KILLED + ":137"), reported);
   }
 
   @Test

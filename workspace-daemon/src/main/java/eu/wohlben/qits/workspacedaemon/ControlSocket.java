@@ -24,6 +24,7 @@ import eu.wohlben.qits.commands.ActionResolver;
 import eu.wohlben.qits.workspacedaemon.detection.DeclaredFramework;
 import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import eu.wohlben.qits.workspacedaemon.protocol.AgentBranchPushed;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentHarnessExit;
 import eu.wohlben.qits.workspacedaemon.protocol.ConfigView;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonCodec;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
@@ -602,7 +603,11 @@ public class ControlSocket {
     CommandLogService logs = new CommandLogService(store, null);
     AgentKillWatch kills =
         new AgentKillWatch(
-            store, new CgroupMemory(CgroupMemory.CONTAINER), this::reportKill, this::exitOwner);
+            store,
+            new CgroupMemory(CgroupMemory.CONTAINER),
+            this::reportKill,
+            this::exitOwner,
+            this::send);
     CommandLifecycleService lifecycle =
         new CommandLifecycleService(
             store,
@@ -1128,7 +1133,8 @@ public class ControlSocket {
    * during a reconnect), buffer it for {@link #flushPending}: <b>terminal</b> events always buffer;
    * streamed clone chunks buffer only up to {@link #PENDING_OUTBOUND_CAP}, then drop (the outcome,
    * not the log tail, is what the host needs). {@link AgentBranchPushed} always buffers too: it is
-   * the only report of a push, and the host keeps an agent's branch list from it.
+   * the only report of a push, and the host keeps an agent's branch list from it; {@link
+   * AgentHarnessExit} likewise, as the only report of a harness exit.
    */
   private void send(DaemonMessage message) {
     synchronized (sendLock) {
@@ -1143,6 +1149,7 @@ public class ControlSocket {
           message instanceof Provisioned
               || message instanceof ProvisionFailed
               || message instanceof AgentBranchPushed
+              || message instanceof AgentHarnessExit
               || (message instanceof AgentActivity activity && activity.exitCode() != null);
       if (terminal || pendingOutbound.size() < PENDING_OUTBOUND_CAP) {
         pendingOutbound.offer(message);
