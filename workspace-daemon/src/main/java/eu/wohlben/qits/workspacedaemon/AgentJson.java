@@ -45,8 +45,9 @@ final class AgentJson {
    * effort concept at all) and they change when the image is rebuilt. So they are read off the
    * binaries — once, at container start, off this request path — and answered here, where
    * qits-projects caches them keyed by harness and {@code imageVersion} and the editor reads the
-   * cache. No request path shells out, and a rebuilt image refreshes the catalogue the first time a
-   * container on it starts.
+   * cache. A rebuilt image refreshes the catalogue the first time a container on it starts. Sign-in
+   * alone is re-read on the request path, cached for seconds, because a person signs in long after
+   * boot ({@link HarnessAuthOverlay}, qits-1269).
    *
    * <p>{@code capabilities} is empty until the boot probe lands, and stays empty if it failed
    * outright. That is a cache miss to the host, which keeps whatever it had — an honest "nothing

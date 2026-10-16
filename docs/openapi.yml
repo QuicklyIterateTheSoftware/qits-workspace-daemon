@@ -284,7 +284,9 @@ paths:
         and whether anybody is signed in on the shared credential volume. It is produced by running
         the binaries **once at container start**, never on this request path: the binaries live in
         the image and the editor that needs them is a platform-wide route with no container in
-        front of it. qits-projects caches this keyed by harness and `imageVersion`.
+        front of it. qits-projects caches this keyed by harness and `imageVersion`. The one
+        exception is `authenticated`/`authDetail`, re-read from the credential volume at most every
+        ten seconds and after any command exits, so a sign-in shows without a container restart.
       responses:
         "200":
           description: The harnesses.

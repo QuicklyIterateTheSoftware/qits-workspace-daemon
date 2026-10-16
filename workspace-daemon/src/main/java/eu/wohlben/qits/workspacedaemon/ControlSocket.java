@@ -635,6 +635,11 @@ public class ControlSocket {
               kills.commandsChanged();
               // Closes a finished command's terminal and chat sockets with 1000 (qits-1265).
               workspaceApi.commandsChanged();
+              // A sign-in terminal that just exited may have signed a harness in (qits-1269).
+              HarnessAuthOverlay auth = harnessAuth;
+              if (auth != null) {
+                auth.invalidate();
+              }
             });
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
     commands = commandRegistry;
@@ -696,6 +701,7 @@ public class ControlSocket {
     this.transcriptTail = tail;
     AgentAuthStatus authStatus =
         new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
+    harnessAuth = new HarnessAuthOverlay(() -> harnessCapabilities, authStatus);
     // One platform server, qits, plus the image's browser. See WorkspaceMcpServers.
     // Only the sign-in terminal's service carries no token at all: it attaches no MCP server.
     // Every agent's carries the agent's own token (below), never the workspace's, so a harness
@@ -742,7 +748,7 @@ public class ControlSocket {
             processes, context, defaults, claudeMount, WORKSPACE_DIR.toPath()),
         defaults,
         imageVersion(),
-        () -> harnessCapabilities);
+        harnessAuth);
     reportHarnessCapabilities(
         new HarnessCapabilityService(processes, authStatus, claudeMount, WORKSPACE_DIR.toPath()));
     LOG.infof("workspace-daemon coding-agents API wired for workspace %s", workspaceId);
@@ -842,7 +848,8 @@ public class ControlSocket {
    * editor cannot do it itself — the binaries live in this image and the editor is a platform-wide
    * route with no container in front of it. The host caches what this answers, keyed by harness and
    * image version, and a rebuilt image refreshes the catalogue the first time a container on it
-   * starts.
+   * starts. Sign-in is the exception: {@link HarnessAuthOverlay} re-reads it live over this report
+   * (qits-1269), because a person can sign in long after boot.
    *
    * <p><b>Not on the boot thread, and a failure never reaches it.</b> Two process spawns before the
    * socket is dialled would delay every container's dial-home for the sake of a dropdown, and a
@@ -929,8 +936,16 @@ public class ControlSocket {
    * What the harnesses in this image reported, or empty until the boot probe lands (and if it
    * failed). Volatile rather than guarded: one writer at boot, many readers on the API's worker
    * threads, and a reader that sees the empty list one request early costs the host a cache miss.
+   * Its sign-in fields are boot-time; {@link #harnessAuth} is what serves them live.
    */
   private volatile List<HarnessCapabilities> harnessCapabilities = List.of();
+
+  /**
+   * {@link #harnessCapabilities} with each harness's sign-in re-read live, as {@code GET
+   * /agents/available} serves it. Null until the agents are wired; the command lifecycle drops its
+   * cache so a sign-in terminal's exit shows on the next read.
+   */
+  private volatile HarnessAuthOverlay harnessAuth;
 
   private volatile AgentTranscriptTailService transcriptTail;
 

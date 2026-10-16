@@ -307,9 +307,11 @@ public class WorkspaceApi {
   private volatile String imageVersion = "";
 
   /**
-   * The boot-time harness capability reports, read through a supplier because the probe runs off the
-   * boot thread and lands after this surface is wired. A request that arrives first gets an empty
-   * list — an honest "nothing reported yet", which the host reads as a cache miss.
+   * The harness capability reports, read through a supplier because the probe runs off the boot
+   * thread and lands after this surface is wired. A request that arrives first gets an empty list —
+   * an honest "nothing reported yet", which the host reads as a cache miss. Everything but sign-in
+   * is the boot probe's; {@link ControlSocket} supplies sign-in re-read live ({@link
+   * HarnessAuthOverlay}).
    */
   private volatile java.util.function.Supplier<List<HarnessCapabilities>> harnessCapabilities =
       List::of;

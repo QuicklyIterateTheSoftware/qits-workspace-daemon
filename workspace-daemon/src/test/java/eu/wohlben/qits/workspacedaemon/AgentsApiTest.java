@@ -469,6 +469,50 @@ class AgentsApiTest {
   }
 
   @Test
+  void aSignInAfterBootShowsOnTheNextReadWithoutARestart() throws Exception {
+    // qits-1269: the boot report said nobody was signed in to kimi, and kept saying so until the
+    // container restarted. The volume is read on every request here (no TTL), as ControlSocket's
+    // overlay does once its cache lapses or a command exits.
+    Path kimiCredentials = claudeMount.resolve(".kimi-code/credentials/kimi-code.json");
+    ProcessRunner volume =
+        (command, cwd, env, timeout) ->
+            new ProcessRunner.Result(
+                command.get(0).equals("bash") && !Files.exists(kimiCredentials) ? 1 : 0,
+                "",
+                "",
+                false);
+    HarnessAuthOverlay overlay =
+        new HarnessAuthOverlay(
+            () -> CAPABILITIES,
+            new eu.wohlben.qits.agents.AgentAuthStatus(volume, claudeMount.toString(), root),
+            java.time.Duration.ZERO,
+            System::nanoTime);
+    api.wireAgents(
+        runtime,
+        launch,
+        new AgentSessionQueryService(store, sessionStore),
+        new AgentPluginService(PROCESSES, claudeMount.toString(), root, DEFAULTS),
+        new PromptRefinementService(PROCESSES, WORKSPACE, DEFAULTS, claudeMount.toString(), root),
+        DEFAULTS,
+        IMAGE_VERSION,
+        overlay);
+
+    JsonObject before =
+        get("/agents/available").body().getJsonArray("capabilities").getJsonObject(1);
+    assertEquals("KIMI", before.getString("harness"));
+    assertEquals(false, before.getBoolean("authenticated"));
+
+    Files.createDirectories(kimiCredentials.getParent());
+    Files.writeString(kimiCredentials, "{}");
+
+    JsonObject after =
+        get("/agents/available").body().getJsonArray("capabilities").getJsonObject(1);
+    assertEquals(true, after.getBoolean("authenticated"));
+    assertEquals("Signed in on the shared credential volume.", after.getString("authDetail"));
+    assertEquals(true, after.getBoolean("probeFailed"), "only sign-in is re-read");
+  }
+
+  @Test
   void sessionTreeUsesTheHostsAgentSessionNodeFieldNames() throws Exception {
     lifecycle.createRunning(
         "main",
