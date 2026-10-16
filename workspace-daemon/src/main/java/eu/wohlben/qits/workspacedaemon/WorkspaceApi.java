@@ -286,6 +286,9 @@ public class WorkspaceApi {
   private volatile CommandRegistry registry;
   private volatile WorkspaceContext workspaceContext;
 
+  /** The terminal and chat sockets attached to live commands; null until commands are wired. */
+  private volatile CommandSockets sockets;
+
   /** The agents, wired alongside commands; null until then — every agent route answers 503. */
   private volatile AgentRuntime agents;
 
@@ -320,6 +323,33 @@ public class WorkspaceApi {
     this.commands = commands;
     this.registry = registry;
     this.workspaceContext = workspaceContext;
+    this.sockets = new CommandSockets(registry, commandId -> ended(commands, commandId));
+  }
+
+  /**
+   * The command list changed. Must be wired to the commands lifecycle's change listener — it is what
+   * closes a command's sockets cleanly once its process has exited (see {@link CommandSockets}).
+   * Runs on capture and reader threads, and does not block.
+   */
+  void commandsChanged() {
+    CommandSockets wired = sockets;
+    if (wired != null) {
+      wired.commandsChanged();
+    }
+  }
+
+  /** The attached sockets, for tests; null until commands are wired. */
+  CommandSockets sockets() {
+    return sockets;
+  }
+
+  /** A command no longer recorded was evicted, and only finished commands are. */
+  private static boolean ended(CommandService commands, String commandId) {
+    try {
+      return !commands.get(commandId).isRunning();
+    } catch (CommandNotFoundException evicted) {
+      return true;
+    }
   }
 
   /**
@@ -406,7 +436,15 @@ public class WorkspaceApi {
                     handshake,
                     registry != null && authorized(handshake.headers()),
                     route(handshake.path())))
-        .webSocketHandler(socket -> CommandSockets.attach(socket, registry, route(socket.path())))
+        .webSocketHandler(
+            socket -> {
+              CommandSockets wired = sockets;
+              if (wired == null) {
+                socket.close();
+              } else {
+                wired.attach(socket, route(socket.path()));
+              }
+            })
         .listen(port, bindAddress);
   }
 

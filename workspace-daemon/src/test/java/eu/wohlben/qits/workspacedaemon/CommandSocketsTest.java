@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -105,14 +106,27 @@ class CommandSocketsTest {
         new CommandService(
             store,
             registry,
-            new CommandLifecycleService(store, null),
+            // Wired as ControlSocket wires it: the lifecycle's change listener is what tells the
+            // sockets a command has ended.
+            new CommandLifecycleService(store, api::commandsChanged),
             new CommandLogService(store, null),
             WORKSPACE,
             new DeclaredActions(
                 List.of(
                     // `cat` echoes whatever is typed straight back, which is the simplest possible
                     // proof that a keystroke crossed the socket and reached the PTY.
-                    new ActionResolver.ResolvedAction("echo", "Echo", "cat", true, Map.of()))));
+                    new ActionResolver.ResolvedAction("echo", "Echo", "cat", true, Map.of()),
+                    // Waits for a line, says its last words and exits: a command that ends while
+                    // a socket is attached, on the test's cue.
+                    new ActionResolver.ResolvedAction(
+                        "last-words",
+                        "Last words",
+                        "read line; printf 'last words\\n'; exit 0",
+                        true,
+                        Map.of()),
+                    // Ends at once, so an attach races the exit.
+                    new ActionResolver.ResolvedAction(
+                        "quick", "Quick", "printf 'quick\\n'", true, Map.of()))));
     api.wireCommands(commands, registry, WORKSPACE);
     await(api.listen(vertx, "127.0.0.1", 0, TOKEN, null, List::of));
     port = api.actualPort();
@@ -237,6 +251,53 @@ class CommandSocketsTest {
 
   @Test
   @Timeout(60)
+  void theCommandEndingClosesAnAttachedTerminalCleanlyAfterItsLastOutput() throws Exception {
+    String commandId = launch("last-words");
+    List<String> received = new CopyOnWriteArrayList<>();
+    CompletableFuture<Short> closed = new CompletableFuture<>();
+    List<String> receivedAtClose = new CopyOnWriteArrayList<>();
+
+    WebSocket socket =
+        connect(
+            "/terminal/commands/" + commandId,
+            "Bearer " + TOKEN,
+            received,
+            code -> {
+              receivedAtClose.addAll(received);
+              closed.complete(code);
+            });
+    socket.writeTextMessage(new JsonObject().put("type", "data").put("data", "go\n").encode());
+
+    assertEquals(
+        (short) 1000,
+        closed.get(30, TimeUnit.SECONDS),
+        "a clean close is the client's cue that the command is over, not to reconnect");
+    assertTrue(
+        String.join("", receivedAtClose).contains("last words"),
+        "the process's final output must reach the client before the close: " + receivedAtClose);
+    assertEquals("EXITED", commands.get(commandId).status().name());
+    assertEquals(0, api.sockets().attachedCommands(), "a closed socket leaves nothing behind");
+  }
+
+  @Test
+  @Timeout(60)
+  void aSocketAttachingAsTheCommandEndsIsStillClosedCleanly() throws Exception {
+    // Whichever side of the exit the attach lands on — live, mid-exit, or after — the socket must
+    // end with a clean close rather than hang open on a process that is gone.
+    for (int i = 0; i < 10; i++) {
+      String commandId = launch("quick");
+      CompletableFuture<Short> closed = new CompletableFuture<>();
+      connect(
+          "/terminal/commands/" + commandId,
+          "Bearer " + TOKEN,
+          new CopyOnWriteArrayList<>(),
+          closed::complete);
+      assertEquals((short) 1000, closed.get(30, TimeUnit.SECONDS), "attempt " + i);
+    }
+  }
+
+  @Test
+  @Timeout(60)
   void attachingToAFinishedCommandSaysSoInEachSocketsOwnDialect() throws Exception {
     List<String> terminal = new CopyOnWriteArrayList<>();
     connect("/terminal/commands/never-existed", "Bearer " + TOKEN, terminal);
@@ -291,6 +352,16 @@ class CommandSocketsTest {
    */
   private WebSocket connect(String path, String authorization, List<String> frames)
       throws Exception {
+    return connect(path, authorization, frames, code -> {});
+  }
+
+  /** As above, also reporting the close status code the server closed with. */
+  private WebSocket connect(
+      String path,
+      String authorization,
+      List<String> frames,
+      java.util.function.Consumer<Short> onClose)
+      throws Exception {
     WebSocketConnectOptions options =
         new WebSocketConnectOptions().setHost("127.0.0.1").setPort(port).setURI(path);
     if (authorization != null) {
@@ -304,6 +375,7 @@ class CommandSocketsTest {
                 .map(
                     socket -> {
                       socket.textMessageHandler(frames::add);
+                      socket.closeHandler(ignored -> onClose.accept(socket.closeStatusCode()));
                       return socket;
                     })
                 .onComplete(promise));

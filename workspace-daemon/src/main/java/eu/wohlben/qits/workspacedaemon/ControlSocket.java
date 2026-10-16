@@ -633,6 +633,8 @@ public class ControlSocket {
             () -> {
               nudge(WorkspaceChangeTopic.COMMANDS);
               kills.commandsChanged();
+              // Closes a finished command's terminal and chat sockets with 1000 (qits-1265).
+              workspaceApi.commandsChanged();
             });
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
     commands = commandRegistry;

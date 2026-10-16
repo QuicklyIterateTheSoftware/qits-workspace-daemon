@@ -1890,6 +1890,13 @@ x-websockets:
     dialect and then a close — the caller's cue to fall back to `GET /commands/{id}/log` rather
     than wait forever on a stream that will never speak.
 
+    **The command ending ends the attach.** A socket attached to a live command is closed by the
+    server with a clean `1000` once the command's process exits — after its final output has been
+    written to the socket, so the last chunk always arrives before the close. A socket that
+    attaches just as the command ends gets the same clean close rather than hanging open. A clean
+    server close therefore always means the command is over: treat it as final, and any other
+    close as a cue to reconnect.
+
   channels:
 
     terminal:
