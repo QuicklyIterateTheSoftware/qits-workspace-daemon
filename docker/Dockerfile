@@ -39,13 +39,17 @@
 #     cd ../../services/qits-workspaces
 #     ./mvnw test -pl service -Dtest=DaemonApiGateIT -Dsurefire.failIfNoSpecifiedTests=false \
 #       -Dqits.workspace.image=qits/workspace:native
-ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.1016.123855
+# The platform's public domain. Global (declared before the first FROM) so the WORKSPACE_BASE
+# default below, and every FROM line, can read it; the release recipes pass
+# `--opt build-arg:QITS_DOMAIN`.
+ARG QITS_DOMAIN=wohlben.eu
+ARG WORKSPACE_BASE=registry.qits.${QITS_DOMAIN}/qits/workspace-base:2026.1016.123855
 
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `mirror.dev.localhost:8080/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the
+# `mirror.qits.$QITS_DOMAIN/quay/…` is qits-mirror's pull-through mirror of quay.io: the
 # first build fetches the image from upstream and caches it, every later build is served from local
 # disk. The tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when
 # quay moves it.
@@ -56,7 +60,7 @@ ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.1016.123
 # `docker build` the host daemon resolves them as it always did — one committed spelling, two
 # resolvers. The compile below resolves from Maven Central, plus the platform's own registry for the
 # one coordinate that is not there — the shared coding-agent harness; see QITS_DOMAIN further down.
-FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
+FROM mirror.qits.${QITS_DOMAIN}/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
 
