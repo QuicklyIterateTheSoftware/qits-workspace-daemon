@@ -1,0 +1,5 @@
+{
+  "error": "not-signed-in",
+  "agentType": "CLAUDE",
+  "message": "Nobody has signed Claude Code in on this platform's shared credential volume, so this session cannot start. Open the Claude Code sign-in terminal to complete it once for every container on the volume."
+}

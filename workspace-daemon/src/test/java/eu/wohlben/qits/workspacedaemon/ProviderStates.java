@@ -109,6 +109,21 @@ final class ProviderStates implements AutoCloseable {
   /** No agent; the credential volume records one plugin enabled and one switched off. */
   static final String PLUGINS_INSTALLED = "a workspace daemon with plugins installed";
 
+  /**
+   * {@link #AGENT_ID} running, its wrapper worktree holding uncommitted files ({@link
+   * #writeFiles}): the cleanup check says what would be lost, and a removal that is not forced is
+   * refused with it (qits-1149: what qits-workspaces' cleanup and discard branch on).
+   */
+  static final String AGENT_WITH_LEFTOVER_WORK =
+      "a workspace daemon with an agent whose worktree holds uncommitted work";
+
+  /**
+   * {@link #AGENT_ID} running with a clean worktree, its harness still working by its hooks (a
+   * background subagent after the main turn ended, qits-1233): the cleanup check says {@code busy}
+   * and a removal that is not forced is refused.
+   */
+  static final String AGENT_BUSY = "a workspace daemon with an agent busy in the background";
+
   /** Every state, in one place, for the verification's guard. */
   private static final Set<String> NAMES =
       Set.of(
@@ -119,7 +134,9 @@ final class ProviderStates implements AutoCloseable {
           AGENT_WITH_TRANSCRIPT,
           AGENT_WITH_FILES,
           AGENT_WITH_IGNORED_DIRECTORY,
-          PLUGINS_INSTALLED);
+          PLUGINS_INSTALLED,
+          AGENT_WITH_LEFTOVER_WORK,
+          AGENT_BUSY);
 
   /** The row id qits-workspaces keys the container on. */
   static final String WORKSPACE_ROW_ID = "1";
@@ -265,6 +282,12 @@ final class ProviderStates implements AutoCloseable {
   private volatile boolean signedIn = true;
 
   /**
+   * Whether the running harness has work in flight by its hooks — {@code HookWebhook#inFlight} in a
+   * real daemon. {@link #AGENT_BUSY} sets it; every other state leaves it false.
+   */
+  private volatile boolean harnessBusy = false;
+
+  /**
    * Every binary the daemon shells, played rather than run. {@code claude auth status} answers what
    * {@link #signedIn} says; {@code claude plugin install <id>@<marketplace>} records the plugin on
    * the volume's {@code settings.json} the way the CLI does; anything else — the refinement call —
@@ -360,7 +383,9 @@ final class ProviderStates implements AutoCloseable {
                     WORKSPACE,
                     claudeMount.toString(),
                     HOOKS_PORT),
-            claudeMount.toString());
+            claudeMount.toString(),
+            TerminalTurnGate.DEFAULT_TIMEOUT,
+            commandId -> harnessBusy);
     api.wireCommands(commands, registry, WORKSPACE);
     api.wireAgents(
         runtime,
@@ -423,7 +448,12 @@ final class ProviderStates implements AutoCloseable {
         importTranscript(commandId);
         yield params(commandId);
       }
-      case AGENT_WITH_FILES, AGENT_WITH_IGNORED_DIRECTORY -> {
+      case AGENT_BUSY -> {
+        String commandId = startAgent(AgentLaunchMode.INTERACTIVE);
+        harnessBusy = true;
+        yield params(commandId);
+      }
+      case AGENT_WITH_FILES, AGENT_WITH_IGNORED_DIRECTORY, AGENT_WITH_LEFTOVER_WORK -> {
         String commandId = startAgent(AgentLaunchMode.INTERACTIVE);
         writeFiles(worktrees.wrapperDir(AGENT_ID));
         yield params(commandId);

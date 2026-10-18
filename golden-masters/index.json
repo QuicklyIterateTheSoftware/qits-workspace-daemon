@@ -46,6 +46,31 @@
             "numbers": [],
             "listFilteredTo": null
           }
+        },
+        {
+          "operationId": "startAgentWorktree",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees",
+          "body": {
+            "agentId": "00000000-0000-4000-8000-0000000000a1",
+            "workId": "00000000-0000-4000-8000-000000000001",
+            "entityId": "contract-00000001-10",
+            "wrapperBranch": "ticket/contract-00000001-10",
+            "harness": "CLAUDE",
+            "env": {},
+            "surface": "ticket.dispatch",
+            "mode": "INTERACTIVE",
+            "instruction": "Work the ticket."
+          },
+          "status": 409,
+          "file": "a-workspace-daemon-with-a-harness-nobody-signed-in/startAgentWorktree.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
         }
       ]
     },
@@ -59,11 +84,42 @@
       "dependsOn": [],
       "operations": [
         {
+          "operationId": "agentCleanupCheck",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/cleanup-check",
+          "status": 404,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/agentCleanupCheck.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "availableAgents",
           "method": "GET",
           "path": "/workspaces/container/{workspaceRowId}/agents/available",
           "status": 200,
           "file": "a-workspace-daemon-with-a-signed-in-harness/availableAgents.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "deliverAgentTurn",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/turn",
+          "body": {
+            "text": "Carry on."
+          },
+          "status": 404,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/deliverAgentTurn.json",
           "frozen": {
             "ids": [],
             "instants": [],
@@ -105,6 +161,39 @@
           }
         },
         {
+          "operationId": "removeAgentWorktree",
+          "method": "DELETE",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
+          "status": 404,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/removeAgentWorktree.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "setAgentEntity",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/entity",
+          "body": {
+            "title": "Fix the login",
+            "status": "IMPLEMENTING",
+            "blocked": false
+          },
+          "status": 404,
+          "file": "a-workspace-daemon-with-a-signed-in-harness/setAgentEntity.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "startAgentWorktree",
           "method": "POST",
           "path": "/workspaces/container/{workspaceRowId}/agent-worktrees",
@@ -131,6 +220,46 @@
             "strings": [
               "$.path"
             ],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent busy in the background",
+      "slug": "a-workspace-daemon-with-an-agent-busy-in-the-background",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "agentCleanupCheck",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/cleanup-check",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-busy-in-the-background/agentCleanupCheck.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "removeAgentWorktree",
+          "method": "DELETE",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
+          "status": 409,
+          "file": "a-workspace-daemon-with-an-agent-busy-in-the-background/removeAgentWorktree.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
             "numbers": [],
             "listFilteredTo": null
           }
@@ -457,6 +586,65 @@
           },
           "status": 200,
           "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-files/readFile.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "removeAgentWorktree",
+          "method": "DELETE",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
+          "query": {
+            "force": "true"
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-files/removeAgentWorktree.json",
+          "frozen": {
+            "ids": [
+              "$.agentId"
+            ],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent whose worktree holds uncommitted work",
+      "slug": "a-workspace-daemon-with-an-agent-whose-worktree-holds-uncommitted-work",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "agentCleanupCheck",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/cleanup-check",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-uncommitted-work/agentCleanupCheck.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "removeAgentWorktree",
+          "method": "DELETE",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}",
+          "status": 409,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-uncommitted-work/removeAgentWorktree.json",
           "frozen": {
             "ids": [],
             "instants": [],

@@ -141,7 +141,91 @@ class GoldenMasterRecordingTest {
             AGENT,
             Map.of(),
             null,
-            200));
+            200),
+        // The answers DaemonAgentClient branches on besides an accepted call (qits-1149): a start
+        // refused because nobody signed the harness in (REFUSED), an agent the daemon does not
+        // know (UNKNOWN_AGENT, and a cleanup check's 404 that is not "No such endpoint"), leftover
+        // work and a busy harness refusing a removal (REFUSED and BUSY), and a forced removal.
+        new Interaction(
+            ProviderStates.SIGNED_OUT,
+            "startAgentWorktree",
+            "POST",
+            PREFIX + "/agent-worktrees",
+            Map.of(),
+            new JsonObject()
+                .put("agentId", ProviderStates.AGENT_ID)
+                .put("workId", ProviderStates.WORK_ID)
+                .put("entityId", ProviderStates.ENTITY_ID)
+                .put("wrapperBranch", ProviderStates.WRAPPER_BRANCH)
+                .put("harness", "CLAUDE")
+                .put("env", new JsonObject())
+                .put("surface", "ticket.dispatch")
+                .put("mode", "INTERACTIVE")
+                .put("instruction", "Work the ticket."),
+            409),
+        new Interaction(
+            ProviderStates.SIGNED_IN,
+            "deliverAgentTurn",
+            "POST",
+            AGENT + "/turn",
+            Map.of(),
+            new JsonObject().put("text", "Carry on."),
+            404),
+        new Interaction(
+            ProviderStates.SIGNED_IN,
+            "setAgentEntity",
+            "POST",
+            AGENT + "/entity",
+            Map.of(),
+            new JsonObject()
+                .put("title", "Fix the login")
+                .put("status", "IMPLEMENTING")
+                .put("blocked", false),
+            404),
+        new Interaction(
+            ProviderStates.SIGNED_IN,
+            "agentCleanupCheck",
+            "GET",
+            AGENT + "/cleanup-check",
+            Map.of(),
+            null,
+            404),
+        new Interaction(
+            ProviderStates.SIGNED_IN, "removeAgentWorktree", "DELETE", AGENT, Map.of(), null, 404),
+        new Interaction(
+            ProviderStates.AGENT_WITH_LEFTOVER_WORK,
+            "agentCleanupCheck",
+            "GET",
+            AGENT + "/cleanup-check",
+            Map.of(),
+            null,
+            200),
+        new Interaction(
+            ProviderStates.AGENT_WITH_LEFTOVER_WORK,
+            "removeAgentWorktree",
+            "DELETE",
+            AGENT,
+            Map.of(),
+            null,
+            409),
+        new Interaction(
+            ProviderStates.AGENT_WITH_FILES,
+            "removeAgentWorktree",
+            "DELETE",
+            AGENT,
+            Map.of("force", "true"),
+            null,
+            200),
+        new Interaction(
+            ProviderStates.AGENT_BUSY,
+            "agentCleanupCheck",
+            "GET",
+            AGENT + "/cleanup-check",
+            Map.of(),
+            null,
+            200),
+        new Interaction(
+            ProviderStates.AGENT_BUSY, "removeAgentWorktree", "DELETE", AGENT, Map.of(), null, 409));
   }
 
   /**

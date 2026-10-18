@@ -138,6 +138,16 @@ class ConsumerPactVerificationTest {
     return daemon.setUp(ProviderStates.PLUGINS_INSTALLED);
   }
 
+  @State(ProviderStates.AGENT_WITH_LEFTOVER_WORK)
+  Map<String, String> anAgentWithLeftoverWork() {
+    return daemon.setUp(ProviderStates.AGENT_WITH_LEFTOVER_WORK);
+  }
+
+  @State(ProviderStates.AGENT_BUSY)
+  Map<String, String> anAgentBusyInTheBackground() {
+    return daemon.setUp(ProviderStates.AGENT_BUSY);
+  }
+
   /** The daemon's loopback port, with the daemon token on every request. */
   static final class DaemonTarget extends HttpTestTarget {
 
