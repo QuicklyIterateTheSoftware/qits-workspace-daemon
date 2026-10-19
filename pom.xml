@@ -70,6 +70,11 @@
              daemon, test scope only. Released coordinate, exact pin; the maintenance bump moves
              it. -->
         <qits.landing-app-pacts-qits-workspace-daemon.version>2026.1014.212118</qits.landing-app-pacts-qits-workspace-daemon.version>
+        <!-- qits-1149: the two other consumers whose pacts name this daemon — qits-platform-access-cli
+             (`pacts/qits-platform-access-cli_qits-workspace-daemon.json`) and qits-workspaces-service's
+             proxy (`pacts/qits-workspaces-service_qits-workspace-daemon.json`). -->
+        <qits.platform-access-cli-pacts-qits-workspace-daemon.version>2026.1019.65035</qits.platform-access-cli-pacts-qits-workspace-daemon.version>
+        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1019.70413</qits.workspaces-service-pacts-qits-workspace-daemon.version>
     </properties>
 
     <dependencyManagement>
@@ -149,6 +154,20 @@
                 <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-landing-app-pacts-qits-workspace-daemon</artifactId>
                 <version>${qits.landing-app-pacts-qits-workspace-daemon.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Test scope at every declaration site: qits-platform-access-cli's consumer pact, verified by
+                     ConsumerPactVerificationTest. -->
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-platform-access-cli-pacts-qits-workspace-daemon</artifactId>
+                <version>${qits.platform-access-cli-pacts-qits-workspace-daemon.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Test scope at every declaration site: qits-workspaces-service's consumer pact, verified by
+                     ConsumerPactVerificationTest. -->
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-workspaces-service-pacts-qits-workspace-daemon</artifactId>
+                <version>${qits.workspaces-service-pacts-qits-workspace-daemon.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

@@ -29,9 +29,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
  *
  * <p>The pacts come off the test classpath ({@link ClasspathPactLoader}): a consumer publishes
  * {@code pacts/<consumer>_qits-workspace-daemon.json} in a jar, and this repository pins that jar
- * as a test dependency. <b>The landing app is the first consumer pinned</b>
- * ({@code qits-landing-app-pacts-qits-workspace-daemon}), so {@link ClasspathPactLoader#REQUIRED} is
- * true and an empty classpath now fails the build instead of passing silently.
+ * as a test dependency. <b>Three consumers are pinned</b>: the landing app ({@code
+ * qits-landing-app-pacts-qits-workspace-daemon}, ticket qits-1230), and qits-platform-access-cli
+ * and qits-workspaces-service's proxy ({@code qits-platform-access-cli-pacts-qits-workspace-daemon},
+ * {@code qits-workspaces-service-pacts-qits-workspace-daemon}, ticket qits-1149), so {@link
+ * ClasspathPactLoader#REQUIRED} is true and an empty classpath fails the build instead of passing
+ * silently.
  *
  * <p>Each interaction gets a fresh daemon ({@link ProviderStates}) on an ephemeral port, and every
  * request carries the daemon token, as qits-workspaces' proxy sends it: a consumer's pact does not

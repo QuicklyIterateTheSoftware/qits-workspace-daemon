@@ -125,6 +125,18 @@
             <artifactId>qits-landing-app-pacts-qits-workspace-daemon</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- qits-platform-access-cli's and qits-workspaces-service's pacts against this daemon
+                 (ticket qits-1149), verified the same way. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-platform-access-cli-pacts-qits-workspace-daemon</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-workspaces-service-pacts-qits-workspace-daemon</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
