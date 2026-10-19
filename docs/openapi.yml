@@ -328,6 +328,10 @@ paths:
       description: |
         Read from the volume's `settings.json` rather than by shelling the CLI. A volume with
         nothing ever installed answers `installed: []`, not an error.
+
+        With `agentId`, read from that agent's `qits-agent-config` checkout instead (qits-1382).
+      parameters:
+        - $ref: "#/components/parameters/AgentConfigAgentId"
       responses:
         "200":
           description: The installed set.
@@ -335,6 +339,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PluginList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: An `agentId` this workspace hosts no `qits-agent-config` checkout for.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
   /agent-plugins/{pluginId}/install:
@@ -350,7 +359,11 @@ paths:
         needs no follow-up read to see the result of what it just did.
 
         Claude Code only; asking for one under another harness is a `400`.
+
+        With `agentId`, the plugin is installed into the shared cache and enabled in that agent's
+        `qits-agent-config` checkout only, which is then committed and pushed (qits-1382).
       parameters:
+        - $ref: "#/components/parameters/AgentConfigAgentId"
         - name: pluginId
           in: path
           required: true
@@ -376,7 +389,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404":
           description: |
-            Any verb other than `install` under `/agent-plugins/{id}/`. There is no uninstall.
+            Any verb other than `install` under `/agent-plugins/{id}/`. There is no uninstall. Or an
+            `agentId` this workspace hosts no `qits-agent-config` checkout for.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -853,6 +867,15 @@ components:
         Required on both websocket handshakes as well.
 
   parameters:
+    AgentConfigAgentId:
+      name: agentId
+      in: query
+      required: false
+      schema: { type: string }
+      description: |
+        The agent whose `qits-agent-config` checkout the route works on (qits-1382). Absent means
+        the shared credential volume, as before.
+
     RelativePath:
       name: path
       in: query
@@ -1748,6 +1771,22 @@ components:
         blockSource:
           type: string
           description: Why it is blocked, as on `POST …/entity`.
+        agentConfig:
+          type: object
+          required: [repositoryId, repositoryPath]
+          description: |
+            The agent's `qits-agent-config` repository (qits-1382): checked out beside the worktree
+            on `wrapperBranch` and handed to a Claude harness as its config directory. Kept in
+            memory only, like `env`. Omit for none; a checkout that cannot be made launches without
+            one.
+          properties:
+            repositoryId:
+              type: string
+              description: The repository's row id; names it on the `AgentBranchPushed` frame.
+            repositoryPath:
+              type: string
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
+              description: "`<projectId>/<repoName>`, appended to the git base."
 
     AgentWorktreeStarted:
       type: object
