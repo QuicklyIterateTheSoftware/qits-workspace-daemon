@@ -1782,11 +1782,13 @@ components:
           properties:
             repositoryId:
               type: string
-              description: The repository's row id; names it on the `AgentBranchPushed` frame.
+              description: The repository's row id.
             repositoryPath:
               type: string
               pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
-              description: "`<projectId>/<repoName>`, appended to the git base."
+              description: |
+                `<projectId>/<repoName>`, appended to the git base; `<repoName>` names the
+                repository on the `AgentBranchPushed` frame.
 
     AgentWorktreeStarted:
       type: object

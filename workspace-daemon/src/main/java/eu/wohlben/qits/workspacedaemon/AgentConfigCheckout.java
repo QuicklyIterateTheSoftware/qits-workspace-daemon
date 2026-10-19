@@ -63,7 +63,13 @@ final class AgentConfigCheckout implements AutoCloseable {
   private static final Pattern QUALIFIED_ID = Pattern.compile("[A-Za-z][A-Za-z0-9]*-[0-9]+");
 
   /** What a start names: the repository row and its {@code <projectId>/<repoName>}. */
-  record AgentConfig(String repositoryId, String repositoryPath) {}
+  record AgentConfig(String repositoryId, String repositoryPath) {
+
+    /** The repository's name on the git host: the last segment of its path. */
+    String repositoryName() {
+      return repositoryPath.substring(repositoryPath.lastIndexOf('/') + 1);
+    }
+  }
 
   /** Whether {@code path} is a {@code <projectId>/<repoName>} the url may be built from. */
   static boolean validRepositoryPath(String path) {
@@ -316,9 +322,10 @@ final class AgentConfigCheckout implements AutoCloseable {
       return;
     }
     GitExec.Out sha = GitExec.git(agentDir(agentId), "--git-dir=" + git, "rev-parse", ref);
+    // By name, as every other push is: the host resolves it within the agent's project.
     emit.accept(
         new AgentBranchPushed(
-            agentId, agent.config().repositoryId(), agent.branch(), sha.line()));
+            agentId, agent.config().repositoryName(), agent.branch(), sha.line()));
   }
 
   /**

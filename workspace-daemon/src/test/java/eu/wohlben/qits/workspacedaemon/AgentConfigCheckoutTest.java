@@ -153,7 +153,10 @@ class AgentConfigCheckoutTest {
     assertEquals(
         "memory/MEMORY.md\nsettings.json\nskills/review/SKILL.md",
         line(origin, "ls-tree", "-r", "--name-only", BRANCH));
-    assertEquals(List.of(new AgentBranchPushed("agent-1", REPOSITORY_ID, BRANCH, head)), sent);
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-1", "qits-agent-config", BRANCH, head)),
+        sent,
+        "reported by name, which the host resolves within the agent's project");
     assertFalse(configs.dirty("agent-1"), "an untracked file outside the three paths is no work");
     assertTrue(Files.exists(tree.resolve("other.txt")), "and stays where it is");
   }

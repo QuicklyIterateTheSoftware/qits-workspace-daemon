@@ -307,11 +307,12 @@ check out deletes the partial directory and launches without one.
 
 A sync commits **only** `memory`, `skills` and `settings.json` (`chore(<workId>): agent memories,
 skills and plugins`) and pushes the branch with the agent's `QITS_TOKEN` when the git host lacks a
-commit, reporting `AgentBranchPushed` under `repositoryId`. It runs on every `IDLE` hook (a `Stop`)
-off the hook thread, on `POST /agent-plugins/{id}/install?agentId=`, and first in a removal, which
-then deletes the checkout. Unsynced changes or commits count in the cleanup check as dirty
-`qits-agent-config`. The plugin routes take `?agentId=` to read and write that agent's tree (404
-without one). After a daemon restart nothing is known until the next start says it again.
+commit, reporting `AgentBranchPushed` under the repository's name (the last segment of
+`repositoryPath`, which the host resolves within the agent's project). It runs on every `IDLE` hook
+(a `Stop`) off the hook thread, on `POST /agent-plugins/{id}/install?agentId=`, and first in a
+removal, which then deletes the checkout. Unsynced changes or commits count in the cleanup check as
+dirty `qits-agent-config`. The plugin routes take `?agentId=` to read and write that agent's tree
+(404 without one). After a daemon restart nothing is known until the next start says it again.
 
 ## Things that look wrong and are not
 
