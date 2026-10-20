@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import org.jboss.logging.Logger;
@@ -360,9 +362,27 @@ final class AgentConfigCheckout implements AutoCloseable {
     }
   }
 
+  /** Stops taking syncs and gives the one running a moment; see {@link #close(Duration)}. */
   @Override
   public void close() {
-    background.shutdownNow();
+    close(Duration.ofSeconds(2));
+  }
+
+  /**
+   * Stops taking syncs and waits up to {@code grace} for the one in flight, then interrupts it.
+   * Short in production, where the container's stop budget is already spent on the harnesses; a
+   * test waits longer, so no git process is still writing when its temporary directory goes.
+   */
+  void close(Duration grace) {
+    background.shutdown();
+    try {
+      if (!background.awaitTermination(grace.toMillis(), TimeUnit.MILLISECONDS)) {
+        background.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      background.shutdownNow();
+    }
   }
 
   /** Commits on {@code branch} that no {@code origin/*} ref has; 0 for an unborn branch. */

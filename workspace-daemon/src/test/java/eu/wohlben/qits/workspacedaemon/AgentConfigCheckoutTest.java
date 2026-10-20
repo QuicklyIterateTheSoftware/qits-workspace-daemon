@@ -10,6 +10,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.AgentBranchPushed;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,7 +53,7 @@ class AgentConfigCheckoutTest {
 
   @AfterEach
   void close() {
-    configs.close();
+    configs.close(Duration.ofSeconds(30));
   }
 
   /**
@@ -181,6 +182,11 @@ class AgentConfigCheckoutTest {
         tree,
         "--git-dir=" + gitDir(),
         "--work-tree=" + tree,
+        // Stated, never inherited: a CI image carries no git identity at all.
+        "-c",
+        "user.name=Agent",
+        "-c",
+        "user.email=agent@example.invalid",
         "commit",
         "--quiet",
         "-am",

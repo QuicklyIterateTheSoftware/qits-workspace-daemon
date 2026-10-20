@@ -209,7 +209,8 @@ class AgentsApiTest {
     }
     api.close();
     runtime.close();
-    configs.close();
+    // A route or a hook may have left a sync running; it must be done before the temp dirs go.
+    configs.close(java.time.Duration.ofSeconds(30));
     if (client != null) {
       client.close();
     }
@@ -1290,18 +1291,15 @@ class AgentsApiTest {
 
     runtime.onActivity(commandId, "IDLE");
 
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-    while (GitFixtures.git(origin, "branch", "--list", BRANCH).isBlank()) {
-      assertTrue(System.nanoTime() < deadline, "the Stop's sync never pushed");
-      Thread.sleep(25);
-    }
+    awaitBranch(origin);
     assertEquals(
         "- after a turn", GitFixtures.line(origin, "show", BRANCH + ":memory/MEMORY.md"));
   }
 
   @Test
+  @Timeout(60)
   void thePluginRoutesForAnAgentReadAndWriteItsCheckout() throws Exception {
-    AgentConfigCheckoutTest.seedOrigin(estateDir);
+    Path origin = AgentConfigCheckoutTest.seedOrigin(estateDir);
     post("/agent-worktrees", start("agent-1").put("agentConfig", agentConfig()));
     Files.writeString(
         configTree("agent-1").resolve("settings.json"),
@@ -1320,6 +1318,20 @@ class AgentsApiTest {
         Files.readString(configTree("agent-1").resolve("settings.json"))
             .contains("jdtls-lsp@claude-plugins-official"),
         "enabled in the agent's own settings, not the volume's");
+    awaitBranch(origin);
+    assertTrue(
+        GitFixtures.line(origin, "show", BRANCH + ":settings.json")
+            .contains("jdtls-lsp@claude-plugins-official"),
+        "and synced to the git host");
+  }
+
+  /** Waits until a background sync has pushed the agent's branch to {@code origin}. */
+  private static void awaitBranch(Path origin) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    while (GitFixtures.git(origin, "branch", "--list", BRANCH).isBlank()) {
+      assertTrue(System.nanoTime() < deadline, "the background sync never pushed");
+      Thread.sleep(25);
+    }
   }
 
   @Test
