@@ -14,6 +14,7 @@ import eu.wohlben.qits.agents.AgentSurface;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.EntityFacts;
 import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.agents.InstalledPluginDto;
 import eu.wohlben.qits.agents.PromptRefinementService;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStatus;
@@ -739,7 +740,33 @@ public class WorkspaceApi {
         json.getString("instruction"),
         surface(json.getString("surface")),
         parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
-        entityFacts(json));
+        entityFacts(json),
+        agentConfig(json));
+  }
+
+  /**
+   * The {@code qits-agent-config} repository a start may name (qits-1382); null when it names none.
+   * Both halves are required, and the path reaches a clone url, so it is held to {@code
+   * <projectId>/<repoName>} here at the boundary.
+   */
+  static AgentConfigCheckout.AgentConfig agentConfig(JsonObject json) {
+    Object raw = json.getValue("agentConfig");
+    if (raw == null) {
+      return null;
+    }
+    if (!(raw instanceof JsonObject config)
+        || !(config.getValue("repositoryId") instanceof String repositoryId)
+        || !(config.getValue("repositoryPath") instanceof String repositoryPath)
+        || repositoryId.isBlank()
+        || repositoryPath.isBlank()) {
+      throw new InvalidCommandRequestException(
+          "agentConfig must carry a repositoryId and a repositoryPath");
+    }
+    if (!AgentConfigCheckout.validRepositoryPath(repositoryPath)) {
+      throw new InvalidCommandRequestException(
+          "agentConfig.repositoryPath must be <projectId>/<repoName>");
+    }
+    return new AgentConfigCheckout.AgentConfig(repositoryId, repositoryPath);
   }
 
   /** The entity facts a start may carry; null when it carries none. */
@@ -906,6 +933,7 @@ public class WorkspaceApi {
       return;
     }
     Context context = vertx.getOrCreateContext();
+    String agentId = request.getParam("agentId");
     request
         .body()
         .onFailure(t -> respond(request, 400, WorkspaceJson.error("Could not read the request body")))
@@ -914,7 +942,7 @@ public class WorkspaceApi {
               try {
                 workers.execute(
                     () -> {
-                      Reply reply = dispatchAgent(method, path, body.toString());
+                      Reply reply = dispatchAgent(method, path, agentId, body.toString());
                       context.runOnContext(v -> respond(request, reply.status(), reply.body()));
                     });
               } catch (RejectedExecutionException shuttingDown) {
@@ -931,7 +959,7 @@ public class WorkspaceApi {
    * rather than declaring their own, so one mapping serves both surfaces and the frontend's error
    * handling does not fork.
    */
-  private Reply dispatchAgent(HttpMethod method, String path, String body) {
+  private Reply dispatchAgent(HttpMethod method, String path, String agentId, String body) {
     try {
       String repoId = workspaceContext.repoId();
       String workspaceId = workspaceContext.workspaceId();
@@ -962,9 +990,16 @@ public class WorkspaceApi {
             : new Reply(405, WorkspaceJson.error("Method not allowed"));
       }
       if (AGENT_PLUGINS_PATH.equals(path)) {
-        return method == HttpMethod.GET
-            ? new Reply(200, AgentJson.plugins(agentPlugins.listInstalled()))
-            : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        if (method != HttpMethod.GET) {
+          return new Reply(405, WorkspaceJson.error("Method not allowed"));
+        }
+        if (agentId == null) {
+          return new Reply(200, AgentJson.plugins(agentPlugins.listInstalled()));
+        }
+        Optional<Path> tree = configTree(agentId);
+        return tree.isEmpty()
+            ? noConfigCheckout(agentId)
+            : new Reply(200, AgentJson.plugins(agentPlugins.listFor(tree.get())));
       }
       if (path.startsWith(AGENT_PLUGINS_PATH + "/")) {
         String rest = path.substring(AGENT_PLUGINS_PATH.length() + 1);
@@ -972,7 +1007,17 @@ public class WorkspaceApi {
           return new Reply(404, WorkspaceJson.error("No such endpoint"));
         }
         String pluginId = rest.substring(0, rest.length() - "/install".length());
-        return new Reply(200, AgentJson.plugins(agentPlugins.install(pluginId)));
+        if (agentId == null) {
+          return new Reply(200, AgentJson.plugins(agentPlugins.install(pluginId)));
+        }
+        Optional<Path> tree = configTree(agentId);
+        if (tree.isEmpty()) {
+          return noConfigCheckout(agentId);
+        }
+        List<InstalledPluginDto> enabled =
+            agentPlugins.enableFor(tree.get(), pluginId);
+        agents.syncConfigLater(agentId);
+        return new Reply(200, AgentJson.plugins(enabled));
       }
       if (PROMPT_REFINEMENTS_PATH.equals(path)) {
         if (method != HttpMethod.POST) {
@@ -1005,6 +1050,21 @@ public class WorkspaceApi {
       LOG.errorf(e, "workspace-daemon agents API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
     }
+  }
+
+  /**
+   * An agent's config work tree, for the plugin routes' {@code agentId}: empty for an id that is
+   * not a safe name, an agent this workspace does not host, or one started without a checkout.
+   */
+  private Optional<Path> configTree(String agentId) {
+    return agents == null || !AgentWorktrees.validAgentId(agentId)
+        ? Optional.empty()
+        : agents.configTree(agentId);
+  }
+
+  private static Reply noConfigCheckout(String agentId) {
+    return new Reply(
+        404, WorkspaceJson.error("Agent " + agentId + " has no agent config checkout here"));
   }
 
   /**

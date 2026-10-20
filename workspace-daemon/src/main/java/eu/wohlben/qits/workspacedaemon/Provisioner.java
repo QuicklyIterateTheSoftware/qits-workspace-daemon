@@ -219,7 +219,7 @@ public final class Provisioner {
     return null;
   }
 
-  private static String trimTrailingSlash(String base) {
+  static String trimTrailingSlash(String base) {
     String out = base;
     while (out.length() > 1 && out.endsWith("/")) {
       out = out.substring(0, out.length() - 1);

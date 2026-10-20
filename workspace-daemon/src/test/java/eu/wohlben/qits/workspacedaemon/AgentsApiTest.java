@@ -116,6 +116,12 @@ class AgentsApiTest {
   private AgentWorktrees worktrees;
   private AgentRuntime runtime;
 
+  /** The agents' config checkouts, cloned from a {@code file://} origin under {@link #estateDir}. */
+  private AgentConfigCheckout configs;
+
+  /** The plugin ids a start installed into the shared cache, in order. */
+  private final List<String> pluginInstalls = new java.util.concurrent.CopyOnWriteArrayList<>();
+
   /**
    * The hooks the runtime asks whether a harness is busy; never bound, its {@code handle} seam is
    * driven directly.
@@ -203,6 +209,8 @@ class AgentsApiTest {
     }
     api.close();
     runtime.close();
+    // A route or a hook may have left a sync running; it must be done before the temp dirs go.
+    configs.close(java.time.Duration.ofSeconds(30));
     if (client != null) {
       client.close();
     }
@@ -255,6 +263,14 @@ class AgentsApiTest {
         new WorkspaceMcpServers(Optional.of(PLATFORM_MCP_URL), Optional.empty());
     CommandsAgentCommands shared = new CommandsAgentCommands(commands, registry, store);
     hooks = new HookWebhook(vertx, HOOKS_PORT, message -> {});
+    if (configs != null) {
+      configs.close();
+    }
+    configs =
+        new AgentConfigCheckout(
+            estateDir.resolve("workspace").resolve("agent-config"),
+            "file://" + estateDir,
+            message -> {});
     launch =
         new AgentLaunchService(
             shared, auth, transcripts, tail, defaults, mcp, WORKSPACE, claudeMount.toString(),
@@ -278,7 +294,19 @@ class AgentsApiTest {
                     HOOKS_PORT),
             claudeMount.toString(),
             TerminalTurnGate.DEFAULT_TIMEOUT,
-            hooks::inFlight);
+            hooks::inFlight,
+            configs,
+            new AgentRuntime.PluginCache() {
+              @Override
+              public Set<String> installedIds() {
+                return Set.of("already-there@claude-plugins-official");
+              }
+
+              @Override
+              public void install(String pluginId) {
+                pluginInstalls.add(pluginId);
+              }
+            });
     api.wireCommands(commands, registry, WORKSPACE);
     api.wireAgents(
         runtime,
@@ -1121,6 +1149,201 @@ class AgentsApiTest {
         400,
         post("/agent-worktrees", start("agent-1").put("entityBlocked", "yes")).status(),
         "a mistyped fact is refused, not coerced");
+  }
+
+  // --- the agent config checkout (qits-1382) -----------------------------------------------------
+
+  private JsonObject agentConfig() {
+    return new JsonObject()
+        .put("repositoryId", AgentConfigCheckoutTest.REPOSITORY_ID)
+        .put("repositoryPath", AgentConfigCheckoutTest.REPOSITORY_PATH);
+  }
+
+  private Path configTree(String agentId) {
+    return estateDir.resolve("workspace").resolve("agent-config").resolve(agentId).resolve("tree");
+  }
+
+  @Test
+  void aStartWithoutAnAgentConfigLaunchesExactlyAsBefore() throws Exception {
+    AgentConfigCheckoutTest.seedOrigin(estateDir);
+
+    Answer answer = post("/agent-worktrees", start("agent-1"));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertNull(runtime.nextLaunchRequest("agent-1").agentConfigDir());
+    assertFalse(Files.exists(configTree("agent-1")), "no checkout is made");
+    awaitContains(fakeLog.resolveSibling("harness.args"), "--");
+    assertFalse(
+        Files.readString(fakeLog.resolveSibling("harness.args")).contains("--plugin-dir"),
+        "and the harness is not pointed at one");
+  }
+
+  @Test
+  @Timeout(60)
+  void aStartWithAnAgentConfigLaunchesWithItsCheckoutAndInstallsItsPlugins() throws Exception {
+    AgentConfigCheckoutTest.seedOrigin(estateDir);
+    Path seed = estateDir.resolve("seed-config");
+    Files.writeString(
+        seed.resolve("settings.json"),
+        new JsonObject()
+            .put(
+                "enabledPlugins",
+                new JsonObject()
+                    .put("jdtls-lsp@claude-plugins-official", true)
+                    .put("already-there@claude-plugins-official", true)
+                    .put("switched-off@claude-plugins-official", false)
+                    .put("elsewhere@another-marketplace", true))
+            .encode());
+    GitFixtures.git(seed, "commit", "--quiet", "-am", "plugins");
+    GitFixtures.git(seed, "push", "--quiet", "origin", "HEAD:main");
+
+    Answer answer = post("/agent-worktrees", start("agent-1").put("agentConfig", agentConfig()));
+
+    assertEquals(200, answer.status(), answer.raw());
+    Path tree = configTree("agent-1");
+    assertEquals(tree, runtime.nextLaunchRequest("agent-1").agentConfigDir());
+    assertTrue(Files.exists(tree.resolve("memory/MEMORY.md")), "checked out from main");
+    assertFalse(Files.exists(tree.resolve(".git")), "with its git dir beside the tree");
+    assertEquals(List.of("jdtls-lsp"), pluginInstalls, "only what is enabled and missing");
+    awaitContains(fakeLog.resolveSibling("harness.args"), "--plugin-dir " + tree);
+  }
+
+  @Test
+  void anAgentConfigCheckoutThatCannotBeMadeLaunchesWithoutOne() throws Exception {
+    // No origin seeded: the clone fails, and the start goes on as if none had been named.
+    Answer answer = post("/agent-worktrees", start("agent-1").put("agentConfig", agentConfig()));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertNull(runtime.nextLaunchRequest("agent-1").agentConfigDir());
+    assertFalse(Files.exists(configTree("agent-1").getParent()), "nothing is left behind");
+  }
+
+  @Test
+  void anAgentConfigIsParsedAndBothHalvesAreRequired() throws Exception {
+    assertNull(WorkspaceApi.agentConfig(new JsonObject()), "absent is no checkout");
+    assertEquals(
+        new AgentConfigCheckout.AgentConfig(
+            AgentConfigCheckoutTest.REPOSITORY_ID, AgentConfigCheckoutTest.REPOSITORY_PATH),
+        WorkspaceApi.agentConfig(new JsonObject().put("agentConfig", agentConfig())));
+
+    assertEquals(
+        400,
+        post(
+                "/agent-worktrees",
+                start("agent-1").put("agentConfig", agentConfig().put("repositoryId", " ")))
+            .status());
+    assertEquals(
+        400,
+        post(
+                "/agent-worktrees",
+                start("agent-1").put("agentConfig", agentConfig().put("repositoryPath", "")))
+            .status());
+    assertEquals(
+        400,
+        post(
+                "/agent-worktrees",
+                start("agent-1").put("agentConfig", agentConfig().putNull("repositoryPath")))
+            .status());
+    assertEquals(
+        400,
+        post(
+                "/agent-worktrees",
+                start("agent-1")
+                    .put("agentConfig", agentConfig().put("repositoryPath", "../../elsewhere")))
+            .status(),
+        "the path reaches a url, so it is <projectId>/<repoName> and nothing else");
+    assertEquals(
+        400, post("/agent-worktrees", start("agent-1").put("agentConfig", "project-1/x")).status());
+    assertFalse(worktrees.exists("agent-1"), "a refused start makes nothing");
+  }
+
+  @Test
+  void anUnsyncedMemoryIsLeftoverWorkUntilTheRemovalSavesIt() throws Exception {
+    Path origin = AgentConfigCheckoutTest.seedOrigin(estateDir);
+    post("/agent-worktrees", start("agent-1").put("agentConfig", agentConfig()));
+    Files.writeString(configTree("agent-1").resolve("memory/MEMORY.md"), "- remember this\n");
+
+    Answer check = get("/agent-worktrees/agent-1/cleanup-check");
+
+    assertEquals(200, check.status(), check.raw());
+    assertEquals(false, check.body().getBoolean("clean"));
+    assertEquals(new JsonArray().add("qits-agent-config"), check.body().getJsonArray("dirty"));
+
+    Answer removed = delete("/agent-worktrees/agent-1");
+
+    assertEquals(200, removed.status(), "the removal syncs first: " + removed.raw());
+    assertEquals(
+        "- remember this",
+        GitFixtures.line(origin, "show", BRANCH + ":memory/MEMORY.md"),
+        "the memory reached the git host on the agent's branch");
+    assertFalse(Files.exists(configTree("agent-1").getParent()), "and the checkout is gone");
+  }
+
+  @Test
+  @Timeout(60)
+  void aStopSyncsTheCheckoutOffTheHooksThread() throws Exception {
+    Path origin = AgentConfigCheckoutTest.seedOrigin(estateDir);
+    String commandId =
+        post("/agent-worktrees", start("agent-1").put("agentConfig", agentConfig()))
+            .body()
+            .getString("commandId");
+    Files.writeString(configTree("agent-1").resolve("memory/MEMORY.md"), "- after a turn\n");
+
+    runtime.onActivity(commandId, "IDLE");
+
+    awaitBranch(origin);
+    assertEquals(
+        "- after a turn", GitFixtures.line(origin, "show", BRANCH + ":memory/MEMORY.md"));
+  }
+
+  @Test
+  @Timeout(60)
+  void thePluginRoutesForAnAgentReadAndWriteItsCheckout() throws Exception {
+    Path origin = AgentConfigCheckoutTest.seedOrigin(estateDir);
+    post("/agent-worktrees", start("agent-1").put("agentConfig", agentConfig()));
+    Files.writeString(
+        configTree("agent-1").resolve("settings.json"),
+        "{\"enabledPlugins\":{\"pyright-lsp@claude-plugins-official\":true}}");
+
+    Answer listed = get("/agent-plugins?agentId=agent-1");
+
+    assertEquals(200, listed.status(), listed.raw());
+    JsonObject plugin = listed.body().getJsonArray("installed").getJsonObject(0);
+    assertEquals("pyright-lsp@claude-plugins-official", plugin.getString("pluginId"));
+
+    Answer installed = post("/agent-plugins/jdtls-lsp/install?agentId=agent-1", new JsonObject());
+
+    assertEquals(200, installed.status(), installed.raw());
+    assertTrue(
+        Files.readString(configTree("agent-1").resolve("settings.json"))
+            .contains("jdtls-lsp@claude-plugins-official"),
+        "enabled in the agent's own settings, not the volume's");
+    awaitBranch(origin);
+    assertTrue(
+        GitFixtures.line(origin, "show", BRANCH + ":settings.json")
+            .contains("jdtls-lsp@claude-plugins-official"),
+        "and synced to the git host");
+  }
+
+  /** Waits until a background sync has pushed the agent's branch to {@code origin}. */
+  private static void awaitBranch(Path origin) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    while (GitFixtures.git(origin, "branch", "--list", BRANCH).isBlank()) {
+      assertTrue(System.nanoTime() < deadline, "the background sync never pushed");
+      Thread.sleep(25);
+    }
+  }
+
+  @Test
+  void thePluginRoutesForAnAgentWithoutACheckoutAreAFourOhFour() throws Exception {
+    assertEquals(404, get("/agent-plugins?agentId=nobody").status());
+    assertEquals(
+        404, post("/agent-plugins/jdtls-lsp/install?agentId=nobody", new JsonObject()).status());
+    assertEquals(404, get("/agent-plugins?agentId=..").status());
+
+    post("/agent-worktrees", start("agent-1"));
+    assertEquals(
+        404, get("/agent-plugins?agentId=agent-1").status(), "started without a checkout");
   }
 
   // --- listing, cleanup and removal ---------------------------------------------------------------

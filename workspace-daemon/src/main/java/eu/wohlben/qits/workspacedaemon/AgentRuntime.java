@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -60,7 +61,10 @@ final class AgentRuntime implements AutoCloseable {
   /** The file beside an agent's worktree that describes it. Holds no credential. */
   static final String METADATA_FILE = "agent.json";
 
-  /** What the host asks for in {@code POST agent-worktrees}. */
+  /**
+   * What the host asks for in {@code POST agent-worktrees}. {@code agentConfig} is null when the
+   * start names no {@code qits-agent-config} repository; like {@code env} it is kept in memory only.
+   */
   record Start(
       String agentId,
       String workId,
@@ -72,7 +76,27 @@ final class AgentRuntime implements AutoCloseable {
       String instruction,
       AgentSurface surface,
       AgentLaunchMode mode,
-      EntityFacts entity) {}
+      EntityFacts entity,
+      AgentConfigCheckout.AgentConfig agentConfig) {
+
+    /** A start without an agent config checkout: today's start, field for field. */
+    Start(
+        String agentId,
+        String workId,
+        String entityId,
+        String wrapperBranch,
+        AgentType harness,
+        String sessionId,
+        Map<String, String> env,
+        String instruction,
+        AgentSurface surface,
+        AgentLaunchMode mode,
+        EntityFacts entity) {
+      this(
+          agentId, workId, entityId, wrapperBranch, harness, sessionId, env, instruction, surface,
+          mode, entity, null);
+    }
+  }
 
   /** What {@link #start} did. */
   record Started(
@@ -121,6 +145,19 @@ final class AgentRuntime implements AutoCloseable {
     return token == null || token.isBlank() ? Optional.empty() : Optional.of(token);
   }
 
+  /**
+   * The shared plugin cache on the harness volume, as far as a start needs it: which plugins are
+   * there, and installing one. {@link eu.wohlben.qits.agents.AgentPluginService} in production.
+   */
+  interface PluginCache {
+    Set<String> installedIds();
+
+    void install(String pluginId);
+  }
+
+  /** The marketplace every key of an agent's {@code enabledPlugins} names. */
+  static final String MARKETPLACE_SUFFIX = "@claude-plugins-official";
+
   /** Builds an agent's launch service; {@link ControlSocket} holds the shared parts. */
   @FunctionalInterface
   interface LaunchFactory {
@@ -142,6 +179,9 @@ final class AgentRuntime implements AutoCloseable {
     volatile Path directory;
     volatile AgentLaunchService launch;
 
+    /** The agent's {@code qits-agent-config} work tree, handed to a Claude launch; or null. */
+    volatile Path configDir;
+
     Agent(String agentId) {
       this.agentId = agentId;
     }
@@ -154,6 +194,11 @@ final class AgentRuntime implements AutoCloseable {
   private final LaunchFactory factory;
   private final String claudeMount;
   private final TerminalTurnGate terminalTurns;
+
+  /** The agents' config checkouts (qits-1382); null where nothing wired them. */
+  private final AgentConfigCheckout configs;
+
+  private final PluginCache plugins;
 
   /**
    * Whether a harness command has work in flight by its hooks ({@link HookWebhook#inFlight}): what
@@ -207,6 +252,29 @@ final class AgentRuntime implements AutoCloseable {
       String claudeMount,
       java.time.Duration readyTimeout,
       Predicate<String> inFlight) {
+    this(
+        worktrees, store, registry, commands, factory, claudeMount, readyTimeout, inFlight, null,
+        null);
+  }
+
+  /**
+   * @param configs the agents' {@code qits-agent-config} checkouts; null starts every agent
+   *     without one
+   * @param plugins the shared plugin cache a checkout's enabled plugins are installed into
+   */
+  AgentRuntime(
+      AgentWorktrees worktrees,
+      CommandStore store,
+      CommandRegistry registry,
+      AgentCommands commands,
+      LaunchFactory factory,
+      String claudeMount,
+      java.time.Duration readyTimeout,
+      Predicate<String> inFlight,
+      AgentConfigCheckout configs,
+      PluginCache plugins) {
+    this.configs = configs;
+    this.plugins = plugins;
     this.inFlight = inFlight;
     this.worktrees = worktrees;
     this.store = store;
@@ -272,12 +340,90 @@ final class AgentRuntime implements AutoCloseable {
     if (request.entity() != null) {
       agent.launch.setEntity(request.entity());
     }
+    if (request.agentConfig() != null
+        && configs != null
+        && (agent.harness == null || agent.harness == AgentType.CLAUDE)) {
+      agent.configDir = configDir(agent, request).orElse(null);
+    }
     writeMetadata(agent);
     Command running = running(agent);
     if (running != null) {
       return new Started(agent.agentId, directory, running.id(), false, false, agent.sessionId);
     }
     return launch(agent, request.instruction());
+  }
+
+  /**
+   * The agent's config checkout, made if missing, with every plugin its {@code settings.json}
+   * enables installed into the shared cache. A plugin that will not install is a warning: the
+   * session runs without it rather than not at all.
+   */
+  private Optional<Path> configDir(Agent agent, Start request) {
+    // The commits' scope: the workId when it is a qualified id, else the entity id, which the host
+    // fills with one when its workId is a row id.
+    String workRef =
+        AgentConfigCheckout.qualified(request.workId()) ? request.workId() : request.entityId();
+    Optional<Path> tree =
+        configs.ensure(
+            agent.agentId, agent.wrapperBranch, request.agentConfig(), agent.env, workRef);
+    if (tree.isPresent() && plugins != null) {
+      installEnabledPlugins(agent.agentId, tree.get());
+    }
+    return tree;
+  }
+
+  private void installEnabledPlugins(String agentId, Path tree) {
+    List<String> wanted = enabledPlugins(tree);
+    if (wanted.isEmpty()) {
+      return;
+    }
+    Set<String> installed;
+    try {
+      installed = plugins.installedIds();
+    } catch (RuntimeException e) {
+      LOG.warnf("agent %s: could not read the installed plugins: %s", agentId, e.getMessage());
+      return;
+    }
+    for (String key : wanted) {
+      if (installed.contains(key)) {
+        continue;
+      }
+      try {
+        plugins.install(key.substring(0, key.length() - MARKETPLACE_SUFFIX.length()));
+      } catch (RuntimeException e) {
+        LOG.warnf("agent %s: could not install plugin %s: %s", agentId, key, e.getMessage());
+      }
+    }
+  }
+
+  /**
+   * The {@code true} keys of the tree's {@code enabledPlugins} on the one marketplace there is. The
+   * file is the agent's to write, so anything malformed reads as nothing enabled; the id itself is
+   * pattern-matched by the install before it reaches an argv.
+   */
+  static List<String> enabledPlugins(Path tree) {
+    Path settings = tree.resolve("settings.json");
+    if (!Files.isRegularFile(settings, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+      return List.of();
+    }
+    try {
+      JsonObject enabled =
+          new JsonObject(Files.readString(settings)).getJsonObject("enabledPlugins");
+      if (enabled == null) {
+        return List.of();
+      }
+      List<String> out = new ArrayList<>();
+      for (Map.Entry<String, Object> entry : enabled) {
+        if (Boolean.TRUE.equals(entry.getValue())
+            && entry.getKey().endsWith(MARKETPLACE_SUFFIX)
+            && entry.getKey().length() > MARKETPLACE_SUFFIX.length()) {
+          out.add(entry.getKey());
+        }
+      }
+      return out;
+    } catch (IOException | RuntimeException e) {
+      return List.of();
+    }
   }
 
   private Seat seat(Agent agent, EntityFacts entity) {
@@ -334,17 +480,7 @@ final class AgentRuntime implements AutoCloseable {
           "agent %s: no files for session %s under %s, starting a new session",
           agent.agentId, session, claudeMount);
     }
-    Command command =
-        agent.launch.launch(
-            new AgentLaunchRequest(
-                AgentMcpScope.REPOSITORY,
-                agent.surface,
-                agent.mode,
-                opening,
-                resume ? session : null,
-                false,
-                false,
-                harness));
+    Command command = agent.launch.launch(launchRequest(agent, opening, resume ? session : null));
     agent.commandId = command.id();
     commandAgents.put(command.id(), agent.agentId);
     AgentType.parse(command.agentType()).ifPresent(type -> agent.harness = type);
@@ -354,6 +490,30 @@ final class AgentRuntime implements AutoCloseable {
     }
     writeMetadata(agent);
     return new Started(agent.agentId, agent.directory, command.id(), true, resume, agent.sessionId);
+  }
+
+  /**
+   * What a launch asks the library for: today's request, plus the agent's config checkout when it
+   * has one (qits-1382). Package-private so a test can read it.
+   */
+  static AgentLaunchRequest launchRequest(Agent agent, String opening, String resumeSessionId) {
+    AgentLaunchRequest request =
+        new AgentLaunchRequest(
+            AgentMcpScope.REPOSITORY,
+            agent.surface,
+            agent.mode,
+            opening,
+            resumeSessionId,
+            false,
+            false,
+            agent.harness);
+    Path configDir = agent.configDir;
+    return configDir == null ? request : request.withAgentConfigDir(configDir);
+  }
+
+  /** The launch request the agent's next launch would make; for a test. */
+  AgentLaunchRequest nextLaunchRequest(String agentId) {
+    return launchRequest(known(agentId), null, null);
   }
 
   /** Stop the agent's harness and keep everything else (D16). False when none was running. */
@@ -406,10 +566,34 @@ final class AgentRuntime implements AutoCloseable {
     return known(agentId).launch.entity();
   }
 
-  /** The cleanup check for one agent: git's verdict, and whether its harness is busy. */
+  /**
+   * The cleanup check for one agent: git's verdict, and whether its harness is busy. A config
+   * checkout with changes or commits the git host lacks is named among the dirty repositories as
+   * {@code qits-agent-config}.
+   */
   AgentWorktrees.CleanupCheck cleanupCheck(String agentId) {
     requireExists(agentId);
-    return worktrees.cleanupCheck(agentId).withBusy(busy(agentId));
+    AgentWorktrees.CleanupCheck check = worktrees.cleanupCheck(agentId);
+    if (configs != null && configs.dirty(agentId)) {
+      List<String> dirty = new ArrayList<>(check.dirty());
+      dirty.add(AgentConfigCheckout.REPOSITORY);
+      check = new AgentWorktrees.CleanupCheck(List.copyOf(dirty), check.unpushed());
+    }
+    return check.withBusy(busy(agentId));
+  }
+
+  /** The agent's config work tree, when it has one. */
+  Optional<Path> configTree(String agentId) {
+    return configs == null || !worktrees.exists(agentId)
+        ? Optional.empty()
+        : configs.tree(agentId);
+  }
+
+  /** Commit and push the agent's config checkout, off the caller's thread. */
+  void syncConfigLater(String agentId) {
+    if (configs != null) {
+      configs.syncLater(agentId);
+    }
   }
 
   /**
@@ -432,6 +616,10 @@ final class AgentRuntime implements AutoCloseable {
    */
   synchronized AgentWorktrees.CleanupCheck remove(String agentId, boolean force) {
     requireExists(agentId);
+    // Saved first, so a checkout whose memories reach the git host no longer holds the removal up.
+    if (configs != null) {
+      configs.sync(agentId);
+    }
     if (!force) {
       AgentWorktrees.CleanupCheck check = cleanupCheck(agentId);
       if (!check.clean() || check.busy()) {
@@ -447,6 +635,9 @@ final class AgentRuntime implements AutoCloseable {
       }
     }
     worktrees.remove(agentId);
+    if (configs != null) {
+      configs.remove(agentId);
+    }
     agents.remove(agentId);
     commandAgents.values().removeIf(agentId::equals);
     return null;
@@ -542,12 +733,19 @@ final class AgentRuntime implements AutoCloseable {
     return activity.withAgentId(agentId);
   }
 
-  /** Hand a stored activity state to the agent's launch service (rename retries, session end). */
+  /**
+   * Hand a stored activity state to the agent's launch service (rename retries, session end). An
+   * {@code IDLE} — a {@code Stop}, or a {@code SessionStart} — also syncs the agent's config
+   * checkout, off the hook's thread: a turn that ended may have written a memory.
+   */
   void onActivity(String commandId, String state) {
     String agentId = agentOf(commandId);
     Agent agent = agentId == null ? null : agents.get(agentId);
     if (agent != null && agent.launch != null) {
       agent.launch.onActivity(commandId, state);
+    }
+    if (agent != null && AgentState.IDLE.equals(state)) {
+      syncConfigLater(agentId);
     }
   }
 

@@ -289,6 +289,31 @@ a base clone, and `AgentsApiTest` puts a fake `claude` on the login shell's `PAT
 `~/.bash_profile` on the temporary credential volume) to prove where the harness runs, with which
 credential, and that it resumes.
 
+## Agent config checkout (qits-1382)
+
+A start may carry `agentConfig: {repositoryId, repositoryPath}` — the agent's `qits-agent-config`
+repository (memories, skills, enabled plugins). Both halves are required and `repositoryPath` must
+be `<projectId>/<repoName>` (400 otherwise); like `env` it is held in memory only, never in
+`agent.json`. Absent, the start is exactly what it was.
+
+`AgentConfigCheckout` clones `<git-base-url>/<repositoryPath>` **bare** into
+`/workspace/agent-config/<agentId>/git` and checks it out with `--git-dir`/`--work-tree` into
+`/workspace/agent-config/<agentId>/tree`, on the wrapper branch (from `origin/<wrapperBranch>` when
+the git host has it, else `origin/main`). **The tree never holds a `.git`**: it is the harness's
+config directory, and the agent writes it. A Claude launch gets the tree via
+`AgentLaunchRequest.withAgentConfigDir`; the library renders the rest. Plugins its `settings.json`
+enables that the shared cache lacks are installed first (a failure is a warning). Any failure to
+check out deletes the partial directory and launches without one.
+
+A sync commits **only** `memory`, `skills` and `settings.json` (`chore(<workId>): agent memories,
+skills and plugins`) and pushes the branch with the agent's `QITS_TOKEN` when the git host lacks a
+commit, reporting `AgentBranchPushed` under the repository's name (the last segment of
+`repositoryPath`, which the host resolves within the agent's project). It runs on every `IDLE` hook
+(a `Stop`) off the hook thread, on `POST /agent-plugins/{id}/install?agentId=`, and first in a
+removal, which then deletes the checkout. Unsynced changes or commits count in the cleanup check as
+dirty `qits-agent-config`. The plugin routes take `?agentId=` to read and write that agent's tree
+(404 without one). After a daemon restart nothing is known until the next start says it again.
+
 ## Things that look wrong and are not
 
 **`setsid --ctty` for terminals.** On the host this would have failed with EPERM — `docker exec -it`

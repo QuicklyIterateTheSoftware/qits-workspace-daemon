@@ -377,6 +377,9 @@ public class ControlSocket {
    */
   private volatile OriginSync originSync;
 
+  /** The agents' config checkouts; created with the agents, closed with them. */
+  private volatile AgentConfigCheckout agentConfigs;
+
   /**
    * The live terminal and chat sessions {@link #wireCommands} spawns — held so {@link #stop} can
    * terminate them ahead of everything else. See {@link #stopAgents} for why that ordering matters.
@@ -405,6 +408,10 @@ public class ControlSocket {
 
   /** Where agent worktrees live, one directory per agent (qits-1152). */
   private static final java.nio.file.Path AGENTS_DIR = WORKSPACE_DIR.toPath().resolve("agents");
+
+  /** Where each agent's {@code qits-agent-config} checkout lives (qits-1382). */
+  private static final java.nio.file.Path AGENT_CONFIG_DIR =
+      WORKSPACE_DIR.toPath().resolve("agent-config");
 
   /**
    * Frames emitted before the socket first connects (the boot self-clone can begin, and finish,
@@ -725,6 +732,11 @@ public class ControlSocket {
     WorkspaceMcpServers mcpServers =
         new WorkspaceMcpServers(platformMcpUrl, Optional.empty());
     CommandsAgentCommands shared = new CommandsAgentCommands(commandService, commandRegistry, store);
+    AgentPluginService plugins =
+        new AgentPluginService(processes, claudeMount, WORKSPACE_DIR.toPath(), defaults);
+    AgentConfigCheckout configs =
+        new AgentConfigCheckout(AGENT_CONFIG_DIR, gitBaseUrlConfig.orElse(""), this::send);
+    agentConfigs = configs;
     AgentRuntime runtime =
         new AgentRuntime(
             worktrees,
@@ -748,7 +760,19 @@ public class ControlSocket {
                     hooksPort),
             claudeMount,
             agentReadyTimeout,
-            this::harnessInFlight);
+            this::harnessInFlight,
+            configs,
+            new AgentRuntime.PluginCache() {
+              @Override
+              public java.util.Set<String> installedIds() {
+                return plugins.installedIds();
+              }
+
+              @Override
+              public void install(String pluginId) {
+                plugins.install(pluginId);
+              }
+            });
     agents = runtime;
     // The sign-in terminal is nobody's agent: a launch service of the workspace's own serves it.
     AgentLaunchService workspaceLaunch =
@@ -759,7 +783,7 @@ public class ControlSocket {
         runtime,
         workspaceLaunch,
         new AgentSessionQueryService(store, agentSessionStore),
-        new AgentPluginService(processes, claudeMount, WORKSPACE_DIR.toPath(), defaults),
+        plugins,
         new PromptRefinementService(
             processes, context, defaults, claudeMount, WORKSPACE_DIR.toPath()),
         defaults,
@@ -834,9 +858,10 @@ public class ControlSocket {
 
   /**
    * Hands an agent command's stored activity state to its agent's launch service, which retries a
-   * queued interactive rename on {@code IDLE} and forgets the session on {@code ENDED}, and nudges
-   * the auto-push: a hook means a turn moved, and a turn may have committed. A no-op until {@link
-   * #wireAgents} has run.
+   * queued interactive rename on {@code IDLE} and forgets the session on {@code ENDED} — and on
+   * {@code IDLE} syncs the agent's config checkout, off this thread — and nudges the auto-push: a
+   * hook means a turn moved, and a turn may have committed. A no-op until {@link #wireAgents} has
+   * run.
    */
   private void forwardActivity(String commandId, String state) {
     AgentRuntime runtime = agents;
@@ -1250,6 +1275,10 @@ public class ControlSocket {
     AgentRuntime runtime = agents;
     if (runtime != null) {
       runtime.close();
+    }
+    AgentConfigCheckout configs = agentConfigs;
+    if (configs != null) {
+      configs.close();
     }
     DaemonStreamTunnel tun = tunnel;
     if (tun != null) {
