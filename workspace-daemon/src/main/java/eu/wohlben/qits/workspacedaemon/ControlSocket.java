@@ -204,6 +204,17 @@ public class ControlSocket {
       defaultValue = "25m")
   Duration backgroundShellGrace;
 
+  // How long a Stop that left any other background work in flight — a subagent, a monitor, an
+  // unknown type, or a session cron — waits, with no further hook for its command, before
+  // HookWebhook reports it as awaiting input (qits-1460). Longer than the shell grace, because a
+  // subagent that finishes does wake the agent with a new Stop; but finite, because a recurring
+  // session cron or an endless monitor never does, and without a grace the agent would never read
+  // as waiting at all.
+  @ConfigProperty(
+      name = "qits.workspace-daemon.agent-waiting.background-work-grace",
+      defaultValue = "60m")
+  Duration backgroundWorkGrace;
+
   // How long a turn for an interactive harness waits for the harness's SessionStart hook before it
   // is typed anyway (qits-1152, TerminalTurnGate).
   @ConfigProperty(name = "qits.workspace-daemon.agent-ready-timeout", defaultValue = "60s")
@@ -474,7 +485,12 @@ public class ControlSocket {
     // up.
     hooks =
         new HookWebhook(
-            vertx, hooksPort, this::sendTagged, this::forwardActivity, backgroundShellGrace);
+            vertx,
+            hooksPort,
+            this::sendTagged,
+            this::forwardActivity,
+            backgroundShellGrace,
+            backgroundWorkGrace);
     hooks.start();
     // The reverse tunnel qits reaches WorkspaceApi through. Independent of provisioning for the
     // same reason the hook webhook is: it only needs the url and the port, and a stream requested

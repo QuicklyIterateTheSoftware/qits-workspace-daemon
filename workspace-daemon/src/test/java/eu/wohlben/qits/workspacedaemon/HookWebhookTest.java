@@ -33,8 +33,14 @@ class HookWebhookTest {
   /** What the activity listener ({@code AgentLaunchService.onActivity} in production) was told. */
   private final List<String> forwarded = new ArrayList<>();
 
+  /**
+   * A real Vertx even for the ungraced tests: since qits-1460 every Stop that leaves background
+   * work in flight arms a timer, and the production graces are long enough never to fire here.
+   */
+  private final Vertx vertx = Vertx.vertx();
+
   private final HookWebhook webhook =
-      new HookWebhook(null, 13337, sent::add, (id, state) -> forwarded.add(id + "=" + state));
+      new HookWebhook(vertx, 13337, sent::add, (id, state) -> forwarded.add(id + "=" + state));
 
   private AgentActivity lastSent() {
     return (AgentActivity) sent.get(sent.size() - 1);
@@ -211,7 +217,7 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopWithARunningBackgroundSubagentIsNotAwaitingInput() {
+  void stopWithARunningBackgroundSubagentIsNotAwaitingInputYet() {
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"a94d\","
@@ -223,7 +229,7 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopWithAMixOfShellAndSubagentBackgroundTasksIsNotAwaitingInput() {
+  void stopWithAMixOfShellAndSubagentBackgroundTasksIsNotAwaitingInputYet() {
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":["
@@ -237,7 +243,7 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopWithABackgroundTaskMissingATypeIsNotAwaitingInput() {
+  void stopWithABackgroundTaskMissingATypeIsNotAwaitingInputYet() {
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"bmxnunzfz\","
@@ -247,7 +253,7 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopWithAPendingSessionCronIsNotAwaitingInput() {
+  void stopWithAPendingSessionCronIsNotAwaitingInputYet() {
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":[],\"session_crons\":"
@@ -258,7 +264,7 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopWithAPendingSessionCronAndOnlyShellBackgroundTasksIsNotAwaitingInput() {
+  void stopWithAPendingSessionCronAndOnlyShellBackgroundTasksIsNotAwaitingInputYet() {
     JsonObject body =
         new JsonObject(
             "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"bmxnunzfz\","
@@ -514,10 +520,7 @@ class HookWebhookTest {
   }
 
   // --- the background-shell grace (qits-895) -------------------------------------------------
-  // These need a real Vertx for setTimer, and the timer fires on an event-loop thread, hence the
-  // thread-safe list and the polling await.
-
-  private Vertx vertx;
+  // The timer fires on an event-loop thread, hence the thread-safe list and the polling await.
 
   private final List<DaemonMessage> gracedSent = new CopyOnWriteArrayList<>();
 
@@ -527,15 +530,23 @@ class HookWebhookTest {
 
   @AfterEach
   void closeVertx() {
-    if (vertx != null) {
-      vertx.close().toCompletionStage().toCompletableFuture().join();
-    }
+    webhook.close();
+    vertx.close().toCompletionStage().toCompletableFuture().join();
   }
 
-  private HookWebhook graced(Duration grace) {
-    vertx = Vertx.vertx();
+  /** A short shell grace and a background-work grace too long to fire within a test. */
+  private HookWebhook graced(Duration shellGrace) {
+    return graced(shellGrace, Duration.ofMinutes(60));
+  }
+
+  private HookWebhook graced(Duration shellGrace, Duration workGrace) {
     return new HookWebhook(
-        vertx, 13337, gracedSent::add, (id, state) -> gracedForwarded.add(id + "=" + state), grace);
+        vertx,
+        13337,
+        gracedSent::add,
+        (id, state) -> gracedForwarded.add(id + "=" + state),
+        shellGrace,
+        workGrace);
   }
 
   private AgentActivity lastGraced() {
@@ -709,5 +720,183 @@ class HookWebhookTest {
 
     outlastTheGrace();
     assertEquals(1, gracedSent.size());
+  }
+
+  // --- the background-work grace (qits-1460) -------------------------------------------------
+  // A subagent, a monitor or a session cron never produces the hook that would end a "not yet"
+  // verdict if it outlives the turn, so without its own grace the agent would never read as
+  // waiting.
+
+  /** A shell grace too long to fire within a test, and a short background-work grace. */
+  private HookWebhook workGraced() {
+    return graced(Duration.ofMinutes(25), SHORT_GRACE);
+  }
+
+  private JsonObject stopWith(JsonArray backgroundTasks, JsonArray sessionCrons) {
+    return payload("Stop")
+        .put("background_tasks", backgroundTasks)
+        .put("session_crons", sessionCrons);
+  }
+
+  private JsonObject backgroundSubagentStop() {
+    return stopWith(
+        new JsonArray()
+            .add(
+                new JsonObject()
+                    .put("id", "a94d")
+                    .put("type", "subagent")
+                    .put("status", "running")
+                    .put("agent_type", "general-purpose")),
+        new JsonArray());
+  }
+
+  private JsonObject backgroundMonitorStop() {
+    return stopWith(
+        new JsonArray()
+            .add(
+                new JsonObject()
+                    .put("id", "m1")
+                    .put("type", "monitor")
+                    .put("status", "running")
+                    .put("description", "tail the CI log")),
+        new JsonArray());
+  }
+
+  private JsonObject recurringSessionCronStop() {
+    return stopWith(
+        new JsonArray(),
+        new JsonArray()
+            .add(
+                new JsonObject()
+                    .put("id", "b8d1f60e")
+                    .put("schedule", "*/5 * * * *")
+                    .put("recurring", true)
+                    .put("prompt", "check the build")));
+  }
+
+  private void assertFalseThenWaitingAfterTheWorkGrace(JsonObject stop)
+      throws InterruptedException {
+    HookWebhook graced = workGraced();
+    graced.handle("Stop", stop, "cmd-1");
+    assertEquals(1, gracedSent.size());
+    assertEquals(Boolean.FALSE, lastGraced().awaitingInput());
+    assertTrue(graced.inFlight("cmd-1"));
+
+    await(() -> gracedSent.size() == 2);
+    AgentActivity waiting = lastGraced();
+    AgentActivity first = (AgentActivity) gracedSent.get(0);
+    assertEquals(Boolean.TRUE, waiting.awaitingInput());
+    assertEquals("cmd-1", waiting.commandId());
+    assertEquals(first.sessionId(), waiting.sessionId());
+    assertEquals(AgentState.IDLE, waiting.state());
+    assertEquals("Stop", waiting.hookEvent());
+    assertTrue(waiting.at() >= first.at());
+    assertFalse(graced.inFlight("cmd-1"), "the grace cleared the background-work verdict");
+    assertEquals(List.of("cmd-1=IDLE"), gracedForwarded, "the listener is not told again");
+
+    gracedSent.clear();
+    graced.reportCurrent();
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput(), "and a reconnect replays it");
+    graced.close();
+  }
+
+  @Test
+  void aStopWithARunningSubagentReadsAsWaitingOnceTheBackgroundWorkGraceExpires()
+      throws InterruptedException {
+    assertFalseThenWaitingAfterTheWorkGrace(backgroundSubagentStop());
+  }
+
+  @Test
+  void aStopWithARunningMonitorReadsAsWaitingOnceTheBackgroundWorkGraceExpires()
+      throws InterruptedException {
+    assertFalseThenWaitingAfterTheWorkGrace(backgroundMonitorStop());
+  }
+
+  @Test
+  void aStopWithARecurringSessionCronReadsAsWaitingOnceTheBackgroundWorkGraceExpires()
+      throws InterruptedException {
+    assertFalseThenWaitingAfterTheWorkGrace(recurringSessionCronStop());
+  }
+
+  @Test
+  void aStopWithAnUntypedBackgroundTaskReadsAsWaitingOnceTheBackgroundWorkGraceExpires()
+      throws InterruptedException {
+    assertFalseThenWaitingAfterTheWorkGrace(
+        stopWith(new JsonArray().add(new JsonObject().put("id", "x")), new JsonArray()));
+  }
+
+  @Test
+  void aUserPromptSubmitBeforeTheBackgroundWorkGraceCancelsIt() throws InterruptedException {
+    HookWebhook graced = workGraced();
+    graced.handle("Stop", backgroundSubagentStop(), "cmd-1");
+    graced.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+
+    outlastTheGrace();
+    assertEquals(2, gracedSent.size());
+    assertFalse(
+        gracedSent.stream().anyMatch(m -> Boolean.TRUE.equals(((AgentActivity) m).awaitingInput())));
+    graced.close();
+  }
+
+  @Test
+  void anIdlePromptDoesNotCancelTheBackgroundWorkGrace() throws InterruptedException {
+    HookWebhook graced = workGraced();
+    graced.handle("Stop", recurringSessionCronStop(), "cmd-1");
+    graced.handle("Notification", idlePrompt(), "cmd-1");
+    assertEquals(2, gracedSent.size());
+    assertTrue(graced.inFlight("cmd-1"), "the cron's grace is still running");
+
+    await(() -> gracedSent.size() == 3);
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
+    assertEquals("Stop", lastGraced().hookEvent());
+    assertFalse(graced.inFlight("cmd-1"));
+    graced.close();
+  }
+
+  @Test
+  void aStopWithShellsBesideASubagentWaitsOutTheLongerBackgroundWorkGrace()
+      throws InterruptedException {
+    // Shell grace short, background-work grace long: the mix must not fire on the shell's.
+    HookWebhook graced = graced(SHORT_GRACE, Duration.ofMinutes(60));
+    JsonArray tasks =
+        new JsonArray()
+            .add(new JsonObject().put("id", "b1").put("type", "shell").put("status", "running"))
+            .add(new JsonObject().put("id", "a1").put("type", "subagent").put("status", "running"));
+    graced.handle("Stop", stopWith(tasks, new JsonArray()), "cmd-1");
+    assertEquals(Boolean.FALSE, lastGraced().awaitingInput());
+
+    outlastTheGrace();
+    assertEquals(1, gracedSent.size(), "the shell grace does not apply to the mix");
+    assertTrue(graced.inFlight("cmd-1"));
+    graced.close();
+  }
+
+  @Test
+  void aShellOnlyStopKeepsTheShellGraceAndNotTheBackgroundWorkOne() throws InterruptedException {
+    // Background-work grace short, shell grace long: a shell-only Stop must not fire on it.
+    HookWebhook graced = workGraced();
+    graced.handle("Stop", shellOnlyStop(), "cmd-1");
+
+    outlastTheGrace();
+    assertEquals(1, gracedSent.size());
+    assertTrue(graced.inFlight("cmd-1"));
+    graced.close();
+  }
+
+  @Test
+  void aStopWithASubagentHeldUnderAPermissionPromptClearsWithItsGraceAndSendsNothing()
+      throws InterruptedException {
+    HookWebhook graced = workGraced();
+    graced.handle(
+        "Notification",
+        payload("Notification").put("notification_type", "permission_prompt"),
+        "cmd-1");
+    graced.handle("Stop", backgroundSubagentStop(), "cmd-1");
+    assertTrue(graced.inFlight("cmd-1"));
+
+    await(() -> !graced.inFlight("cmd-1"));
+    outlastTheGrace();
+    assertEquals(1, gracedSent.size(), "the standing prompt already reads as waiting");
+    graced.close();
   }
 }
