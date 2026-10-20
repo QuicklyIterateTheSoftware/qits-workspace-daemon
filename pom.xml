@@ -74,7 +74,7 @@
              (`pacts/qits-platform-access-cli_qits-workspace-daemon.json`) and qits-workspaces-service's
              proxy (`pacts/qits-workspaces-service_qits-workspace-daemon.json`). -->
         <qits.platform-access-cli-pacts-qits-workspace-daemon.version>2026.1019.65035</qits.platform-access-cli-pacts-qits-workspace-daemon.version>
-        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1019.70413</qits.workspaces-service-pacts-qits-workspace-daemon.version>
+        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1020.105843</qits.workspaces-service-pacts-qits-workspace-daemon.version>
     </properties>
 
     <dependencyManagement>
