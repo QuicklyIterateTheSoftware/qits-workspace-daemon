@@ -696,10 +696,9 @@ paths:
         its own. `clean` is true when both lists are empty.
 
         `busy` is the harness, not git: its hooks say a turn is running, or that its last `Stop`
-        left a background task going (a background shell, a subagent, a monitor, or a session cron),
-        until that `Stop`'s grace expires — 25 minutes for shells alone, 60 for anything else
-        (qits-1460). It does not change `clean`, but a `DELETE` without `force` is refused while it
-        is true.
+        left a background task going: a subagent, a monitor or a session cron until a later hook
+        says otherwise, or background shells alone until their grace expires. It does not change
+        `clean`, but a `DELETE` without `force` is refused while it is true.
       parameters:
         - $ref: "#/components/parameters/AgentId"
       responses:

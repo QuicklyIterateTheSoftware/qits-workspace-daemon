@@ -106,9 +106,9 @@ starts its harness there unless it runs — resuming the session id it is handed
 files are still on the harness volume. Its `env` (the agent's credential) reaches the harness
 process and the agent's pushes, and is never written to disk. `DELETE` refuses while work would be
 lost (uncommitted, or commits no remote branch has), or while the harness is busy by its hooks (a
-turn running, or a background task such as a subagent still going after its `Stop`, until that
-`Stop`'s grace expires), and answers the cleanup check, whose `busy` says which; `force=true`
-removes anyway.
+turn running, or a background task such as a subagent still going after its `Stop`; background
+shells alone stop counting once their grace expires), and answers the cleanup check, whose `busy`
+says which; `force=true` removes anyway.
 
 **When an agent reads as waiting.** A `Stop` whose hook payload reports background work still in
 flight is relayed as not awaiting input, and flips to awaiting input after a grace with no further
@@ -116,8 +116,9 @@ hook for the command: `qits.workspace-daemon.agent-waiting.background-shell-grac
 the work is only background shells, `qits.workspace-daemon.agent-waiting.background-work-grace`
 (60 min, qits-1460) when it includes a subagent, a monitor, an unknown task type or a session cron.
 A recurring cron or an endless monitor never produces the next hook, so without its grace such an
-agent would never read as waiting. Any hook but a `Notification` cancels the grace;
-`HookWebhook`'s class javadoc has the whole table.
+agent would never read as waiting. The grace only decides when the agent reads as waiting: a
+subagent, monitor or cron still counts as busy after it, and only shells alone stop counting. Any
+hook but a `Notification` cancels the grace; `HookWebhook`'s class javadoc has the whole table.
 
 **Which credential each process carries.** No git process the daemon starts inherits a secret of
 the workspace (its token, commissioned client, API token, agent configuration), and every one runs

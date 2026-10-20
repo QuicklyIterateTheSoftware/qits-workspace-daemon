@@ -791,7 +791,8 @@ class HookWebhookTest {
     assertEquals(AgentState.IDLE, waiting.state());
     assertEquals("Stop", waiting.hookEvent());
     assertTrue(waiting.at() >= first.at());
-    assertFalse(graced.inFlight("cmd-1"), "the grace cleared the background-work verdict");
+    assertTrue(
+        graced.inFlight("cmd-1"), "reads as waiting, but the reported work is still running");
     assertEquals(List.of("cmd-1=IDLE"), gracedForwarded, "the listener is not told again");
 
     gracedSent.clear();
@@ -849,7 +850,7 @@ class HookWebhookTest {
     await(() -> gracedSent.size() == 3);
     assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
     assertEquals("Stop", lastGraced().hookEvent());
-    assertFalse(graced.inFlight("cmd-1"));
+    assertTrue(graced.inFlight("cmd-1"), "the cron is still scheduled");
     graced.close();
   }
 
@@ -884,7 +885,7 @@ class HookWebhookTest {
   }
 
   @Test
-  void aStopWithASubagentHeldUnderAPermissionPromptClearsWithItsGraceAndSendsNothing()
+  void aStopWithASubagentHeldUnderAPermissionPromptSendsNothingAndStaysInFlightPastItsGrace()
       throws InterruptedException {
     HookWebhook graced = workGraced();
     graced.handle(
@@ -894,9 +895,46 @@ class HookWebhookTest {
     graced.handle("Stop", backgroundSubagentStop(), "cmd-1");
     assertTrue(graced.inFlight("cmd-1"));
 
-    await(() -> !graced.inFlight("cmd-1"));
     outlastTheGrace();
     assertEquals(1, gracedSent.size(), "the standing prompt already reads as waiting");
+    assertTrue(graced.inFlight("cmd-1"), "the subagent is still running");
+    graced.close();
+  }
+
+  /** A work-graced Stop with a running subagent, waited past its grace. */
+  private HookWebhook subagentStopPastItsGrace() throws InterruptedException {
+    HookWebhook graced = workGraced();
+    graced.handle("Stop", backgroundSubagentStop(), "cmd-1");
+    await(() -> gracedSent.size() == 2);
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
+    assertTrue(graced.inFlight("cmd-1"));
+    return graced;
+  }
+
+  @Test
+  void aUserPromptSubmitAfterTheBackgroundWorkGraceEndsInFlight() throws InterruptedException {
+    HookWebhook graced = subagentStopPastItsGrace();
+    graced.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    graced.handle("Notification", idlePrompt(), "cmd-1");
+    assertFalse(graced.inFlight("cmd-1"));
+    graced.close();
+  }
+
+  @Test
+  void aSessionEndAfterTheBackgroundWorkGraceEndsInFlight() throws InterruptedException {
+    HookWebhook graced = subagentStopPastItsGrace();
+    graced.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+    assertFalse(graced.inFlight("cmd-1"));
+    graced.close();
+  }
+
+  @Test
+  void aStopWithNothingRunningAfterTheBackgroundWorkGraceEndsInFlight()
+      throws InterruptedException {
+    HookWebhook graced = subagentStopPastItsGrace();
+    graced.handle("Stop", stopWith(new JsonArray(), new JsonArray()), "cmd-1");
+    assertFalse(graced.inFlight("cmd-1"));
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
     graced.close();
   }
 }
