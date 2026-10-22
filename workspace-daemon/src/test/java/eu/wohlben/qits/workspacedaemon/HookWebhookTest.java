@@ -97,8 +97,11 @@ class HookWebhookTest {
   }
 
   @Test
-  void stopAfterNotificationKeepsWaiting() {
-    webhook.handle("Notification", payload("Notification"), "cmd-1");
+  void stopAfterAPermissionPromptKeepsWaiting() {
+    webhook.handle(
+        "Notification",
+        payload("Notification").put("notification_type", "permission_prompt"),
+        "cmd-1");
     assertEquals(AgentState.WAITING, lastSent().state());
     int before = sent.size();
     // The turn-end Stop must not downgrade the pending permission prompt.
@@ -139,7 +142,10 @@ class HookWebhookTest {
   void aStopWhileWaitingForwardsTheStoredWaitingNotTheEventsIdle() {
     // The whole point of forwarding the stored state: IDLE here would let a queued /rename be typed
     // into the open permission dialog, whose first keystroke answers it.
-    webhook.handle("Notification", payload("Notification"), "cmd-1");
+    webhook.handle(
+        "Notification",
+        payload("Notification").put("notification_type", "permission_prompt"),
+        "cmd-1");
     webhook.handle("Stop", payload("Stop"), "cmd-1");
 
     assertEquals(List.of("cmd-1=WAITING", "cmd-1=WAITING"), forwarded);
@@ -345,7 +351,7 @@ class HookWebhookTest {
 
   @Test
   void stopWhileWaitingSendsNoFrameSoTheStandingNotificationsVerdictStillStands() {
-    // No new wire frame goes out on this path (see stopAfterNotificationKeepsWaiting above and
+    // No new wire frame goes out on this path (see stopAfterAPermissionPromptKeepsWaiting above and
     // the class javadoc), so there is nothing to carry a fresh verdict — the Notification frame
     // already sent, which carried true, is still the latest the backend or a replay has seen.
     JsonObject notification =
@@ -361,6 +367,68 @@ class HookWebhookTest {
     webhook.handle("Stop", stop, "cmd-1");
     assertEquals(before, sent.size(), "the hold path sends no frame");
     assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  // --- only a real prompt holds a Stop (qits-1511) -------------------------------------------
+  // Every Notification maps to WAITING, but only a permission or elicitation prompt says
+  // awaitingInput true. Holding a Stop under any other WAITING — above all the idle_prompt Claude
+  // Code sends a minute after every turn — swallowed the frame that would have said the agent is
+  // waiting, and it never read as waiting again.
+
+  @Test
+  void aStopAfterAnIdlePromptOnASelfResumedTurnIsSentAndReadsAsWaiting()
+      throws InterruptedException {
+    // The ticket's reproduction: a background shell, the idle_prompt a minute later, the shell
+    // finishing and the harness continuing by itself — no UserPromptSubmit — then the Stop.
+    HookWebhook graced = graced(SHORT_GRACE);
+    graced.handle("Stop", shellOnlyStop(), "cmd-1");
+    graced.handle("Notification", idlePrompt(), "cmd-1");
+    assertEquals(2, gracedSent.size());
+
+    graced.handle("Stop", nothingRunningStop(), "cmd-1");
+    assertEquals(3, gracedSent.size(), "the Stop is not held under an idle_prompt");
+    AgentActivity stop = lastGraced();
+    assertEquals("Stop", stop.hookEvent());
+    assertEquals(AgentState.IDLE, stop.state());
+    assertEquals(Boolean.TRUE, stop.awaitingInput());
+    assertEquals(List.of("cmd-1=IDLE", "cmd-1=WAITING", "cmd-1=IDLE"), gracedForwarded);
+    assertFalse(graced.inFlight("cmd-1"));
+
+    outlastTheGrace();
+    assertEquals(3, gracedSent.size(), "the cancelled shell grace sends nothing later");
+    gracedSent.clear();
+    graced.reportCurrent();
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput(), "and a reconnect replays it");
+    graced.close();
+  }
+
+  @Test
+  void aStopAfterAnIdlePromptFollowingAnEmptyStopSendsItsOwnFrame() {
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    assertNull(lastSent().awaitingInput());
+
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+    assertEquals(3, sent.size());
+    assertEquals("Stop", lastSent().hookEvent());
+    assertEquals(AgentState.IDLE, lastSent().state());
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+  }
+
+  @Test
+  void aStopAfterAPermissionPromptFollowingAStopIsStillHeld() {
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+    webhook.handle(
+        "Notification",
+        payload("Notification").put("notification_type", "permission_prompt"),
+        "cmd-1");
+    int before = sent.size();
+
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+    assertEquals(before, sent.size(), "a real prompt still holds the Stop");
+    assertEquals(AgentState.WAITING, lastSent().state());
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+    assertEquals("cmd-1=WAITING", forwarded.get(forwarded.size() - 1));
   }
 
   // --- inFlight (qits-1233) -------------------------------------------------------------------

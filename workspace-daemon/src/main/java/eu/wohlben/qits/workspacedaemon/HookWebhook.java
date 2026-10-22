@@ -33,8 +33,10 @@ import org.jboss.logging.Logger;
  * <p>The last state per {@code commandId} is retained so {@link #reportCurrent()} can replay it on
  * a socket reconnect (a qits restart that lost its in-memory projection rebuilds it). {@code Stop}
  * maps to {@code IDLE} (turn finished) but also fires when Claude pauses to ask the user — so a
- * {@code Stop} arriving while the stored state is {@code WAITING} (a preceding {@code
- * Notification}) is dropped, keeping the permission-prompt signal.
+ * {@code Stop} arriving while the stored frame is a {@code WAITING} one that says {@code
+ * awaitingInput} {@code true} (a preceding permission or elicitation {@code Notification}) is
+ * held, keeping the permission-prompt signal. Any other stored {@code WAITING} does not hold it
+ * (qits-1511).
  *
  * <p>Every hook that maps to a state also hands the state this <em>stores</em> — not the one the
  * event maps to — to the activity listener ({@code AgentLaunchService.onActivity}), which types a
@@ -88,15 +90,25 @@ import org.jboss.logging.Logger;
  * SessionEnd}, and a {@link #killed} frame, are always {@code true} — there is no next turn to wait
  * out, so "blocked on the user" and "session over" coincide.
  *
- * <p>The Stop-during-{@code WAITING} hold path below sends no wire frame at all — see its own
- * comment — so {@code awaitingInput} is never computed for it: the frame that already went out
- * was the preceding {@code Notification}'s, which carried {@code true}, and that is still the
- * latest thing the backend or a reconnect replay has seen. Its {@code background_tasks} are still
- * read, though, into the background-work verdict below, and one that left work in flight still
- * arms its grace — otherwise a shell-only verdict it records would have nothing to clear it until
- * the next turn. Should that grace expire under a standing permission prompt, the stored frame
- * already says {@code true} and nothing goes out; a shell grace still clears the verdict, a
- * background-work grace does nothing at all.
+ * <p>The hold path below takes a {@code Stop} only when the stored frame is {@code WAITING}
+ * <em>and</em> carries {@code awaitingInput} {@code true} — a real {@code permission_prompt} or
+ * {@code elicitation_dialog} still pending. It sends no wire frame at all, so {@code
+ * awaitingInput} is never computed for it: the frame that already went out was that {@code
+ * Notification}'s, which carried {@code true}, and that is still the latest thing the backend or a
+ * reconnect replay has seen. The state alone is not enough to hold on, because every {@code
+ * Notification} maps to {@code WAITING} while only those two types carry {@code true}; the rest —
+ * above all the {@code idle_prompt} Claude Code sends about a minute after every turn — carry
+ * {@code null}, which qits-workspaces-service ignores. Holding under one of those swallowed the
+ * {@code Stop} that ends a turn the harness resumed by itself (a background shell finished, no
+ * {@code UserPromptSubmit} in between): nothing went out, the stored {@code null} stood, and the
+ * agent never read as waiting, so it was never nudged or yielded (qits-1511). Such a {@code Stop}
+ * now takes the ordinary path — its own frame and verdict go out, are stored and forwarded, and it
+ * arms its own grace. A held {@code Stop}'s {@code background_tasks} are still read into the
+ * background-work verdict below, and one that left work in flight still arms its grace —
+ * otherwise a shell-only verdict it records would have nothing to clear it until the next turn.
+ * Should that grace expire under a standing permission prompt, the stored frame already says
+ * {@code true} and nothing goes out; a shell grace still clears the verdict, a background-work
+ * grace does nothing at all.
  *
  * <p><b>The background-work verdict (qits-1238)</b> is kept per command beside the stored frame,
  * not in it, because the stored frame is replaced by every hook that is not dropped — and the
@@ -239,13 +251,20 @@ final class HookWebhook {
     } else if ("UserPromptSubmit".equals(hookEvent) || AgentState.ENDED.equals(state)) {
       backgroundByCommand.remove(commandId);
     }
-    // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins). No
-    // frame goes out on this path — see the class javadoc's "hold path" paragraph — so
-    // awaitingInput is never computed for it; the Notification frame already sent carried true.
-    // Its background work was recorded above, and still gets its grace, so the verdict it left
-    // clears in time rather than at the next turn.
+    // A turn-finished Stop must not downgrade a pending permission or elicitation prompt: the
+    // stored frame is WAITING *and* says awaitingInput true. WAITING alone is not enough — an
+    // idle_prompt (or any other) Notification is WAITING with awaitingInput null, and holding
+    // under it swallowed the Stop of a turn the harness resumed by itself, so the agent never
+    // read as waiting (qits-1511); that Stop takes the ordinary path below. No frame goes out on
+    // this path — see the class javadoc's "hold path" paragraph — so awaitingInput is never
+    // computed for it; the Notification frame already sent carried true. Its background work was
+    // recorded above, and still gets its grace, so the verdict it left clears in time rather than
+    // at the next turn.
     AgentActivity current = lastByCommand.get(commandId);
-    if (stop && current != null && AgentState.WAITING.equals(current.state())) {
+    if (stop
+        && current != null
+        && AgentState.WAITING.equals(current.state())
+        && Boolean.TRUE.equals(current.awaitingInput())) {
       forward(commandId, current.state());
       if (grace != null) {
         armGrace(commandId, grace, clearOnExpiry);
