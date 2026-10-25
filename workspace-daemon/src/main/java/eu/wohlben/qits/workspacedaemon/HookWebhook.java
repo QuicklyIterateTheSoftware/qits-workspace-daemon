@@ -121,7 +121,21 @@ import org.jboss.logging.Logger;
  * running, {@code SessionEnd}, a {@link #killed} frame and the expiry of a shell-only {@code
  * Stop}'s grace — never by the expiry of the background-work grace (qits-1460), whose work is still
  * running, and never by a {@code Notification} or a {@code SessionStart}, neither of which knows
- * anything about the background work. {@link #inFlight} reads it; the wire frames do not carry it.
+ * anything about the background work. {@link #inFlight} reads it.
+ *
+ * <p><b>Every frame carries that verdict as {@code backgroundWork} (qits-1601)</b>, read after the
+ * hook has set or cleared it: {@code true} while it is recorded for the command, {@code false}
+ * otherwise. Kept to itself, it left the host reading a {@code Stop} that left a subagent running
+ * as {@code IDLE} and the {@code idle_prompt} {@code Notification} after it as {@code WAITING} —
+ * an agent busy with its own subagent shown as one waiting on the user. So the {@code Stop}
+ * reporting in-flight work says {@code true}, and so does that {@code Notification}, which does
+ * not clear the verdict; {@code UserPromptSubmit}, a {@code Stop} with nothing running or without
+ * the arrays, {@code SessionEnd} and a {@link #killed} frame say {@code false}. A grace's
+ * synthesized frame carries the verdict at expiry: {@code false} after the shell grace, which
+ * clears it first, {@code true} after the background-work grace, which does not. {@link
+ * #reportCurrent()} replays each stored frame as it was sent, verdict included. Nothing else
+ * reads the wire field here — {@code state}, {@code awaitingInput}, the hold path, the graces and
+ * the activity listener are exactly what they were without it.
  */
 final class HookWebhook {
 
@@ -280,7 +294,11 @@ final class HookWebhook {
             body.getString("source"),
             body.getString("transcript_path"),
             System.currentTimeMillis(),
-            stop ? verdict.awaitingNow() : awaitingInput(hookEvent, body));
+            null,
+            null,
+            stop ? verdict.awaitingNow() : awaitingInput(hookEvent, body),
+            null,
+            backgroundWork(commandId));
     if (AgentState.ENDED.equals(state)) {
       lastByCommand.remove(commandId);
     } else {
@@ -291,6 +309,15 @@ final class HookWebhook {
     if (grace != null) {
       armGrace(commandId, grace, clearOnExpiry);
     }
+  }
+
+  /**
+   * The background-work verdict as the wire carries it (qits-1601): {@code true} while one is
+   * recorded for {@code commandId}, {@code false} otherwise. Read after the current hook has set or
+   * cleared it.
+   */
+  private Boolean backgroundWork(String commandId) {
+    return backgroundByCommand.contains(commandId);
   }
 
   /**
@@ -360,7 +387,13 @@ final class HookWebhook {
             last.source(),
             last.transcriptPath(),
             System.currentTimeMillis(),
-            Boolean.TRUE);
+            null,
+            null,
+            Boolean.TRUE,
+            null,
+            // the verdict at expiry: cleared above by the shell grace, kept by the background-work
+            // grace (qits-1601)
+            backgroundWork(commandId));
     lastByCommand.put(commandId, waiting);
     send.accept(waiting);
   }
@@ -403,7 +436,10 @@ final class HookWebhook {
             exitCode,
             message,
             // no next turn to wait out — see the class javadoc's awaitingInput table
-            Boolean.TRUE);
+            Boolean.TRUE,
+            null,
+            // cleared above: whatever it left running died with it (qits-1601)
+            backgroundWork(commandId));
     send.accept(activity);
     forward(commandId, AgentState.ENDED);
   }

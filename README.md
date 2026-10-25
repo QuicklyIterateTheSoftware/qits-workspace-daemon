@@ -62,7 +62,8 @@ declares a `<repositories>` block. Inside CI and the Dockerfile's builder stage,
 ## The two channels
 
 **The control socket** — the daemon dials `ws://<host>/workspaces/daemon/{workspaceId}` on boot and
-keeps it open. Provisioning progress, agent activity (each frame naming its agent), each branch the
+keeps it open. Provisioning progress, agent activity (each frame naming its agent and, from
+capability 12, whether background work it started is still in flight), each branch the
 daemon pushed for an agent (`AgentBranchPushed`), every agent harness exit (`AgentHarnessExit`,
 capability 11) and change nudges all ride it. Message shapes live in `workspace-daemon-protocol`;
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the

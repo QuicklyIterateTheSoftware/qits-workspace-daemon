@@ -45,6 +45,15 @@ package eu.wohlben.qits.workspacedaemon.protocol;
  *     null for a command no agent owns (the sign-in terminal). A workspace hosts several agents,
  *     so the host keys the session id and the activity by agent, not by workspace. Optional on the
  *     wire, written only when present
+ * @param backgroundWork (capability 12, qits-1601) whether the agent's harness ended its turn but
+ *     background work it started — a subagent, a monitor, a session cron or a background shell —
+ *     is still in flight, by the daemon's background-work verdict (qits-1238, qits-1460): {@code
+ *     true} while that verdict is recorded for the command, {@code false} when nothing is recorded
+ *     as in flight. It rides every frame {@code workspace-daemon} sends, so the {@code idle_prompt}
+ *     {@code Notification} that follows a {@code Stop} about a minute later still says the agent is
+ *     busy with its own subagent rather than waiting. {@code null} from a daemon that predates it.
+ *     Optional on the wire, written only when present: an older host simply does not read the key,
+ *     and a newer host reading an older daemon's frame decodes {@code null} — "unknown", not "no"
  */
 public record AgentActivity(
     String commandId,
@@ -57,10 +66,44 @@ public record AgentActivity(
     Integer exitCode,
     String message,
     Boolean awaitingInput,
-    String agentId)
+    String agentId,
+    Boolean backgroundWork)
     implements DaemonMessage {
 
-  /** Every field but {@code agentId}, which is then null: the shape before capability 10. */
+  /**
+   * Every field but {@code backgroundWork}, which is then null: the shape before capability 12.
+   */
+  public AgentActivity(
+      String commandId,
+      String sessionId,
+      String state,
+      String hookEvent,
+      String source,
+      String transcriptPath,
+      long at,
+      Integer exitCode,
+      String message,
+      Boolean awaitingInput,
+      String agentId) {
+    this(
+        commandId,
+        sessionId,
+        state,
+        hookEvent,
+        source,
+        transcriptPath,
+        at,
+        exitCode,
+        message,
+        awaitingInput,
+        agentId,
+        null);
+  }
+
+  /**
+   * Every field but {@code agentId} and {@code backgroundWork}, which are then null: the shape
+   * before capability 10.
+   */
   public AgentActivity(
       String commandId,
       String sessionId,
@@ -99,7 +142,25 @@ public record AgentActivity(
         exitCode,
         message,
         awaitingInput,
-        agent);
+        agent,
+        backgroundWork);
+  }
+
+  /** This frame, carrying the given background-work verdict (qits-1601). */
+  public AgentActivity withBackgroundWork(Boolean inFlight) {
+    return new AgentActivity(
+        commandId,
+        sessionId,
+        state,
+        hookEvent,
+        source,
+        transcriptPath,
+        at,
+        exitCode,
+        message,
+        awaitingInput,
+        agentId,
+        inFlight);
   }
 
   /**

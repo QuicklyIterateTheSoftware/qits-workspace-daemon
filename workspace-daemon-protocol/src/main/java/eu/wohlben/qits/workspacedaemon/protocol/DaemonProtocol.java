@@ -101,8 +101,17 @@ public final class DaemonProtocol {
    * hears of a plain exit, as before. The daemon cannot gate on the host's version anyway: {@link
    * Ack} carries none. A host on 11 talking to a daemon on 10 just never receives one. The killed
    * agent's {@link AgentActivity} {@code ENDED} is unchanged and still sent beside it.
+   *
+   * <p><b>12 added {@link AgentActivity#backgroundWork()}</b> (qits-1601): the daemon's
+   * background-work verdict (qits-1238, qits-1460) on every activity frame — whether a turn ended
+   * with a subagent, a monitor, a session cron or a background shell still in flight. Before it the
+   * verdict stayed inside the daemon, so a {@code Stop} that left a subagent running read as {@code
+   * IDLE} and the {@code idle_prompt} {@code Notification} after it as {@code WAITING}. Nothing
+   * gates on this number. A backend on 11 decodes the frame (the new key is unread) and is exactly
+   * as blind to background work as before; a backend on 12 reading a daemon on 11 decodes {@code
+   * null}. Optional on the wire in both directions, the {@code awaitingInput} rule again.
    */
-  public static final int CAPABILITY_VERSION = 11;
+  public static final int CAPABILITY_VERSION = 12;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -195,6 +204,9 @@ public final class DaemonProtocol {
     public static final String AWAITING_INPUT = "awaitingInput";
     // Optional on AgentActivity (qits-1152, capability 10); required on AgentBranchPushed.
     public static final String AGENT_ID = "agentId";
+    // Optional on AgentActivity (qits-1601, capability 12): written only when present, so a frame
+    // from a daemon with no background-work verdict is byte-identical to one built before it.
+    public static final String BACKGROUND_WORK = "backgroundWork";
     public static final String REPOSITORY = "repository";
     public static final String SHA = "sha";
     // AgentHarnessExit (qits-1236, capability 11). It also carries AGENT_ID, COMMAND_ID, EXIT_CODE

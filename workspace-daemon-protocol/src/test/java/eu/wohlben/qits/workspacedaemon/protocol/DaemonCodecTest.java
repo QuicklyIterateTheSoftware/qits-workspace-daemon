@@ -473,9 +473,14 @@ class DaemonCodecTest {
 
   @Test
   void theHarnessExitLandedAtCapabilityEleven() {
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 11);
+  }
+
+  @Test
+  void theBackgroundWorkVerdictLandedAtCapabilityTwelve() {
     // A literal: the host records it, and a capability that moved without this line moving is a
     // contract nobody re-read.
-    assertEquals(11, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals(12, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test
@@ -567,6 +572,40 @@ class DaemonCodecTest {
     AgentActivity tagged = plain.withAgentId("agent-1");
     assertEquals("agent-1", DaemonCodec.encode(tagged).get("agentId"));
     assertEquals(tagged, roundTrip(tagged));
+  }
+
+  @Test
+  void anActivityCarriesItsBackgroundWorkVerdictOnlyWhenItHasOne() {
+    AgentActivity plain = new AgentActivity("cmd-1", "s-1", "IDLE", "Stop", null, null, 7L);
+    assertNull(plain.backgroundWork());
+    assertFalse(DaemonCodec.encode(plain).containsKey("backgroundWork"));
+    assertNull(((AgentActivity) roundTrip(plain)).backgroundWork());
+
+    AgentActivity busy = plain.withAgentId("agent-1").withBackgroundWork(Boolean.TRUE);
+    assertEquals(Boolean.TRUE, DaemonCodec.encode(busy).get("backgroundWork"));
+    assertEquals(busy, roundTrip(busy));
+    assertEquals(
+        Boolean.TRUE, busy.withAgentId("agent-2").backgroundWork(), "withAgentId keeps it");
+
+    AgentActivity idle = plain.withBackgroundWork(Boolean.FALSE);
+    assertEquals(Boolean.FALSE, DaemonCodec.encode(idle).get("backgroundWork"));
+    assertEquals(Boolean.FALSE, ((AgentActivity) roundTrip(idle)).backgroundWork());
+  }
+
+  @Test
+  void anOlderDaemonsActivityWithNoBackgroundWorkKeyDecodesItAsNull() {
+    Map<String, Object> wire = new java.util.LinkedHashMap<>();
+    wire.put("type", DaemonProtocol.Type.AGENT_ACTIVITY);
+    wire.put("commandId", "cmd-1");
+    wire.put("state", "IDLE");
+    wire.put("hookEvent", "Stop");
+    wire.put("at", 7L);
+    wire.put("awaitingInput", Boolean.FALSE);
+    wire.put("agentId", "agent-1");
+    AgentActivity decoded = (AgentActivity) DaemonCodec.decode(wire);
+    assertNull(decoded.backgroundWork());
+    assertEquals(Boolean.FALSE, decoded.awaitingInput());
+    assertEquals("agent-1", decoded.agentId());
   }
 
   @Test

@@ -122,6 +122,10 @@ public final class DaemonCodec {
         if (m.agentId() != null) {
           map.put(Field.AGENT_ID, m.agentId());
         }
+        // backgroundWork (qits-1601) too: absent from a daemon that has no verdict to give.
+        if (m.backgroundWork() != null) {
+          map.put(Field.BACKGROUND_WORK, m.backgroundWork());
+        }
       }
       case AgentBranchPushed m -> {
         map.put(Field.TYPE, Type.AGENT_BRANCH_PUSHED);
@@ -237,7 +241,8 @@ public final class DaemonCodec {
               intObj(map, Field.EXIT_CODE),
               str(map, Field.MESSAGE),
               boolObj(map, Field.AWAITING_INPUT),
-              str(map, Field.AGENT_ID));
+              str(map, Field.AGENT_ID),
+              boolObj(map, Field.BACKGROUND_WORK));
       case Type.AGENT_BRANCH_PUSHED ->
           new AgentBranchPushed(
               str(map, Field.AGENT_ID),

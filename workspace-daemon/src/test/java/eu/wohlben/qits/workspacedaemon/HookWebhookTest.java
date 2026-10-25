@@ -1005,4 +1005,113 @@ class HookWebhookTest {
     assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
     graced.close();
   }
+
+  // --- the background-work verdict on the wire (qits-1601) -----------------------------------
+  // The verdict above used to stay inside the daemon, so the host read an agent busy with its own
+  // subagent as IDLE, then WAITING. Every frame now carries it; state and awaitingInput stay put.
+
+  private static JsonObject reproducedSubagentStop() {
+    return new JsonObject(
+        "{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"a1\","
+            + "\"type\":\"subagent\",\"status\":\"running\"}],\"session_crons\":[]}");
+  }
+
+  @Test
+  void aTurnThatLeftASubagentRunningSaysSoOnItsStopAndOnTheIdlePromptAfterIt() {
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    AgentActivity submitted = lastSent();
+    assertEquals(AgentState.BUSY, submitted.state());
+    assertEquals(Boolean.FALSE, submitted.awaitingInput());
+    assertEquals(Boolean.FALSE, submitted.backgroundWork());
+
+    webhook.handle("Stop", reproducedSubagentStop(), "cmd-1");
+    AgentActivity stop = lastSent();
+    assertEquals(AgentState.IDLE, stop.state());
+    assertEquals(Boolean.FALSE, stop.awaitingInput());
+    assertEquals(Boolean.TRUE, stop.backgroundWork());
+
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    AgentActivity idlePrompt = lastSent();
+    assertEquals(AgentState.WAITING, idlePrompt.state());
+    assertNull(idlePrompt.awaitingInput());
+    assertEquals(
+        Boolean.TRUE, idlePrompt.backgroundWork(), "a Notification does not clear the verdict");
+    assertEquals(3, sent.size());
+  }
+
+  @Test
+  void aLaterStopWithNothingRunningSaysNoBackgroundWork() {
+    webhook.handle("Stop", reproducedSubagentStop(), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+
+    webhook.handle("Stop", nothingRunningStop(), "cmd-1");
+
+    assertEquals(Boolean.TRUE, lastSent().awaitingInput());
+    assertEquals(Boolean.FALSE, lastSent().backgroundWork());
+  }
+
+  @Test
+  void aStopFromAHarnessThatDoesNotReportTheArraysSaysNoBackgroundWork() {
+    webhook.handle("Stop", reproducedSubagentStop(), "cmd-1");
+
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+
+    assertNull(lastSent().awaitingInput());
+    assertEquals(Boolean.FALSE, lastSent().backgroundWork());
+  }
+
+  @Test
+  void aSessionStartCarriesTheVerdictAsItStands() {
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    assertEquals(Boolean.FALSE, lastSent().backgroundWork());
+  }
+
+  @Test
+  void aKilledFrameSaysNoBackgroundWork() {
+    webhook.handle("Stop", reproducedSubagentStop(), "cmd-1");
+
+    webhook.killed("cmd-1", AgentEvent.OOM_KILLED, 137, "killed by the out-of-memory killer");
+
+    assertEquals(AgentState.ENDED, lastSent().state());
+    assertEquals(Boolean.FALSE, lastSent().backgroundWork());
+  }
+
+  @Test
+  void aSessionEndSaysNoBackgroundWork() {
+    webhook.handle("Stop", reproducedSubagentStop(), "cmd-1");
+
+    webhook.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+
+    assertEquals(AgentState.ENDED, lastSent().state());
+    assertEquals(Boolean.FALSE, lastSent().backgroundWork());
+  }
+
+  @Test
+  void aShellGracesExpiryFrameSaysNoBackgroundWork() throws InterruptedException {
+    HookWebhook graced = graced(SHORT_GRACE);
+    graced.handle("Stop", shellOnlyStop(), "cmd-1");
+    assertEquals(Boolean.TRUE, lastGraced().backgroundWork());
+
+    await(() -> gracedSent.size() == 2);
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
+    assertEquals(
+        Boolean.FALSE, lastGraced().backgroundWork(), "the shell grace clears it before the frame");
+    graced.close();
+  }
+
+  @Test
+  void aBackgroundWorkGracesExpiryFrameStillSaysBackgroundWork() throws InterruptedException {
+    HookWebhook graced = workGraced();
+    graced.handle("Stop", backgroundSubagentStop(), "cmd-1");
+    assertEquals(Boolean.TRUE, lastGraced().backgroundWork());
+
+    await(() -> gracedSent.size() == 2);
+    assertEquals(Boolean.TRUE, lastGraced().awaitingInput());
+    assertEquals(Boolean.TRUE, lastGraced().backgroundWork(), "the subagent is still running");
+
+    gracedSent.clear();
+    graced.reportCurrent();
+    assertEquals(Boolean.TRUE, lastGraced().backgroundWork(), "and a reconnect replays it");
+    graced.close();
+  }
 }
