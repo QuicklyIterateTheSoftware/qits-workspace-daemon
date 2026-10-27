@@ -61,9 +61,9 @@ final class DaemonStreamTunnel {
   /**
    * The {@code Authorization} header every dial-back carries — {@code Bearer <workspace token>} on
    * a workspace carrying a {@code QITS_TOKEN} (runner-placed, or an admin/editor (DIRECT) workspace
-   * since qits-1084), empty on a container still holding a commissioned pair instead (that branch
-   * goes away outright with qits-876). Handed in by {@link ControlSocket}, which is the one place
-   * the token is read.
+   * since qits-1084), empty on a container handed no token, whose dial-back is then nonce only, as
+   * its control socket is anonymous. Handed in by {@link ControlSocket}, which is the one place the
+   * token is read.
    */
   private final Optional<String> authorization;
 

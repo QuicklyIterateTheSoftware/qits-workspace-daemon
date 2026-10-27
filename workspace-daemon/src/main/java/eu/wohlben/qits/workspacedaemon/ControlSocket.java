@@ -51,11 +51,6 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -109,30 +104,14 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.workspace-daemon.url")
   Optional<String> url;
 
-  /** The per-container IdP client commissioned by qits-workspaces. */
-  @ConfigProperty(name = "qits.commissioned-client-id")
-  Optional<String> commissionedClientId;
-
-  /** Its one-time secret, paired with {@link #commissionedClientId}. */
-  @ConfigProperty(name = "qits.commissioned-client-secret")
-  Optional<String> commissionedClientSecret;
-
-  /** Where that client exchanges its pair for the control socket's bearer token. */
-  @ConfigProperty(name = "qits.workspace-daemon.auth-token-url")
-  Optional<String> authTokenUrl;
-
-  /** The qits-workspaces audience required by the protected control socket. */
-  @ConfigProperty(name = "qits.workspace-daemon.auth-audience")
-  Optional<String> authAudience;
-
   /**
    * The workspace token ({@code QITS_TOKEN}): a non-expiring {@code tok-…} bearer the platform
    * minted for this workspace, set on a runner-placed workspace and, since qits-1084, on an admin
    * or editor (DIRECT) workspace too. Where it is set it is the whole credential — the control
    * socket and every tunnel dial-back present it as is and nothing is minted ({@link
    * #authorization()}) — because such a workspace reaches qits only through the public edge, which
-   * admits a bearer and nothing else. The commissioned-pair branch below is what a container still
-   * holding a pair instead falls back to; removing that branch outright is qits-876. Read here and
+   * admits a bearer and nothing else. It is the daemon's only dial-home credential: absent, the
+   * daemon dials anonymously, as the clone-alone/local topology does. Read here and
    * nowhere else; the tunnel is handed it.
    */
   @ConfigProperty(name = "qits.workspace-daemon.token")
@@ -343,8 +322,6 @@ public class ControlSocket {
           });
 
   private volatile WebSocketClient client;
-  private final HttpClient tokenClient =
-      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   private volatile WebSocket socket;
   private volatile Context socketContext;
 
@@ -502,7 +479,7 @@ public class ControlSocket {
     // The reverse tunnel qits reaches WorkspaceApi through. Independent of provisioning for the
     // same reason the hook webhook is: it only needs the url and the port, and a stream requested
     // before the API is up simply fails to connect to loopback and answers nothing.
-    tunnel = new DaemonStreamTunnel(vertx, url.get(), bearer(), workspaceApi.apiPort());
+    tunnel = new DaemonStreamTunnel(vertx, url.get(), authorization(), workspaceApi.apiPort());
     tunnel.start();
     client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
@@ -998,20 +975,7 @@ public class ControlSocket {
       LOG.errorf(e, "Malformed qits.workspace-daemon.url '%s' — workspace-daemon idle.", url.get());
       return; // an unparseable URL won't become parseable on retry; stay alive, stay idle
     }
-    authorization()
-        .whenComplete(
-            (authorization, failure) ->
-                vertx.runOnContext(
-                    ignored -> {
-                      if (failure != null) {
-                        LOG.debugf(
-                            "workspace-daemon could not mint its dial-home token (attempt %d): %s",
-                            attempt, failure.getMessage());
-                        reconnect(attempt);
-                        return;
-                      }
-                      connect(uri, attempt, authorization);
-                    }));
+    connect(uri, attempt, authorization());
   }
 
   private void connect(URI uri, int attempt, Optional<String> authorization) {
@@ -1034,73 +998,18 @@ public class ControlSocket {
     return DaemonDial.connectOptions(uri, authorization);
   }
 
-  /** The workspace token as a header value, or empty when this workspace was handed none. */
-  Optional<String> bearer() {
+  /**
+   * The control socket's {@code Authorization}: the workspace token as a bearer, or empty when this
+   * workspace was handed none (or a blank one). Nothing is minted and nothing is exchanged — the
+   * token is presented as is, on every initial and reconnecting handshake and on every tunnel
+   * dial-back. Empty dials anonymously, which is the clone-alone/local topology (and the pin test
+   * qits-workspaces runs this daemon's jar in, whose stand-in host accepts any upgrade); who may
+   * open a control socket is the host's decision, not this daemon's.
+   */
+  Optional<String> authorization() {
     return token == null
         ? Optional.empty()
         : token.filter(value -> !value.isBlank()).map(value -> "Bearer " + value.trim());
-  }
-
-  /**
-   * The control socket's {@code Authorization}, without blocking the Vert.x event loop.
-   *
-   * <p>The workspace token wins outright: present, it is the header and nothing is minted. Absent,
-   * the commissioned pair is exchanged for a machine token by {@code client_secret_post} — the
-   * client id and secret in the form body, no {@code Basic} header, because the edge eats a {@code
-   * Basic} header rather than forwarding it. Absent configuration keeps the clone-alone/developer
-   * topology anonymous; a partial configuration fails closed and is retried with the socket.
-   */
-  java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
-    Optional<String> bearer = bearer();
-    if (bearer.isPresent()) {
-      return java.util.concurrent.CompletableFuture.completedFuture(bearer);
-    }
-    boolean any =
-        commissionedClientId.isPresent()
-            || commissionedClientSecret.isPresent()
-            || authTokenUrl.isPresent()
-            || authAudience.isPresent();
-    if (!any) {
-      return java.util.concurrent.CompletableFuture.completedFuture(Optional.empty());
-    }
-    if (commissionedClientId.isEmpty()
-        || commissionedClientSecret.isEmpty()
-        || authTokenUrl.isEmpty()
-        || authAudience.isEmpty()) {
-      return java.util.concurrent.CompletableFuture.failedFuture(
-          new IllegalStateException("commissioned dial-home authentication is incomplete"));
-    }
-    HttpRequest request;
-    try {
-      String form =
-          "grant_type=client_credentials&client_id="
-              + URLEncoder.encode(commissionedClientId.get(), StandardCharsets.UTF_8)
-              + "&client_secret="
-              + URLEncoder.encode(commissionedClientSecret.get(), StandardCharsets.UTF_8)
-              + "&audience="
-              + URLEncoder.encode(authAudience.get(), StandardCharsets.UTF_8);
-      request =
-          HttpRequest.newBuilder(URI.create(authTokenUrl.get()))
-              .timeout(Duration.ofSeconds(5))
-              .header("Content-Type", "application/x-www-form-urlencoded")
-              .POST(HttpRequest.BodyPublishers.ofString(form))
-              .build();
-    } catch (RuntimeException e) {
-      return java.util.concurrent.CompletableFuture.failedFuture(e);
-    }
-    return tokenClient
-        .sendAsync(request, HttpResponse.BodyHandlers.ofString())
-        .thenApply(
-            response -> {
-              if (response.statusCode() / 100 != 2) {
-                throw new IllegalStateException("idp answered " + response.statusCode());
-              }
-              String token = new JsonObject(response.body()).getString("access_token");
-              if (token == null || token.isBlank()) {
-                throw new IllegalStateException("idp answered without an access token");
-              }
-              return Optional.of("Bearer " + token);
-            });
   }
 
   private void onConnected(WebSocket ws) {

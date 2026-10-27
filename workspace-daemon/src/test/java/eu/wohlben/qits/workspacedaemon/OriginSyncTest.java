@@ -197,7 +197,7 @@ class OriginSyncTest {
   void anAgentWhoseEnvHoldsNoTokenOfItsOwnIsNeverPushed() throws Exception {
     committedOnBranch();
     // Something in the env, but not the agent's token: there is nothing to push as.
-    credential.set(Optional.of(Map.of("QITS_COMMISSIONED_CLIENT_SECRET", "not-a-token")));
+    credential.set(Optional.of(Map.of("QITS_AGENT_ID", "not-a-token")));
 
     assertTrue(sync.pushCycle().isEmpty());
     assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-fix"));

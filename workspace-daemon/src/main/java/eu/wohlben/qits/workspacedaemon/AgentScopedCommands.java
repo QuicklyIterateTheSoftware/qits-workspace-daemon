@@ -100,11 +100,11 @@ final class AgentScopedCommands implements AgentCommands {
    * then the launch's (the library's {@code HOME} still wins).
    *
    * <p>The commands layer lays this map over the daemon's environment and cannot remove a name, so
-   * a secret is set to the empty string instead. That keeps the workspace token, the commissioned
-   * client and the daemon's API token out of the harness: without the API token a harness cannot
-   * drive another agent through this daemon's routes, and without the workspace token its git can
-   * push only with the agent's own (an empty {@code QITS_TOKEN} reads as absent to the image's
-   * credential helper). Package-private for the test.
+   * a secret is set to the empty string instead. That keeps the workspace token, the agent
+   * configuration document and the daemon's API token out of the harness: without the API token a
+   * harness cannot drive another agent through this daemon's routes, and without the workspace
+   * token its git can push only with the agent's own (an empty {@code QITS_TOKEN} reads as absent to
+   * the image's credential helper). Package-private for the test.
    */
   Map<String, String> environmentFor(Map<String, String> launch) {
     Map<String, String> merged = new HashMap<>();
