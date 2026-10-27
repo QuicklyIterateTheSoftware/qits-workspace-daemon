@@ -63,19 +63,25 @@ final class AgentWorktreeJson {
 
   /** {@code GET agent-worktrees/{agentId}/cleanup-check}, and a refused delete's body. */
   static JsonObject cleanupCheck(AgentWorktrees.CleanupCheck check) {
-    JsonArray unpushed = new JsonArray();
-    for (AgentWorktrees.Leftover leftover : check.unpushed()) {
-      unpushed.add(
+    return new JsonObject()
+        .put("clean", check.clean())
+        .put("delivered", check.delivered())
+        .put("dirty", new JsonArray(check.dirty()))
+        .put("unpushed", leftovers(check.unpushed()))
+        .put("inRelease", leftovers(check.inRelease()))
+        .put("busy", check.busy());
+  }
+
+  private static JsonArray leftovers(java.util.List<AgentWorktrees.Leftover> leftovers) {
+    JsonArray out = new JsonArray();
+    for (AgentWorktrees.Leftover leftover : leftovers) {
+      out.add(
           new JsonObject()
               .put("repository", leftover.repository())
               .put("branch", leftover.branch())
               .put("commits", leftover.commits()));
     }
-    return new JsonObject()
-        .put("clean", check.clean())
-        .put("dirty", new JsonArray(check.dirty()))
-        .put("unpushed", unpushed)
-        .put("busy", check.busy());
+    return out;
   }
 
   /** {@code POST agent-worktrees/{agentId}/yield}. */

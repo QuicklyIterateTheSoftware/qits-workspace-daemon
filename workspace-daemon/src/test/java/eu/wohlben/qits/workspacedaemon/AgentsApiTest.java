@@ -1457,8 +1457,10 @@ class AgentsApiTest {
     assertEquals(
         new JsonObject()
             .put("clean", true)
+            .put("delivered", true)
             .put("dirty", new JsonArray())
             .put("unpushed", new JsonArray())
+            .put("inRelease", new JsonArray())
             .put("busy", true),
         check.body(),
         "busy is the harness, and clean stays git's");

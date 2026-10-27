@@ -50,6 +50,21 @@ final class AgentWorktrees {
   private static final Pattern AGENT_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
 
   /**
+   * Where the git host's tags are kept (qits-1688). A release tags the fold and deletes the branches
+   * it consumed, so until the tag reaches {@code main} the work is only in the tag. A namespace of
+   * its own, not {@code refs/tags}, so a tag an agent makes locally never hides its own commits.
+   */
+  static final String ORIGIN_TAGS_REFSPEC = "+refs/tags/*:refs/origin-tags/*";
+
+  /**
+   * What the git host already holds, as {@code rev-list} arguments after a commit (qits-1688): any
+   * of its branches, {@code main} among them, and any of its tags. A commit reachable from one of
+   * them is delivered.
+   */
+  static final List<String> NOT_ON_ORIGIN =
+      List.of("--not", "--remotes=origin", "--glob=refs/origin-tags/*");
+
+  /**
    * One repository of the base clone: the wrapper ({@code path} empty) or a submodule. {@code
    * originUrl} is the origin the daemon set, read before any agent existed; {@link GitConfigGuard}
    * refuses to talk to the git host once it has changed.
@@ -60,7 +75,11 @@ final class AgentWorktrees {
     }
   }
 
-  /** One repository of an agent worktree as it stands now. */
+  /**
+   * One repository of an agent worktree as it stands now. {@code unpushedCommits}: commits the git
+   * host does not hold at all. {@code inReleaseCommits}: commits it holds on a branch or in a tag,
+   * but not yet on the default branch (qits-1688).
+   */
   record RepoState(
       String repository,
       String path,
@@ -68,28 +87,41 @@ final class AgentWorktrees {
       String head,
       boolean dirty,
       int unpushedCommits,
+      int inReleaseCommits,
       boolean pushed) {}
 
   /** What {@link #cleanupCheck} found. */
   record Leftover(String repository, String branch, int commits) {}
 
   /**
-   * {@code busy} is the harness, not git (qits-1233): its work is still in flight — a turn, or a
+   * The check has three outcomes per commit (qits-1688): on the default branch is delivered; held
+   * by another branch or a tag of the git host is {@code inRelease}, so nothing is lost and nothing
+   * is asked of the agent, but its cleanup waits until the release reaches the default branch;
+   * anything else is {@code unpushed}. {@link #clean()} is "nothing is lost", which is what a
+   * removal needs; {@link #delivered()} is "all of it reached the default branch", which is what
+   * the cleanup sweep waits for.
+   *
+   * <p>{@code busy} is the harness, not git (qits-1233): its work is still in flight — a turn, or a
    * background task left running after a {@code Stop}. It is filled by {@code AgentRuntime}, which
    * knows the harness; this class only reads git and always answers {@code false}. {@link #clean()}
    * stays git-only, because nothing the harness is doing is work a removal would lose from disk.
    */
-  record CleanupCheck(List<String> dirty, List<Leftover> unpushed, boolean busy) {
-    CleanupCheck(List<String> dirty, List<Leftover> unpushed) {
-      this(dirty, unpushed, false);
+  record CleanupCheck(
+      List<String> dirty, List<Leftover> unpushed, List<Leftover> inRelease, boolean busy) {
+    CleanupCheck(List<String> dirty, List<Leftover> unpushed, List<Leftover> inRelease) {
+      this(dirty, unpushed, inRelease, false);
     }
 
     boolean clean() {
       return dirty.isEmpty() && unpushed.isEmpty();
     }
 
+    boolean delivered() {
+      return clean() && inRelease.isEmpty();
+    }
+
     CleanupCheck withBusy(boolean busy) {
-      return new CleanupCheck(dirty, unpushed, busy);
+      return new CleanupCheck(dirty, unpushed, inRelease, busy);
     }
   }
 
@@ -440,8 +472,8 @@ final class AgentWorktrees {
     if ("(initial)".equals(head)) {
       head = "";
     }
-    int unpushed =
-        count(GitExec.git(worktree, "rev-list", "--count", "HEAD", "--not", "--remotes=origin"));
+    int unpushed = count(GitExec.git(worktree, notOnOrigin("HEAD")));
+    int inRelease = head.isEmpty() ? 0 : Math.max(0, notOnDefault(repo, worktree) - unpushed);
     boolean pushed = false;
     if (branch != null) {
       GitExec.Out remote =
@@ -449,7 +481,35 @@ final class AgentWorktrees {
               worktree, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + branch);
       pushed = remote.ok() && remote.line().equals(head);
     }
-    return new RepoState(repo.name(), repo.path(), branch, head, dirty, unpushed, pushed);
+    return new RepoState(
+        repo.name(), repo.path(), branch, head, dirty, unpushed, inRelease, pushed);
+  }
+
+  /** {@code rev-list --count <commit>} minus what the git host holds ({@link #NOT_ON_ORIGIN}). */
+  static String[] notOnOrigin(String commit) {
+    List<String> args = new ArrayList<>(List.of("rev-list", "--count", commit));
+    args.addAll(NOT_ON_ORIGIN);
+    return args.toArray(String[]::new);
+  }
+
+  /**
+   * Commits of HEAD not on {@code origin/<default>}. Without that ref every commit counts, and an
+   * answer git could not give counts as one, so a failed read never reads as delivered.
+   */
+  private static int notOnDefault(Repo repo, Path worktree) {
+    String main = "refs/remotes/origin/" + repo.defaultBranch();
+    GitExec.Out out =
+        hasRef(worktree, main)
+            ? GitExec.git(worktree, "rev-list", "--count", "HEAD", "--not", main)
+            : GitExec.git(worktree, "rev-list", "--count", "HEAD");
+    if (!out.ok()) {
+      return 1;
+    }
+    try {
+      return Integer.parseInt(out.line());
+    } catch (NumberFormatException e) {
+      return 1;
+    }
   }
 
   private static int count(GitExec.Out out) {
@@ -464,21 +524,80 @@ final class AgentWorktrees {
   }
 
   /**
-   * Uncommitted changes and commits no remote branch has (D5). A commit left on a detached HEAD is
-   * unpushed work too, reported with no branch (D22).
+   * Uncommitted changes, commits the git host does not hold (D5), and commits it holds that have
+   * not reached the default branch yet (qits-1688). A commit left on a detached HEAD is unpushed
+   * work too, reported with no branch (D22).
+   *
+   * <p>Before a repository is reported, its default branch, its tags and the agent's branch are
+   * fetched (qits-1688). So work a release tagged is in release even after the release deleted its
+   * branch, and work that reached the default branch is delivered. Only repositories with commits
+   * off the default branch are fetched, with the workspace's own credential, best effort: a failed
+   * fetch leaves the counts as they were.
    */
   CleanupCheck cleanupCheck(String agentId) {
     List<String> dirty = new ArrayList<>();
     List<Leftover> unpushed = new ArrayList<>();
-    for (RepoState state : status(agentId)) {
+    List<Leftover> inRelease = new ArrayList<>();
+    Path dir = wrapperDir(agentId);
+    for (Repo repo : repositories()) {
+      Path worktree = repo.wrapper() ? dir : dir.resolve(repo.path());
+      if (!Files.exists(worktree.resolve(".git"))) {
+        continue;
+      }
+      RepoState state = state(repo, worktree);
+      if (state.unpushedCommits() + state.inReleaseCommits() > 0
+          && refreshOrigin(repo, state.branch())) {
+        state = state(repo, worktree);
+      }
       if (state.dirty()) {
         dirty.add(state.repository());
       }
       if (state.unpushedCommits() > 0) {
         unpushed.add(new Leftover(state.repository(), state.branch(), state.unpushedCommits()));
       }
+      if (state.inReleaseCommits() > 0) {
+        inRelease.add(
+            new Leftover(state.repository(), state.branch(), state.inReleaseCommits()));
+      }
     }
-    return new CleanupCheck(List.copyOf(dirty), List.copyOf(unpushed));
+    return new CleanupCheck(List.copyOf(dirty), List.copyOf(unpushed), List.copyOf(inRelease));
+  }
+
+  /**
+   * Fetch {@code repo}'s default branch, its tags and {@code branch} (when there is one) with the
+   * workspace's credential. Best effort; answers whether anything was fetched. The branch is fetched
+   * on its own, because a branch the release deleted would fail the whole fetch.
+   */
+  private boolean refreshOrigin(Repo repo, String branch) {
+    Path repository = dirOf(repo);
+    List<String> tampered = GitConfigGuard.violations(repository, repo.originUrl());
+    if (!tampered.isEmpty()) {
+      LOG.warnf("Not fetching %s: its config carries %s", repo.name(), tampered);
+      return false;
+    }
+    boolean fetched =
+        GitExec.network(
+                repository,
+                GitExec.workspaceCredential(),
+                "fetch",
+                "--quiet",
+                "origin",
+                "+refs/heads/" + repo.defaultBranch() + ":refs/remotes/origin/" + repo.defaultBranch(),
+                ORIGIN_TAGS_REFSPEC)
+            .ok();
+    if (branch != null && !branch.equals(repo.defaultBranch())) {
+      // Absent on the git host is the ordinary case for a released branch, and fails quietly.
+      fetched |=
+          GitExec.network(
+                  repository,
+                  GitExec.workspaceCredential(),
+                  "fetch",
+                  "--quiet",
+                  "origin",
+                  "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
+              .ok();
+    }
+    return fetched;
   }
 
   /**

@@ -108,6 +108,20 @@ class OriginSyncTest {
   }
 
   @Test
+  void aBranchWhoseWorkAReleaseTagHoldsIsNotPushedAgain() throws Exception {
+    // qits-1688: the release deleted the branch and kept the work in its tag. Pushing the branch
+    // again would bring it back.
+    Path child = child();
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    git(child, "commit", "--quiet", "--allow-empty", "-m", "released");
+    git(child, "push", "--quiet", "origin", "HEAD:refs/tags/2026.1.1");
+    sync.fetchAll();
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-fix"));
+  }
+
+  @Test
   void theDefaultBranchIsNeverPushed() throws Exception {
     Path child = child();
     String before = line(estate.childOrigin(), "rev-parse", "main");

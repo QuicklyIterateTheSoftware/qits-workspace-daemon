@@ -22,12 +22,12 @@ import org.jboss.logging.Logger;
  *
  * <ul>
  *   <li><b>Fetch (origin → base clone).</b> {@code git fetch --prune origin} in the base clone and
- *       in every submodule, on a timer and whenever the host hints that a ref moved ({@code
+ *       in every submodule, branches and tags (the tags under {@code refs/origin-tags}, qits-1688), on a timer and whenever the host hints that a ref moved ({@code
  *       PullBranch}). Only remote-tracking refs move; the base clone's working tree is never
  *       touched, so a dirty tree can never block it. Agent worktrees share these refs, so a fresh
  *       {@code origin/main} is there for every agent at once.
  *   <li><b>Auto-push (agent branches → origin).</b> Every agent branch with commits no remote
- *       branch has is pushed, the wrapper branch and any branch an agent made in a submodule alike,
+ *       branch or tag has is pushed, the wrapper branch and any branch an agent made in a submodule alike,
  *       each with <em>that agent's</em> credential. Each push is reported as an {@link
  *       AgentBranchPushed}. The default branch is never pushed, and a commit on a detached HEAD is
  *       not pushed at all; the cleanup check reports it.
@@ -206,7 +206,14 @@ final class OriginSync {
       }
       GitExec.Out fetched =
           GitExec.network(
-              dir, GitExec.workspaceCredential(), "fetch", "--prune", "--quiet", "origin");
+              dir,
+              GitExec.workspaceCredential(),
+              "fetch",
+              "--prune",
+              "--quiet",
+              "origin",
+              "+refs/heads/*:refs/remotes/origin/*",
+              AgentWorktrees.ORIGIN_TAGS_REFSPEC);
       if (!fetched.ok()) {
         failures++;
         LOG.debugf(
@@ -262,9 +269,9 @@ final class OriginSync {
     if (worktree.head().equals(handled.get(key))) {
       return null;
     }
-    GitExec.Out ahead =
-        GitExec.git(
-            repository, "rev-list", "--count", worktree.head(), "--not", "--remotes=origin");
+    // A commit a release tag holds is delivered, even after the release deleted its branch: pushing
+    // it again would bring the released branch back (qits-1688).
+    GitExec.Out ahead = GitExec.git(repository, AgentWorktrees.notOnOrigin(worktree.head()));
     if (ahead.ok() && "0".equals(ahead.line())) {
       handled.put(key, worktree.head());
       return null;

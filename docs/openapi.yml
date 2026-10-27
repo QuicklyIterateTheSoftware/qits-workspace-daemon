@@ -704,10 +704,16 @@ paths:
       operationId: agentCleanupCheck
       summary: What removing the agent would lose.
       description: |
-        Uncommitted changes and commits no remote branch has, per repository. A commit on a
+        Uncommitted changes and commits the git host does not hold, per repository. A commit on a
         detached HEAD is unpushed work too, reported with no `branch`. In the wrapper a moved
         gitlink does not count: it is the trace of submodule work, and each submodule is checked on
         its own. `clean` is true when both lists are empty.
+
+        Each commit has one of three outcomes (qits-1688). On the default branch: delivered. On
+        another branch or in a tag of the git host, but not on the default branch: `inRelease`.
+        Nothing is lost and nothing is asked of the agent, but `delivered` stays false until the
+        release reaches the default branch. Anything else: `unpushed`. Before it counts, the check
+        fetches the default branch, the tags and the agent's branch, best effort.
 
         `busy` is the harness, not git: its hooks say a turn is running, or that its last `Stop`
         left a background task going: a subagent, a monitor or a session cron until a later hook
@@ -1869,7 +1875,12 @@ components:
       properties:
         clean:
           type: boolean
-          description: Nothing would be lost; both lists are empty.
+          description: Nothing would be lost; `dirty` and `unpushed` are empty.
+        delivered:
+          type: boolean
+          description: |
+            `clean`, and `inRelease` is empty too: all the work is on the default branch. The
+            cleanup waits for it. A daemon before qits-1688 omits it.
         dirty:
           type: array
           items: { type: string }
@@ -1877,6 +1888,12 @@ components:
         unpushed:
           type: array
           items: { $ref: "#/components/schemas/UnpushedWork" }
+        inRelease:
+          type: array
+          items: { $ref: "#/components/schemas/UnpushedWork" }
+          description: |
+            Commits the git host holds on a branch or in a tag, but not on the default branch yet:
+            in a release that has not finalized. Not leftover work.
         busy:
           type: boolean
           description: |
@@ -1894,7 +1911,7 @@ components:
           description: Null for a commit on a detached HEAD, which is never pushed.
         commits:
           type: integer
-          description: Commits on HEAD that no remote branch has.
+          description: Commits on HEAD in this state.
 
     AgentYielded:
       type: object

@@ -173,6 +173,106 @@ class AgentWorktreesTest {
     assertEquals(1, leftover.commits());
   }
 
+  // qits-1688: three outcomes. On the default branch is delivered; held by the git host on a branch
+  // or in a tag is in release (not flagged, but the cleanup waits); anything else is unpushed.
+
+  /** A commit on the agent's own submodule branch, which the git host does not have yet. */
+  private Path commitOnABranch(String message) throws Exception {
+    Path child = worktrees.ensure("agent-1", BRANCH).resolve(CHILD);
+    git(child, "switch", "--quiet", "-c", BRANCH + "-fix");
+    Files.writeString(child.resolve("lib.txt"), message + "\n");
+    git(child, "commit", "--quiet", "-am", message);
+    return child;
+  }
+
+  /**
+   * A release, as the git host has it: a tag on a bump commit on top of the fold, and no branch.
+   * The fold is the agent's branch, or with {@code after} an earlier release's tag.
+   */
+  private void releaseOnTheHost(Path child, String after, String version) throws Exception {
+    Path host = tmp.resolve("host-" + version);
+    git(tmp, "clone", "--quiet", estate.childOrigin().toString(), host.toString());
+    GitFixtures.identity(host);
+    if (after == null) {
+      git(host, "fetch", "--quiet", child.toString(), "refs/heads/" + BRANCH + "-fix");
+      git(host, "switch", "--quiet", "--detach", "FETCH_HEAD");
+    } else {
+      git(host, "switch", "--quiet", "--detach", after);
+    }
+    git(host, "commit", "--quiet", "--allow-empty", "-m", "release(" + version + ")");
+    git(host, "tag", version);
+    git(host, "push", "--quiet", "origin", "refs/tags/" + version);
+  }
+
+  /** The release's tag reaches the git host's main. */
+  private void finalizeOnTheHost(String version) throws Exception {
+    Path host = tmp.resolve("host-" + version);
+    git(host, "push", "--quiet", "origin", version + "^{commit}:refs/heads/main");
+  }
+
+  @Test
+  void aCommitOnlyInAReleaseTagIsInReleaseAndNotFlagged() throws Exception {
+    Path child = commitOnABranch("released work");
+    releaseOnTheHost(child, null, "2026.1.1");
+
+    AgentWorktrees.CleanupCheck check = worktrees.cleanupCheck("agent-1");
+
+    assertTrue(check.unpushed().isEmpty(), "the tag holds it: nothing to ask the agent");
+    assertTrue(check.clean(), "nothing is lost");
+    assertFalse(check.delivered(), "but it is not on main yet, so the cleanup waits");
+    assertEquals(
+        List.of(new AgentWorktrees.Leftover("child", BRANCH + "-fix", 1)), check.inRelease());
+  }
+
+  @Test
+  void aCommitOnALiveBranchIsInRelease() throws Exception {
+    Path child = commitOnABranch("pushed work");
+    git(child, "push", "--quiet", "origin", BRANCH + "-fix");
+
+    AgentWorktrees.CleanupCheck check = worktrees.cleanupCheck("agent-1");
+
+    assertTrue(check.clean());
+    assertFalse(check.delivered());
+    assertEquals(1, check.inRelease().size());
+  }
+
+  @Test
+  void aSupersededReleaseIsDeliveredOnceTheFollowUpFinalizes() throws Exception {
+    Path child = commitOnABranch("work of the first request");
+    // The first request is released and goes OBSOLETE: its tag is burnt and never reaches main.
+    releaseOnTheHost(child, null, "2026.1.1");
+    assertFalse(worktrees.cleanupCheck("agent-1").delivered(), "in release, not delivered");
+    assertTrue(worktrees.cleanupCheck("agent-1").unpushed().isEmpty(), "and not flagged");
+
+    // The follow-up folds the burnt tag in, is released, and finalizes: its tag reaches main.
+    releaseOnTheHost(child, "2026.1.1", "2026.1.2");
+    finalizeOnTheHost("2026.1.2");
+
+    AgentWorktrees.CleanupCheck check = worktrees.cleanupCheck("agent-1");
+    assertTrue(check.delivered(), "the check fetched main: " + check);
+    assertTrue(check.inRelease().isEmpty());
+  }
+
+  @Test
+  void aCommitTheGitHostDoesNotHoldIsFlagged() throws Exception {
+    commitOnABranch("never pushed");
+
+    AgentWorktrees.CleanupCheck check = worktrees.cleanupCheck("agent-1");
+
+    assertFalse(check.clean());
+    assertEquals(
+        List.of(new AgentWorktrees.Leftover("child", BRANCH + "-fix", 1)), check.unpushed());
+    assertTrue(check.inRelease().isEmpty());
+  }
+
+  @Test
+  void aLocalTagDoesNotHideUnpushedWork() throws Exception {
+    Path child = commitOnABranch("tagged here only");
+    git(child, "tag", "mine");
+
+    assertEquals(1, worktrees.cleanupCheck("agent-1").unpushed().size());
+  }
+
   @Test
   void statusNamesEachRepositorysBranchAndWhetherItIsPushed() throws Exception {
     Path child = worktrees.ensure("agent-1", BRANCH).resolve(CHILD);

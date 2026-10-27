@@ -577,7 +577,8 @@ final class AgentRuntime implements AutoCloseable {
     if (configs != null && configs.dirty(agentId)) {
       List<String> dirty = new ArrayList<>(check.dirty());
       dirty.add(AgentConfigCheckout.REPOSITORY);
-      check = new AgentWorktrees.CleanupCheck(List.copyOf(dirty), check.unpushed());
+      check =
+          new AgentWorktrees.CleanupCheck(List.copyOf(dirty), check.unpushed(), check.inRelease());
     }
     return check.withBusy(busy(agentId));
   }

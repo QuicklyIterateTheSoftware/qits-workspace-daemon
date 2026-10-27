@@ -1,8 +1,10 @@
 {
   "clean": false,
+  "delivered": false,
   "dirty": [
     "wrapper"
   ],
   "unpushed": [],
+  "inRelease": [],
   "busy": false
 }
