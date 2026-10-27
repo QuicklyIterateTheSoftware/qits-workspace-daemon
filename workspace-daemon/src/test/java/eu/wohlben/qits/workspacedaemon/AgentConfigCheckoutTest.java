@@ -163,6 +163,32 @@ class AgentConfigCheckoutTest {
   }
 
   @Test
+  void theCommitIsTheAgentsWhenItsEnvCarriesAnIdentity() throws Exception {
+    // qits-1666: the agent's own identity beats the container's, which is the platform's.
+    Map<String, String> env = new java.util.HashMap<>(ENV);
+    env.put("GIT_AUTHOR_NAME", "agent-1");
+    env.put("GIT_AUTHOR_EMAIL", "agent-1@qits.example.test");
+    env.put("GIT_COMMITTER_NAME", "agent-1");
+    env.put("GIT_COMMITTER_EMAIL", "agent-1@qits.example.test");
+    Path tree =
+        configs
+            .ensure(
+                "agent-1",
+                BRANCH,
+                new AgentConfigCheckout.AgentConfig(REPOSITORY_ID, REPOSITORY_PATH),
+                env,
+                "qits-1")
+            .orElseThrow();
+    Files.writeString(tree.resolve("memory/MEMORY.md"), "- learned something\n");
+
+    configs.sync("agent-1");
+
+    assertEquals(
+        "agent-1 <agent-1@qits.example.test> agent-1 <agent-1@qits.example.test>",
+        line(origin, "log", "-1", "--format=%an <%ae> %cn <%ce>", BRANCH));
+  }
+
+  @Test
   void aSyncWithNothingChangedMakesNoCommitAndNoPush() throws Exception {
     ensure().orElseThrow();
     String before = line(gitDir(), "--git-dir=" + gitDir(), "rev-parse", BRANCH);

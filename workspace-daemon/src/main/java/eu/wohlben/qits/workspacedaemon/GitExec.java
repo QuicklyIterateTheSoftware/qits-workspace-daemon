@@ -71,6 +71,10 @@ final class GitExec {
   static final List<String> GIT_CREDENTIALS =
       List.of("QITS_TOKEN", "QITS_COMMISSIONED_CLIENT_ID", "QITS_COMMISSIONED_CLIENT_SECRET");
 
+  /** The commit identity names: an agent's harness env carries its own (qits-1666). */
+  static final List<String> GIT_IDENTITY =
+      List.of("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL");
+
   /** Off on every call: neither may run code an agent planted in a shared repository. */
   private static final List<String> SAFETY =
       List.of("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false");
@@ -91,18 +95,31 @@ final class GitExec {
   }
 
   /**
-   * A call that talks to the git host, carrying exactly {@code credential} — the names in {@link
-   * #GIT_CREDENTIALS} and nothing else, so a caller cannot widen it by accident.
+   * A local call that commits as {@code identity}: the names in {@link #GIT_IDENTITY} and nothing
+   * else, laid over the daemon's own (which is the platform's).
    */
-  static Out network(Path dir, Map<String, String> credential, String... args) {
+  static Out committing(Path dir, Map<String, String> identity, String... args) {
+    return run(dir, only(identity, GIT_IDENTITY), args);
+  }
+
+  /** The entries of {@code env} under {@code names} that hold a value. */
+  static Map<String, String> only(Map<String, String> env, List<String> names) {
     Map<String, String> only = new java.util.HashMap<>();
-    for (String name : GIT_CREDENTIALS) {
-      String value = credential.get(name);
+    for (String name : names) {
+      String value = env == null ? null : env.get(name);
       if (value != null && !value.isBlank()) {
         only.put(name, value);
       }
     }
-    return run(dir, only, args);
+    return only;
+  }
+
+  /**
+   * A call that talks to the git host, carrying exactly {@code credential} — the names in {@link
+   * #GIT_CREDENTIALS} and nothing else, so a caller cannot widen it by accident.
+   */
+  static Out network(Path dir, Map<String, String> credential, String... args) {
+    return run(dir, only(credential, GIT_CREDENTIALS), args);
   }
 
   /** The workspace's own git credential, from the daemon's environment. */

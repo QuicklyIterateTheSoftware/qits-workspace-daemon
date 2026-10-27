@@ -80,7 +80,11 @@ final class AgentConfigCheckout implements AutoCloseable {
 
   /** What the last start told this process about an agent's checkout. */
   private record Remembered(
-      AgentConfig config, String branch, Map<String, String> credential, String message) {}
+      AgentConfig config,
+      String branch,
+      Map<String, String> credential,
+      Map<String, String> identity,
+      String message) {}
 
   private final Path root;
   private final String gitBase;
@@ -161,7 +165,13 @@ final class AgentConfigCheckout implements AutoCloseable {
             .map(token -> Map.of(OriginSync.AGENT_CREDENTIAL, token))
             .orElse(Map.of());
     remembered.put(
-        agentId, new Remembered(config, wrapperBranch, credential, message(workRef, agentId)));
+        agentId,
+        new Remembered(
+            config,
+            wrapperBranch,
+            credential,
+            GitExec.only(env, GitExec.GIT_IDENTITY),
+            message(workRef, agentId)));
     synchronized (lock(agentId)) {
       if (Files.exists(gitDir(agentId), LinkOption.NOFOLLOW_LINKS)) {
         return tree(agentId);
@@ -279,11 +289,14 @@ final class AgentConfigCheckout implements AutoCloseable {
     if (inTree(agentId, "diff", "--cached", "--quiet").exit() != 1) {
       return;
     }
-    String name = identity("GIT_AUTHOR_NAME", "qits workspace daemon");
-    String email = identity("GIT_AUTHOR_EMAIL", "workspace-daemon@qits.invalid");
+    // The agent's own identity when its harness env carries one (qits-1666): the commit is the
+    // agent's memories and skills. Its env beats the container's, which is the platform's.
+    String name = identity(agent.identity(), "GIT_AUTHOR_NAME", "qits workspace daemon");
+    String email = identity(agent.identity(), "GIT_AUTHOR_EMAIL", "workspace-daemon@qits.invalid");
     GitExec.Out committed =
         inTree(
             agentId,
+            agent.identity(),
             "-c",
             "user.name=" + name,
             "-c",
@@ -414,11 +427,15 @@ final class AgentConfigCheckout implements AutoCloseable {
 
   /** A local git call on the checkout: the git dir beside, the tree as the work tree and cwd. */
   private GitExec.Out inTree(String agentId, String... args) {
+    return inTree(agentId, Map.of(), args);
+  }
+
+  private GitExec.Out inTree(String agentId, Map<String, String> identity, String... args) {
     List<String> argv = new ArrayList<>(args.length + 2);
     argv.add("--git-dir=" + gitDir(agentId));
     argv.add("--work-tree=" + treeDir(agentId));
     argv.addAll(List.of(args));
-    return GitExec.git(treeDir(agentId), argv.toArray(String[]::new));
+    return GitExec.committing(treeDir(agentId), identity, argv.toArray(String[]::new));
   }
 
   private static boolean hasRef(Path git, String ref) {
@@ -445,8 +462,11 @@ final class AgentConfigCheckout implements AutoCloseable {
     return "chore(agent-config): " + agentId;
   }
 
-  private static String identity(String variable, String fallback) {
-    String value = System.getenv(variable);
+  private static String identity(Map<String, String> agent, String variable, String fallback) {
+    String value = agent.get(variable);
+    if (value == null || value.isBlank()) {
+      value = System.getenv(variable);
+    }
     return value == null || value.isBlank() ? fallback : value;
   }
 }
