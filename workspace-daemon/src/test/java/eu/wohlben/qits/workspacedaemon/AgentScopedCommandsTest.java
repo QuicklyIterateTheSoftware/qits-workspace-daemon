@@ -27,8 +27,6 @@ class AgentScopedCommandsTest {
 
     assertEquals("agent-token", env.get("QITS_TOKEN"));
     assertEquals("", env.get("QITS_WORKSPACE_DAEMON_API_TOKEN"), "no way to drive the daemon");
-    assertEquals("", env.get("QITS_COMMISSIONED_CLIENT_ID"));
-    assertEquals("", env.get("QITS_COMMISSIONED_CLIENT_SECRET"));
     assertEquals("", env.get("QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION"));
     assertEquals("/claude-home", env.get("HOME"));
   }

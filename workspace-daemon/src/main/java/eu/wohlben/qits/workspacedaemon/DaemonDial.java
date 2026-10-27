@@ -14,9 +14,9 @@ import java.util.Optional;
  * <p><b>{@code wss} is TLS.</b> A workspace carrying a {@code QITS_TOKEN} — runner-placed, or
  * (since qits-1084) an admin or editor (DIRECT) workspace — reaches qits only through the public
  * edge ({@code wss://workspaces.qits.<domain>/…}), which serves a publicly trusted certificate; a
- * {@code ws} url is the plain in-network dial a container still holding a commissioned pair instead
- * makes (removing that branch outright is qits-876). The port defaults to the
- * scheme's own, 443 or 80, when the url names none. SNI needs nothing here: with {@code ssl} on,
+ * {@code ws} url is a plain dial, the clone-alone/local topology's, made with the same token when
+ * there is one and anonymously when there is none. The port defaults to the scheme's own, 443 or
+ * 80, when the url names none. SNI needs nothing here: with {@code ssl} on,
  * Vert.x hands the connect host to the TLS engine as the peer host and the JDK engine sends it as
  * the server name. The certificate is checked against the JVM's (or the native image's) default
  * trust store and against that host ({@link #clientOptions}).

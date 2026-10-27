@@ -18,8 +18,7 @@ class GitExecTest {
       Map.of(
           "PATH", "/usr/bin",
           "QITS_TOKEN", "workspace-token",
-          "QITS_COMMISSIONED_CLIENT_ID", "client",
-          "QITS_COMMISSIONED_CLIENT_SECRET", "client-secret",
+          "SOME_CLIENT_SECRET", "client-secret",
           "QITS_WORKSPACE_DAEMON_API_TOKEN", "api-token",
           "QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION", "{\"headerValue\":\"x\"}",
           "SOME_PASSWORD", "p",
@@ -33,8 +32,7 @@ class GitExecTest {
     for (String name :
         new String[] {
           "QITS_TOKEN",
-          "QITS_COMMISSIONED_CLIENT_ID",
-          "QITS_COMMISSIONED_CLIENT_SECRET",
+          "SOME_CLIENT_SECRET",
           "QITS_WORKSPACE_DAEMON_API_TOKEN",
           "QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION",
           "SOME_PASSWORD"
@@ -49,7 +47,7 @@ class GitExecTest {
     Map<String, String> env = GitExec.environment(DAEMON, Map.of("QITS_TOKEN", "agent-token"));
 
     assertEquals("agent-token", env.get("QITS_TOKEN"));
-    assertFalse(env.containsKey("QITS_COMMISSIONED_CLIENT_SECRET"), "no fallback to the pair");
+    assertFalse(env.containsKey("SOME_CLIENT_SECRET"), "an inherited secret never rides along");
     assertFalse(env.containsKey("QITS_WORKSPACE_DAEMON_API_TOKEN"));
   }
 

@@ -53,23 +53,23 @@ final class GitExec {
   }
 
   /**
-   * The environment names that carry a secret of the workspace: its own token, its commissioned
-   * client, the API token every daemon route needs, and the agent configuration document, which
-   * holds external MCP servers' header values. Removed from every git process, and blanked in every
-   * harness process ({@link AgentScopedCommands}).
+   * The environment names that carry a secret of the workspace: its own token, the API token every
+   * daemon route needs, and the agent configuration document, which holds external MCP servers'
+   * header values. Removed from every git process, and blanked in every harness process ({@link
+   * AgentScopedCommands}). Not the whole scrub: {@link #secret} also takes any name that says
+   * {@code SECRET} or {@code PASSWORD}, so a secret a container inherits under a name nobody listed
+   * here is scrubbed all the same.
    */
   static final List<String> SECRETS =
       List.of(
           "QITS_TOKEN",
-          "QITS_COMMISSIONED_CLIENT_ID",
-          "QITS_COMMISSIONED_CLIENT_SECRET",
           "QITS_WORKSPACE_DAEMON_TOKEN",
           "QITS_WORKSPACE_DAEMON_API_TOKEN",
           "QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION");
 
   /** The names a credential for the git host is read from by the image's credential helper. */
   static final List<String> GIT_CREDENTIALS =
-      List.of("QITS_TOKEN", "QITS_COMMISSIONED_CLIENT_ID", "QITS_COMMISSIONED_CLIENT_SECRET");
+      List.of("QITS_TOKEN");
 
   /** Off on every call: neither may run code an agent planted in a shared repository. */
   private static final List<String> SAFETY =

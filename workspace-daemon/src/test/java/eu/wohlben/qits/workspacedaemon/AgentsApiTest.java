@@ -236,8 +236,8 @@ class AgentsApiTest {
         pwd >> "$QITS_FAKE_LOG.cwd"
         printf '%s\\n' "$QITS_TOKEN" >> "$QITS_FAKE_LOG.token"
         printf 'agent=%s work=%s\\n' "$QITS_AGENT_ID" "$QITS_WORK_ID" >> "$QITS_FAKE_LOG.identity"
-        printf 'api=%s secret=%s\\n' "${QITS_WORKSPACE_DAEMON_API_TOKEN-unset}" \\
-          "${QITS_COMMISSIONED_CLIENT_SECRET-unset}" >> "$QITS_FAKE_LOG.secrets"
+        printf 'api=%s config=%s\\n' "${QITS_WORKSPACE_DAEMON_API_TOKEN-unset}" \\
+          "${QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION-unset}" >> "$QITS_FAKE_LOG.secrets"
         exec cat >> "$QITS_FAKE_LOG.stdin"
         """);
     Files.setPosixFilePermissions(claude, PosixFilePermissions.fromString("rwxr-xr-x"));
@@ -1591,8 +1591,8 @@ class AgentsApiTest {
     post("/agent-worktrees", start("agent-1"));
 
     // Blanked, not merely absent here: the commands layer can only lay values over the daemon's
-    // environment, so the daemon's API token and commissioned client become empty strings.
-    awaitContains(fakeLog.resolveSibling("harness.secrets"), "api= secret=");
+    // environment, so the daemon's API token and agent configuration become empty strings.
+    awaitContains(fakeLog.resolveSibling("harness.secrets"), "api= config=");
     awaitContains(fakeLog.resolveSibling("harness.args"), "Bearer agent-token");
   }
 

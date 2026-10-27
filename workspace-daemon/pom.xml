@@ -104,19 +104,6 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <!-- The consumer half: IdpConsumerPactTest, this daemon's call to qits-idp, on the
-                 shared golden-master reader (it brings pact-jvm's consumer DSL with it). -->
-            <groupId>eu.wohlben.qits</groupId>
-            <artifactId>qits-pact-consumer</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <!-- qits-idp's recorded answers, pinned in the root pom. -->
-            <groupId>eu.wohlben.qits</groupId>
-            <artifactId>qits-idp-golden-masters</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
             <!-- The landing app's consumer pact against this daemon (ticket qits-1230), verified by
                  ConsumerPactVerificationTest. Pulled in purely for the pact file it carries on its
                  classpath. The pinned jar IS the source of the pact; nothing is copied into this

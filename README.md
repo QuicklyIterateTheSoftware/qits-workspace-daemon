@@ -69,11 +69,11 @@ capability 11) and change nudges all ride it. Message shapes live in `workspace-
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.
 
-When the container has a commissioned IdP client, it exchanges that pair at the injected token URL
-for a `qits-workspaces`-audience bearer and sends it on every initial and reconnecting WebSocket
-handshake. The four values — the client pair, token URL and audience — are all-or-nothing: an absent
-set keeps the clone-alone/local topology anonymous, while a partial set fails closed and retries
-rather than silently dropping authentication.
+The credential is the workspace token, `QITS_TOKEN`, and nothing else: the daemon presents it as
+`Bearer <token>` on every initial and reconnecting WebSocket handshake and on every tunnel dial-back,
+and mints nothing. Every platform-provisioned workspace carries one. A daemon handed none dials
+anonymously, which is the clone-alone/local topology; who may open a control socket is decided by
+the host, not by the daemon.
 
 **The HTTP API** — a bearer-authenticated server on `127.0.0.1:13338` serving the agent worktrees and
 their files, the commands surface, the coding-agent surface, and the two interactive websockets. It **does not bind** without `qits.workspace-daemon.api-token`: it serves an
@@ -122,9 +122,9 @@ subagent, monitor or cron still counts as busy after it, and only shells alone s
 hook but a `Notification` cancels the grace; `HookWebhook`'s class javadoc has the whole table.
 
 **Which credential each process carries.** No git process the daemon starts inherits a secret of
-the workspace (its token, commissioned client, API token, agent configuration), and every one runs
-with hooks and fsmonitor off, because agents share the OS user and the repositories' config. A
-fetch carries the workspace's git credential; a push of an agent's branch carries that agent's
+the workspace (its token, API token, agent configuration, anything named `*SECRET*` or
+`*PASSWORD*`), and every one runs with hooks and fsmonitor off, because agents share the OS user
+and the repositories' config. A fetch carries the workspace's git credential; a push of an agent's branch carries that agent's
 `QITS_TOKEN` and nothing else, and only from the worktree the daemon made for that agent. Neither
 runs in a repository whose own config carries a key the daemon never writes (`credential.*`,
 `url.*`, `http.*`, a changed `remote.origin.url`, …; see `GitConfigGuard`). A harness gets the
