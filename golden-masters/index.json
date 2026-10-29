@@ -388,6 +388,23 @@
           }
         },
         {
+          "operationId": "interruptAgent",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/interrupt",
+          "body": {},
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/interruptAgent.json",
+          "frozen": {
+            "ids": [
+              "$.agentId"
+            ],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "listCommands",
           "method": "GET",
           "path": "/workspaces/container/{workspaceRowId}/commands",

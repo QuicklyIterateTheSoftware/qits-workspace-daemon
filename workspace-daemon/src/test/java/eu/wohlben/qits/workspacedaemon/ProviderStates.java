@@ -24,6 +24,7 @@ import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.commands.LogChannel;
+import eu.wohlben.qits.workspacedaemon.protocol.AgentActivity;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
@@ -72,7 +73,10 @@ final class ProviderStates implements AutoCloseable {
   /** No agent yet, and the harness signed in: a start launches. */
   static final String SIGNED_IN = "a workspace daemon with a signed-in harness";
 
-  /** {@link #AGENT_ID} started, its interactive harness running in its worktree. */
+  /**
+   * {@link #AGENT_ID} started, its interactive harness running in its worktree, its {@code
+   * SessionStart} tagged so {@code interruptAgent} (qits-1667) finds it already started.
+   */
   static final String AGENT_RUNNING = "a workspace daemon with an agent running";
 
   /**
@@ -441,7 +445,14 @@ final class ProviderStates implements AutoCloseable {
         enablePlugin("typescript-lsp" + MARKETPLACE, false);
         yield params();
       }
-      case AGENT_RUNNING -> params(startAgent(AgentLaunchMode.INTERACTIVE));
+      case AGENT_RUNNING -> {
+        String commandId = startAgent(AgentLaunchMode.INTERACTIVE);
+        // interruptAgent (qits-1667) is refused until the harness's own SessionStart has arrived
+        // (TerminalTurnGate); mark it here so the state is a started TERMINAL harness, the same
+        // as every other AGENT_RUNNING recording, none of which looks at that flag.
+        runtime.tag(new AgentActivity(commandId, null, "IDLE", "SessionStart", "startup", null, 1L));
+        yield params(commandId);
+      }
       case AGENT_CHATTING -> params(startAgent(AgentLaunchMode.CHAT));
       case AGENT_WITH_TRANSCRIPT -> {
         String commandId = startAgent(AgentLaunchMode.INTERACTIVE);

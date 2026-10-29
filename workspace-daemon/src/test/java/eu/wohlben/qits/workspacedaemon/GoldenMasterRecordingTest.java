@@ -136,6 +136,14 @@ class GoldenMasterRecordingTest {
             200),
         new Interaction(
             ProviderStates.AGENT_RUNNING,
+            "interruptAgent",
+            "POST",
+            AGENT + "/interrupt",
+            Map.of(),
+            new JsonObject(),
+            200),
+        new Interaction(
+            ProviderStates.AGENT_RUNNING,
             "removeAgentWorktree",
             "DELETE",
             AGENT,
