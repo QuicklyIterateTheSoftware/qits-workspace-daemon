@@ -86,6 +86,22 @@ public final class Provisioner {
   private static final int BUFFER_SIZE = 4096;
 
   /**
+   * {@code GIT_HTTP_LOW_SPEED_LIMIT}/{@code GIT_HTTP_LOW_SPEED_TIME} for every git call {@link
+   * #runStreaming} forks (qits-1750): a clone whose HTTP transfer stalls — the far end accepts the
+   * connection and then never sends another byte — left {@link #runStreaming}'s {@code
+   * process.waitFor()} blocked with nothing to bound it; a live incident hung 37 minutes on exactly
+   * that, and the daemon never emitted {@link ProvisionFailed} or bound its API. Below {@code
+   * lowSpeedLimitBytesPerSecond} for {@code lowSpeedTimeSeconds} straight, libcurl — not this
+   * process — aborts the transfer, so {@code git} itself exits non-zero and {@code waitFor}
+   * returns. Deliberately <b>not</b> a wall-clock kill: a large clone that keeps moving bytes must
+   * run as long as it needs to. Mutable only so a test can shrink the window; production never
+   * changes them.
+   */
+  static volatile int lowSpeedLimitBytesPerSecond = 1000;
+
+  static volatile int lowSpeedTimeSeconds = 60;
+
+  /**
    * The identity + coordinates the daemon self-provisions from (its injected env).
    *
    * <p>{@code gitBaseUrl} is the qits-githost git base ({@code qits.workspace-daemon.git-base-url},
@@ -470,6 +486,12 @@ public final class Provisioner {
     if (WORKSPACE_DIR.isDirectory()) {
       builder.directory(WORKSPACE_DIR);
     }
+    // qits-1750: bound every HTTP transfer this process makes, not the process itself — see the
+    // field javadoc above.
+    builder
+        .environment()
+        .put("GIT_HTTP_LOW_SPEED_LIMIT", String.valueOf(lowSpeedLimitBytesPerSecond));
+    builder.environment().put("GIT_HTTP_LOW_SPEED_TIME", String.valueOf(lowSpeedTimeSeconds));
     Process process;
     try {
       process = builder.start();

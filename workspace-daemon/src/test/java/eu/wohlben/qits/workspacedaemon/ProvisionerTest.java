@@ -2,21 +2,31 @@ package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import eu.wohlben.qits.workspacedaemon.Provisioner.Env;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonLog;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -302,6 +312,77 @@ class ProvisionerTest {
     git(origin, "add", "README.md");
     git(origin, "commit", "-m", "the wrapper");
     return origin;
+  }
+
+  /** Restore the production defaults, so a failure in one test never leans on another's window. */
+  @AfterEach
+  void restoreLowSpeedDefaults() {
+    Provisioner.lowSpeedLimitBytesPerSecond = 1000;
+    Provisioner.lowSpeedTimeSeconds = 60;
+  }
+
+  /**
+   * qits-1750: a clone whose HTTP transfer stalls — the far end accepts the connection, sends a
+   * few bytes, then never sends another and never closes — must not hang {@link
+   * Provisioner#runStreaming}'s unbounded {@code waitFor} forever (a live incident hung 37
+   * minutes on exactly this). The server here holds the connection open on a latch <em>this test
+   * releases</em>, not on a sleep: a fixed sleep would let the handler's own {@code close()} end
+   * the connection on a timer, which aborts the clone for a reason that has nothing to do with
+   * {@code GIT_HTTP_LOW_SPEED_LIMIT}/{@code GIT_HTTP_LOW_SPEED_TIME} and would pass this test
+   * whether or not they are set — exactly the mistake an earlier draft of this test made. With
+   * nothing to end it, only the low-speed abort (or, with the fix removed, the {@code @Timeout}
+   * below) ends the clone.
+   */
+  @Test
+  @Timeout(30)
+  void aStalledHttpTransferIsAbortedRatherThanHangingTheClone(@TempDir Path tmp)
+      throws IOException, InterruptedException {
+    CountDownLatch releaseConnection = new CountDownLatch(1);
+    HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    server.createContext("/", exchange -> stallUntilReleased(exchange, releaseConnection));
+    server.start();
+    try {
+      // Shrink well below the clone's natural run time, so the abort — not the clone finishing on
+      // its own — is what the test proves.
+      Provisioner.lowSpeedLimitBytesPerSecond = 1000;
+      Provisioner.lowSpeedTimeSeconds = 2;
+      String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/repo.git";
+      List<String> argv = List.of("git", "clone", url, tmp.resolve("clone").toString());
+
+      int exit = Provisioner.runStreaming(argv, ignored -> {});
+
+      assertNotEquals(
+          0, exit, "a stalled transfer must abort rather than leave waitFor blocked forever");
+    } finally {
+      // Let the handler thread return before stopping the server: HttpServer.stop(int) blocks
+      // until an in-flight handler returns (or the delay elapses), not on the delay alone.
+      releaseConnection.countDown();
+      server.stop(0);
+    }
+  }
+
+  /**
+   * Enough of a smart-HTTP {@code info/refs} response to make git start reading a transfer, then
+   * silence until {@code releaseConnection} counts down — no more bytes, no close in between,
+   * which is what a genuinely stalled upstream looks like on the wire.
+   */
+  private static void stallUntilReleased(HttpExchange exchange, CountDownLatch releaseConnection)
+      throws IOException {
+    try {
+      exchange
+          .getResponseHeaders()
+          .set("Content-Type", "application/x-git-upload-pack-advertisement");
+      exchange.sendResponseHeaders(200, 0); // 0 ⇒ chunked, length unbounded until closed
+      byte[] chunk = "001e# service=git-upload-pack\n0000".getBytes(StandardCharsets.US_ASCII);
+      OutputStream body = exchange.getResponseBody();
+      body.write(chunk);
+      body.flush();
+      releaseConnection.await(1, TimeUnit.MINUTES);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    } finally {
+      exchange.close();
+    }
   }
 
   @Test
