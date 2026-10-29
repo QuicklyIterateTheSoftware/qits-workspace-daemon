@@ -528,6 +528,51 @@ final class AgentRuntime implements AutoCloseable {
     return true;
   }
 
+  /** The bare ESC byte an interrupt writes, with no trailing Enter. */
+  private static final byte[] ESC = {0x1b};
+
+  /** {@code POST …/interrupt} (qits-1667): what refused it, or that it was sent. */
+  enum InterruptOutcome {
+    INTERRUPTED,
+    NO_HARNESS,
+    NOT_TERMINAL,
+    NOT_STARTED
+  }
+
+  /**
+   * Interrupt the agent's running {@code TERMINAL} harness: a bare ESC written straight into its
+   * PTY, the keystroke a person at the terminal would send to break out of whatever the TUI is
+   * doing.
+   *
+   * <p>Written through {@link #registry} — the same low-level PTY write {@link
+   * TerminalTurnGate}'s {@code Typist} is backed by ({@code commands::sendKeystrokes}, which
+   * ultimately reaches {@code registry.input}) — and deliberately <b>not</b> through {@link
+   * TerminalTurnGate#type}. That would hold the ESC behind any turn still waiting for {@code
+   * SessionStart} instead of sending it at once, and {@code sendKeystrokes} always follows the
+   * text with an Enter, which would submit whatever already sits in the TUI's input line rather
+   * than merely interrupting it.
+   *
+   * <p>Refused with {@link InterruptOutcome#NOT_STARTED} until the gate has seen the harness's own
+   * {@code SessionStart} (or its fallback timeout): before that there is no prompt an ESC could
+   * reach, exactly the race {@link TerminalTurnGate} exists to hold turns across.
+   */
+  InterruptOutcome interrupt(String agentId) {
+    Agent agent = known(agentId);
+    Command running = running(agent);
+    if (running == null) {
+      return InterruptOutcome.NO_HARNESS;
+    }
+    if (running.kind() != CommandKind.TERMINAL) {
+      return InterruptOutcome.NOT_TERMINAL;
+    }
+    if (!terminalTurns.isStarted(running.id())) {
+      return InterruptOutcome.NOT_STARTED;
+    }
+    return registry.input(running.id(), ESC)
+        ? InterruptOutcome.INTERRUPTED
+        : InterruptOutcome.NO_HARNESS;
+  }
+
   /**
    * Deliver a user turn. A stopped harness is started again with its session first, with the turn
    * as its opening turn. A turn for a running interactive harness is typed once it has started

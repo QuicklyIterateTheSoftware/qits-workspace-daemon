@@ -154,6 +154,15 @@ public class WorkspaceApi {
   /** The per-agent verbs, below {@code /agent-worktrees/{agentId}}. */
   static final String YIELD_PATH = "/yield";
 
+  /**
+   * {@code POST …/interrupt} (qits-1667): a bare ESC written straight into a running {@code
+   * TERMINAL} harness's PTY, the keystroke a person at the terminal would send to break out of
+   * whatever the TUI is doing. Refused with 409 for every other shape — no running harness, a
+   * {@code CHAT} harness (which has no PTY to interrupt), or one whose {@code SessionStart} has not
+   * arrived yet.
+   */
+  static final String INTERRUPT_PATH = "/interrupt";
+
   static final String TURN_PATH = "/turn";
   static final String ENTITY_PATH = "/entity";
   static final String BLOCKED_PATH = "/blocked";
@@ -648,6 +657,10 @@ public class WorkspaceApi {
             method == HttpMethod.POST
                 ? new Reply(200, AgentWorktreeJson.yielded(agentId, agents.yield(agentId)))
                 : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case INTERRUPT_PATH ->
+            method == HttpMethod.POST
+                ? interrupt(agentId)
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
         case TURN_PATH ->
             method == HttpMethod.POST
                 ? deliverTurn(agentId, body)
@@ -808,6 +821,27 @@ public class WorkspaceApi {
       return new Reply(400, WorkspaceJson.error("text is required"));
     }
     return new Reply(200, AgentWorktreeJson.turn(agents.turn(agentId, text)));
+  }
+
+  /**
+   * {@code POST /agent-worktrees/{agentId}/interrupt} (qits-1667) — ESC into a running {@code
+   * TERMINAL} harness's PTY. The 409 bodies are {@code {"error": "<sentence>"}}, not {@link
+   * WorkspaceJson#error}'s {@code message}: there is no discriminator worth adding on top of the
+   * sentence itself, and the key just has to differ from {@code message} so a caller never
+   * confuses this refusal with the generic one.
+   */
+  private Reply interrupt(String agentId) {
+    return switch (agents.interrupt(agentId)) {
+      case INTERRUPTED -> new Reply(200, AgentWorktreeJson.interrupted(agentId));
+      case NO_HARNESS -> new Reply(409, interruptError("The agent has no running harness."));
+      case NOT_TERMINAL ->
+          new Reply(409, interruptError("This harness cannot be interrupted."));
+      case NOT_STARTED -> new Reply(409, interruptError("The harness has not started yet."));
+    };
+  }
+
+  private static JsonObject interruptError(String message) {
+    return new JsonObject().put("error", message);
   }
 
   /**

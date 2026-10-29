@@ -96,11 +96,16 @@ before targets existed. A name the daemon has no listener for is refused and log
 
 | | |
 |---|---|
-| `GET·POST /agent-worktrees`, `GET·DELETE /agent-worktrees/{agentId}`, `POST …/{agentId}/yield`, `/turn`, `/entity`, `/blocked`, `GET …/{agentId}/cleanup-check` | agent worktrees |
+| `GET·POST /agent-worktrees`, `GET·DELETE /agent-worktrees/{agentId}`, `POST …/{agentId}/yield`, `/interrupt`, `/turn`, `/entity`, `/blocked`, `GET …/{agentId}/cleanup-check` | agent worktrees |
 | `GET /agent-worktrees/{agentId}/files`, `…/files/content`, `…/detection`, `…/component-map` | one agent's files |
 | `GET /commands`, `GET /commands/{id}`, `GET /commands/{id}/log`, `POST /commands/{id}/terminate` | commands |
 | `POST /agents/sign-in`, `GET /agents/available`, `GET /agent-sessions`, `GET·POST /agent-plugins`, `POST /prompt-refinements` | coding agents |
 | `WS /terminal/commands/{id}`, `WS /chat/commands/{id}` | the interactive half |
+
+`POST …/{agentId}/interrupt` (qits-1667) sends a bare ESC straight into a running `TERMINAL`
+harness's PTY, with no trailing Enter, so it reaches a TUI as the keystroke it is rather than
+submitting whatever already sits in the input line; it is refused with `409` for a harness that is
+not running, is a `CHAT` session (no PTY to interrupt), or has not yet sent its `SessionStart`.
 
 `POST /agent-worktrees` is idempotent: it makes the agent's worktrees where they are missing and
 starts its harness there unless it runs — resuming the session id it is handed when the session's

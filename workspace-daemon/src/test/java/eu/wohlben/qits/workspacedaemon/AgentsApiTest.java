@@ -238,6 +238,11 @@ class AgentsApiTest {
         printf 'agent=%s work=%s\\n' "$QITS_AGENT_ID" "$QITS_WORK_ID" >> "$QITS_FAKE_LOG.identity"
         printf 'api=%s config=%s\\n' "${QITS_WORKSPACE_DAEMON_API_TOKEN-unset}" \\
           "${QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION-unset}" >> "$QITS_FAKE_LOG.secrets"
+        # A real TUI puts its PTY in raw mode, which is what lets a bare ESC (qits-1667's
+        # interrupt) reach it without a terminating newline. `cat` in the default cooked mode
+        # would hold such a byte in the line discipline's buffer forever, so the interrupt tests
+        # opt into raw mode with this env var rather than changing it for every other test here.
+        if [ -n "$QITS_RAW_PTY" ]; then stty raw -echo; fi
         exec cat >> "$QITS_FAKE_LOG.stdin"
         """);
     Files.setPosixFilePermissions(claude, PosixFilePermissions.fromString("rwxr-xr-x"));
@@ -1069,6 +1074,93 @@ class AgentsApiTest {
         400, post("/agent-worktrees/agent-1/turn", new JsonObject().put("text", " ")).status());
     assertEquals(
         404, post("/agent-worktrees/agent-9/turn", new JsonObject().put("text", "hi")).status());
+  }
+
+  // --- interrupt (qits-1667) ---------------------------------------------------------------------
+
+  @Test
+  @Timeout(60)
+  void anInterruptSendsABareEscIntoAStartedTerminalHarness() throws Exception {
+    JsonObject request = start("agent-1").put("mode", "INTERACTIVE");
+    request.getJsonObject("env").put("QITS_RAW_PTY", "1");
+    String commandId = post("/agent-worktrees", request).body().getString("commandId");
+    awaitRunning(commandId);
+    runtime.tag(new AgentActivity(commandId, null, "IDLE", "SessionStart", "startup", null, 1L));
+    Path stdin = fakeLog.resolveSibling("harness.stdin");
+
+    Answer answer = post("/agent-worktrees/agent-1/interrupt", new JsonObject());
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals("agent-1", answer.body().getString("agentId"));
+    assertEquals(true, answer.body().getBoolean("interrupted"));
+    awaitContains(stdin, "\u001b");
+    // Exactly the ESC byte, nothing else: no newline, no carriage return, no held turn — unlike
+    // sendKeystrokes, which always follows a turn with Enter.
+    assertEquals(
+        1, Files.readAllBytes(stdin).length, "an interrupt is one byte, never more");
+    assertEquals((byte) 0x1b, Files.readAllBytes(stdin)[0]);
+  }
+
+  @Test
+  @Timeout(60)
+  void anInterruptIsRefusedWithNoRunningHarness() throws Exception {
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(commandId);
+    post("/agent-worktrees/agent-1/yield", new JsonObject());
+    awaitStopped(commandId);
+
+    Answer answer = post("/agent-worktrees/agent-1/interrupt", new JsonObject());
+
+    assertEquals(409, answer.status(), answer.raw());
+    assertEquals("The agent has no running harness.", answer.body().getString("error"));
+  }
+
+  @Test
+  @Timeout(60)
+  void anInterruptIsRefusedForAChatHarness() throws Exception {
+    String commandId = post("/agent-worktrees", start("agent-1")).body().getString("commandId");
+    awaitRunning(commandId);
+    assertEquals("CHAT", get("/commands/" + commandId).body().getString("kind"));
+
+    Answer answer = post("/agent-worktrees/agent-1/interrupt", new JsonObject());
+
+    assertEquals(409, answer.status(), answer.raw());
+    assertEquals("This harness cannot be interrupted.", answer.body().getString("error"));
+  }
+
+  @Test
+  @Timeout(60)
+  void anInterruptIsRefusedBeforeTheHarnessHasStartedAndFlushesNoHeldTurn() throws Exception {
+    String commandId =
+        post("/agent-worktrees", start("agent-1").put("mode", "INTERACTIVE"))
+            .body()
+            .getString("commandId");
+    awaitRunning(commandId);
+    Path stdin = fakeLog.resolveSibling("harness.stdin");
+    // Held for SessionStart, same as aTurnForAnInteractiveHarnessWaitsForItsSessionStart…
+    post("/agent-worktrees/agent-1/turn", new JsonObject().put("text", "held turn"));
+
+    Answer answer = post("/agent-worktrees/agent-1/interrupt", new JsonObject());
+
+    assertEquals(409, answer.status(), answer.raw());
+    assertEquals("The harness has not started yet.", answer.body().getString("error"));
+    Thread.sleep(300);
+    String written = Files.exists(stdin) ? Files.readString(stdin) : "";
+    assertEquals(
+        "", written, "neither the ESC nor the held turn was typed before SessionStart arrived");
+  }
+
+  @Test
+  @Timeout(60)
+  void anInterruptIsAFourOhFourForAnUnknownAgent() throws Exception {
+    assertEquals(404, post("/agent-worktrees/agent-9/interrupt", new JsonObject()).status());
+  }
+
+  @Test
+  void aGetOnInterruptIsAFourOhFive() throws Exception {
+    post("/agent-worktrees", start("agent-1"));
+
+    assertEquals(405, get("/agent-worktrees/agent-1/interrupt").status());
   }
 
   /** Where Claude keeps a session's transcript: keyed by the escaped working directory. */

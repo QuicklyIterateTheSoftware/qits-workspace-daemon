@@ -58,6 +58,7 @@ class OpenApiContractTest {
               WorkspaceApi.AGENT_WORKTREES_PATH,
               AGENT,
               AGENT + WorkspaceApi.YIELD_PATH,
+              AGENT + WorkspaceApi.INTERRUPT_PATH,
               AGENT + WorkspaceApi.TURN_PATH,
               AGENT + WorkspaceApi.ENTITY_PATH,
               AGENT + WorkspaceApi.BLOCKED_PATH,

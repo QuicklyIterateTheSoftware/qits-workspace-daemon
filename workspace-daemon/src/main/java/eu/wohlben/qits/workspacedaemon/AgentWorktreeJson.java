@@ -89,6 +89,11 @@ final class AgentWorktreeJson {
     return new JsonObject().put("agentId", agentId).put("yielded", stopped);
   }
 
+  /** {@code POST agent-worktrees/{agentId}/interrupt}. */
+  static JsonObject interrupted(String agentId) {
+    return new JsonObject().put("agentId", agentId).put("interrupted", true);
+  }
+
   /** {@code POST agent-worktrees/{agentId}/turn}. */
   static JsonObject turn(AgentRuntime.Turn turn) {
     JsonObject json =

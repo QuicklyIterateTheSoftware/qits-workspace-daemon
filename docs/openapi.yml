@@ -579,6 +579,42 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
+  /agent-worktrees/{agentId}/interrupt:
+    post:
+      tags: [agent worktrees]
+      operationId: interruptAgent
+      summary: Send ESC into the agent's running TERMINAL harness.
+      description: |
+        A bare ESC, written straight into the harness's PTY — the keystroke a person at the
+        terminal would send to break out of whatever the TUI is doing. No trailing Enter: that
+        would submit whatever already sits in the TUI's input line rather than merely interrupting
+        it.
+
+        Refused with `409` rather than attempted for every shape this cannot reach:
+
+        | reason | `error` |
+        |---|---|
+        | no running harness | `The agent has no running harness.` |
+        | the harness is `CHAT`, which has no PTY | `This harness cannot be interrupted.` |
+        | the harness has not sent its `SessionStart` yet | `The harness has not started yet.` |
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: The ESC was written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentInterrupted" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "409":
+          description: The harness cannot be interrupted right now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InterruptRefused" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
   /agent-worktrees/{agentId}/turn:
     post:
       tags: [agent worktrees]
@@ -1928,6 +1964,23 @@ components:
       properties:
         agentId: { type: string }
         removed: { type: boolean, const: true }
+
+    AgentInterrupted:
+      type: object
+      required: [agentId, interrupted]
+      properties:
+        agentId: { type: string }
+        interrupted: { type: boolean, const: true }
+
+    InterruptRefused:
+      type: object
+      description: |
+        Why `POST …/interrupt` could not reach the harness. A single `error` field, like `Error`,
+        but keyed differently on purpose: the value is the sentence itself rather than a short
+        discriminator, so the key cannot be confused with the generic `message` body.
+      required: [error]
+      properties:
+        error: { type: string }
 
 x-websockets:
   description: |
