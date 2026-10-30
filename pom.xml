@@ -69,6 +69,11 @@
              proxy (`pacts/qits-workspaces-service_qits-workspace-daemon.json`). -->
         <qits.platform-access-cli-pacts-qits-workspace-daemon.version>2026.1019.65035</qits.platform-access-cli-pacts-qits-workspace-daemon.version>
         <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1029.225748</qits.workspaces-service-pacts-qits-workspace-daemon.version>
+        <!-- The platform's shared rules, test scope (qits-1754): ProviderStateCoverageRules checks
+             every state golden-masters/index.json records has its @State callback on
+             ConsumerPactVerificationTest. Published by qits-integrations-quarkus into the same
+             platform Maven repository as the coordinate above. -->
+        <qits.arch-rules.version>2026.1030.30851</qits.arch-rules.version>
     </properties>
 
     <dependencyManagement>
@@ -147,6 +152,13 @@
                 <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-workspaces-service-pacts-qits-workspace-daemon</artifactId>
                 <version>${qits.workspaces-service-pacts-qits-workspace-daemon.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's shared rules, test scope. ProviderStateCoverageRules is what
+                     this repo takes it for. -->
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-arch-rules</artifactId>
+                <version>${qits.arch-rules.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

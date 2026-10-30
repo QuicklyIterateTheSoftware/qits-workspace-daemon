@@ -124,6 +124,22 @@
             <artifactId>qits-workspaces-service-pacts-qits-workspace-daemon</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- The platform's shared rules, test scope (qits-1754). ProviderStateCoverageRules is
+                 what this daemon takes it for. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-arch-rules</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- ProviderStateCoverageRules declares jackson-databind `provided` and parses
+                 golden-masters/index.json with it; this daemon otherwise only has jackson-core
+                 (netty's) on its classpath, not jackson-databind, so it is added here explicitly
+                 (qits-1754). The quarkus-bom import above manages the version. -->
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
