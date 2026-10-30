@@ -63,12 +63,12 @@
         <!-- The provider side (ticket qits-1230): the first consumer pact pinned against this
              daemon, test scope only. Released coordinate, exact pin; the maintenance bump moves
              it. -->
-        <qits.landing-app-pacts-qits-workspace-daemon.version>2026.1014.212118</qits.landing-app-pacts-qits-workspace-daemon.version>
+        <qits.landing-app-pacts-qits-workspace-daemon.version>2026.1029.233746</qits.landing-app-pacts-qits-workspace-daemon.version>
         <!-- qits-1149: the two other consumers whose pacts name this daemon — qits-platform-access-cli
              (`pacts/qits-platform-access-cli_qits-workspace-daemon.json`) and qits-workspaces-service's
              proxy (`pacts/qits-workspaces-service_qits-workspace-daemon.json`). -->
         <qits.platform-access-cli-pacts-qits-workspace-daemon.version>2026.1019.65035</qits.platform-access-cli-pacts-qits-workspace-daemon.version>
-        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1020.105843</qits.workspaces-service-pacts-qits-workspace-daemon.version>
+        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1029.225748</qits.workspaces-service-pacts-qits-workspace-daemon.version>
     </properties>
 
     <dependencyManagement>
