@@ -40,6 +40,7 @@ import eu.wohlben.qits.workspacedaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.workspacedaemon.protocol.Provisioned;
 import eu.wohlben.qits.workspacedaemon.protocol.PullBranch;
 import eu.wohlben.qits.workspacedaemon.protocol.RunCommand;
+import eu.wohlben.qits.workspacedaemon.protocol.TranscriptResync;
 import eu.wohlben.qits.workspacedaemon.protocol.WorkspaceChanged;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
@@ -159,6 +160,14 @@ public class ControlSocket {
 
   @ConfigProperty(name = "qits.workspace-daemon.heartbeat-interval-ms", defaultValue = "20000")
   long heartbeatIntervalMs;
+
+  /**
+   * How often {@link TranscriptShipper} looks for transcript lines to ship (qits-1752), besides the
+   * prompt look a {@code Stop}, a {@code SessionEnd}, a harness exit or a resync asks for. 0 or less
+   * turns the periodic look off.
+   */
+  @ConfigProperty(name = "qits.workspace-daemon.transcript-ship.poll-ms", defaultValue = "3000")
+  long transcriptShipPollMs;
 
   @ConfigProperty(name = "qits.workspace-daemon.reconnect-max-backoff-ms", defaultValue = "30000")
   long maxBackoffMs;
@@ -335,6 +344,16 @@ public class ControlSocket {
   private volatile HookWebhook hooks;
 
   /**
+   * Ships this daemon's own agents' transcripts home (qits-1752); created in {@link #start()} with
+   * the hook webhook, whose frames are what it learns sessions from. Null on an idle daemon.
+   */
+  private volatile TranscriptShipper transcriptShipper;
+
+  /** Whether a {@link TranscriptShipper#poll} is already queued, so polls do not pile up. */
+  private final java.util.concurrent.atomic.AtomicBoolean shipQueued =
+      new java.util.concurrent.atomic.AtomicBoolean();
+
+  /**
    * The agents this workspace hosts, or null before {@link #wireAgents} ran (or when the agent
    * surface stayed unwired). {@link HookWebhook} is started before it exists, so the webhook is
    * handed listeners that read this field — a hook that fires first is sent untagged and not
@@ -463,6 +482,14 @@ public class ControlSocket {
     // sends nothing; it only awaits the Provisioned/ProvisionFailed we emit
     // (docs/epics/qits-workspace-daemon/ Part 1).
     startProvisioning();
+    transcriptShipper =
+        new TranscriptShipper(
+            this::sendIfConnected,
+            System::currentTimeMillis,
+            List.of(java.nio.file.Path.of(claudeMount), AGENT_CONFIG_DIR));
+    if (transcriptShipPollMs > 0) {
+      vertx.setPeriodic(transcriptShipPollMs, id -> shipTranscripts());
+    }
     // The hook webhook is independent of provisioning: a lifecycle hook can fire in a
     // reconnect-adopted (already-provisioned) container, and SessionStart drives session-lineage
     // which must be captured regardless. Its frames buffer in pendingOutbound until the socket is
@@ -626,7 +653,7 @@ public class ControlSocket {
             new CgroupMemory(CgroupMemory.CONTAINER),
             this::reportKill,
             this::exitOwner,
-            this::send);
+            this::harnessExited);
     CommandLifecycleService lifecycle =
         new CommandLifecycleService(
             store,
@@ -851,10 +878,71 @@ public class ControlSocket {
     }
   }
 
-  /** Send a hook's frame, naming the agent whose harness fired it. */
+  /**
+   * Send a hook's frame, naming the agent whose harness fired it — and hand it to the transcript
+   * shipper, which learns every session it ships from exactly these frames.
+   */
   private void sendTagged(DaemonMessage message) {
     AgentRuntime runtime = agents;
-    send(runtime == null ? message : runtime.tag(message));
+    DaemonMessage tagged = runtime == null ? message : runtime.tag(message);
+    send(tagged);
+    TranscriptShipper shipper = transcriptShipper;
+    if (shipper != null && tagged instanceof AgentActivity activity) {
+      // Off the hook's event loop: the shipper's lock may be held by a poll reading files.
+      onWorkers(
+          () -> {
+            if (shipper.observe(activity)) {
+              shipTranscripts();
+            }
+          });
+    }
+  }
+
+  /** Run on the worker pool, or not at all once the daemon is shutting down. */
+  private void onWorkers(Runnable task) {
+    try {
+      workers.execute(task);
+    } catch (RejectedExecutionException shuttingDown) {
+      LOG.debug("Worker task skipped: the daemon is shutting down");
+    }
+  }
+
+  /**
+   * Report a harness exit, and ship what its sessions wrote last: a harness that exits without a
+   * {@code SessionEnd} still ends them.
+   */
+  private void harnessExited(AgentHarnessExit exit) {
+    send(exit);
+    TranscriptShipper shipper = transcriptShipper;
+    if (shipper != null) {
+      shipper.commandEnded(exit.commandId());
+      shipTranscripts();
+    }
+  }
+
+  /**
+   * Queue one {@link TranscriptShipper#poll} on the worker pool, unless one is queued already: it
+   * reads files, so never on the event loop, and a backlog of identical polls would only repeat
+   * the same work.
+   */
+  private void shipTranscripts() {
+    TranscriptShipper shipper = transcriptShipper;
+    if (shipper == null || !shipQueued.compareAndSet(false, true)) {
+      return;
+    }
+    try {
+      workers.execute(
+          () -> {
+            shipQueued.set(false);
+            try {
+              shipper.poll();
+            } catch (RuntimeException e) {
+              LOG.warnf(e, "Transcript shipping failed; retrying at the next poll");
+            }
+          });
+    } catch (RejectedExecutionException shuttingDown) {
+      shipQueued.set(false);
+    }
   }
 
   /**
@@ -1058,6 +1146,16 @@ public class ControlSocket {
     if (h != null) {
       workers.execute(h::reportCurrent);
     }
+    // Transcripts carry on from their cursors, carefully: the host may be a new one, whose resyncs
+    // say where it actually stands.
+    TranscriptShipper shipper = transcriptShipper;
+    if (shipper != null) {
+      onWorkers(
+          () -> {
+            shipper.connected();
+            shipTranscripts();
+          });
+    }
     LOG.infof("workspace-daemon control socket established for workspace %s", workspaceId);
   }
 
@@ -1100,6 +1198,16 @@ public class ControlSocket {
         DaemonStreamTunnel t = tunnel;
         if (t != null) {
           t.open(request.nonce(), request.path(), request.target());
+        }
+      }
+      case TranscriptResync resync -> {
+        TranscriptShipper shipper = transcriptShipper;
+        if (shipper != null) {
+          onWorkers(
+              () -> {
+                shipper.resync(resync);
+                shipTranscripts();
+              });
         }
       }
       case PullBranch request -> {
@@ -1157,6 +1265,22 @@ public class ControlSocket {
     }
   }
 
+  /**
+   * Write a frame only if the socket is up and not backed up — never buffered. For {@link
+   * TranscriptShipper}, whose cursor stays put when this answers false: a transcript chunk is
+   * re-read from disk rather than held in memory, so the pending buffer is no place for it.
+   */
+  private boolean sendIfConnected(DaemonMessage message) {
+    synchronized (sendLock) {
+      WebSocket ws = socket;
+      if (ws == null || ws.isClosed() || ws.writeQueueFull()) {
+        return false;
+      }
+      send(message, ws);
+      return true;
+    }
+  }
+
   private void send(DaemonMessage message, WebSocket ws) {
     String json = new JsonObject(DaemonCodec.encode(message)).encode();
     Context context = socketContext;
@@ -1177,6 +1301,16 @@ public class ControlSocket {
   void stop() {
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);
+    // Then what they wrote on their way out, while the socket is still up. Best effort: a chunk
+    // that does not make it is re-sent by the next daemon after the host's resync.
+    TranscriptShipper shipper = transcriptShipper;
+    if (shipper != null) {
+      try {
+        shipper.poll();
+      } catch (RuntimeException e) {
+        LOG.debugf("Final transcript ship failed: %s", e.getMessage());
+      }
+    }
     HookWebhook h = hooks;
     if (h != null) {
       h.close();

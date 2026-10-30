@@ -65,7 +65,8 @@ declares a `<repositories>` block. Inside CI and the Dockerfile's builder stage,
 keeps it open. Provisioning progress, agent activity (each frame naming its agent and, from
 capability 12, whether background work it started is still in flight), each branch the
 daemon pushed for an agent (`AgentBranchPushed`), every agent harness exit (`AgentHarnessExit`,
-capability 11) and change nudges all ride it. Message shapes live in `workspace-daemon-protocol`;
+capability 11), its own agents' transcripts (`TranscriptChunk`, capability 13) and change nudges all
+ride it. Message shapes live in `workspace-daemon-protocol`;
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.
 
@@ -209,8 +210,18 @@ This is the deliberate scope of moving commands and agents inside, and it costs:
   resumes it when its files are still there (qits-1152);
 - token and message-count aggregates are lost.
 
-Transcripts themselves are safe: the harness writes them under `/claude-home`, a volume shared
-across workspaces that outlives any container. What became ephemeral is the *index* of them.
+Transcripts themselves are safe: the harness writes them under `/claude-home`, a volume that
+outlives any container. What became ephemeral is the *index* of them.
+
+That volume is per execution target, though, and a workspace on a remote target writes to one
+qits-workspaces cannot mount. So the daemon ships them (`TranscriptShipper`, qits-1752): every
+session its own hooks reported — the main `<sessionId>.jsonl` and each `subagents/agent-<id>.jsonl`
+beside it, never anything else on a volume every workspace and desk on the target shares — goes home
+as `TranscriptChunk`s of whole lines, addressed by byte offset. The host appends a chunk only at the
+size it holds and answers anything else with a `TranscriptResync`, which moves the daemon's cursor;
+the cursors are in memory and start at 0, so that exchange is how a restart on either side resumes
+without losing or duplicating a line. Polled every `transcript-ship.poll-ms` (3000), and at once on
+a `Stop`, a `SessionEnd`, a harness exit and a resync.
 
 Two bounds exist because heap here is a container sized for the workspace's own build, not a host
 with a disk: `CommandStore.MAX_COMMANDS` (200 finished commands, oldest evicted, running commands
