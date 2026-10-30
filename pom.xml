@@ -67,7 +67,7 @@
         <!-- qits-1149: the two other consumers whose pacts name this daemon — qits-platform-access-cli
              (`pacts/qits-platform-access-cli_qits-workspace-daemon.json`) and qits-workspaces-service's
              proxy (`pacts/qits-workspaces-service_qits-workspace-daemon.json`). -->
-        <qits.platform-access-cli-pacts-qits-workspace-daemon.version>2026.1019.65035</qits.platform-access-cli-pacts-qits-workspace-daemon.version>
+        <qits.platform-access-cli-pacts-qits-workspace-daemon.version>2026.1030.112950</qits.platform-access-cli-pacts-qits-workspace-daemon.version>
         <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1029.225748</qits.workspaces-service-pacts-qits-workspace-daemon.version>
         <!-- The platform's shared rules, test scope (qits-1754): ProviderStateCoverageRules checks
              every state golden-masters/index.json records has its @State callback on
