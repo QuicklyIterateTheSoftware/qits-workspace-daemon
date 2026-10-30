@@ -144,6 +144,18 @@ public final class DaemonCodec {
         map.put(Field.STOPPED_BY, m.stoppedBy());
         map.put(Field.AT, m.at() == null ? null : m.at().toEpochMilli());
       }
+      case TranscriptChunk m -> {
+        map.put(Field.TYPE, Type.TRANSCRIPT_CHUNK);
+        // Absent for a command no agent owns, AgentActivity's rule.
+        if (m.agentId() != null) {
+          map.put(Field.AGENT_ID, m.agentId());
+        }
+        map.put(Field.COMMAND_ID, m.commandId());
+        map.put(Field.SESSION_ID, m.sessionId());
+        map.put(Field.FILE, m.file());
+        map.put(Field.OFFSET, m.offset());
+        map.put(Field.DATA, m.data());
+      }
       case Ack _ -> map.put(Field.TYPE, Type.ACK); // no fields beyond the discriminator
       case RunCommand m -> {
         map.put(Field.TYPE, Type.RUN_COMMAND);
@@ -176,6 +188,12 @@ public final class DaemonCodec {
         if (m.target() != StreamTarget.API) {
           map.put(Field.TARGET, m.target().name());
         }
+      }
+      case TranscriptResync m -> {
+        map.put(Field.TYPE, Type.TRANSCRIPT_RESYNC);
+        map.put(Field.SESSION_ID, m.sessionId());
+        map.put(Field.FILE, m.file());
+        map.put(Field.SIZE, m.size());
       }
     }
     return map;
@@ -258,6 +276,14 @@ public final class DaemonCodec {
               intObj(map, Field.EXIT_CODE),
               str(map, Field.STOPPED_BY),
               instant(map, Field.AT));
+      case Type.TRANSCRIPT_CHUNK ->
+          new TranscriptChunk(
+              str(map, Field.AGENT_ID),
+              str(map, Field.COMMAND_ID),
+              str(map, Field.SESSION_ID),
+              str(map, Field.FILE),
+              requiredLong(map, Field.OFFSET),
+              str(map, Field.DATA));
       case Type.ACK -> new Ack();
       case Type.RUN_COMMAND ->
           new RunCommand(
@@ -272,6 +298,9 @@ public final class DaemonCodec {
       case Type.OPEN_STREAM ->
           new OpenStream(
               str(map, Field.NONCE), str(map, Field.PATH), streamTarget(map, Field.TARGET));
+      case Type.TRANSCRIPT_RESYNC ->
+          new TranscriptResync(
+              str(map, Field.SESSION_ID), str(map, Field.FILE), requiredLong(map, Field.SIZE));
       default ->
           throw new IllegalArgumentException("unknown workspace-daemon message type: " + type);
     };
@@ -322,6 +351,19 @@ public final class DaemonCodec {
   private static long longVal(Map<String, Object> map, String key) {
     Object value = map.get(key);
     return value instanceof Number number ? number.longValue() : 0L;
+  }
+
+  /**
+   * A byte position that must be on the wire: absent or not a number throws, so the frame is
+   * dropped as undecodable rather than read as position 0 — which for a {@link TranscriptResync}
+   * would rewind a whole transcript, and for a {@link TranscriptChunk} would overwrite its start.
+   */
+  private static long requiredLong(Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    if (!(value instanceof Number number)) {
+      throw new IllegalArgumentException("workspace-daemon message has no numeric '" + key + "'");
+    }
+    return number.longValue();
   }
 
   private static boolean boolVal(Map<String, Object> map, String key) {

@@ -19,10 +19,12 @@ public sealed interface DaemonMessage
         AgentActivity,
         AgentBranchPushed,
         AgentHarnessExit,
+        TranscriptChunk,
         WorkspaceChanged,
         Ack,
         RunCommand,
         Describe,
         DescribeConfig,
         PullBranch,
-        OpenStream {}
+        OpenStream,
+        TranscriptResync {}

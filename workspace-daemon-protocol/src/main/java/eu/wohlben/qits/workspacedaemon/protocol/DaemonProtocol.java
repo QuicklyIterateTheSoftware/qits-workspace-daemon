@@ -110,8 +110,17 @@ public final class DaemonProtocol {
    * gates on this number. A backend on 11 decodes the frame (the new key is unread) and is exactly
    * as blind to background work as before; a backend on 12 reading a daemon on 11 decodes {@code
    * null}. Optional on the wire in both directions, the {@code awaitingInput} rule again.
+   *
+   * <p><b>13 added transcript shipping</b> (qits-1752): {@link TranscriptChunk}, the bytes appended
+   * to a session's transcript files, and {@link TranscriptResync}, the host's answer when a chunk
+   * does not start where its archive ends. A workspace on a remote execution target writes its
+   * transcripts to a {@code /claude-home} the host cannot mount, so the daemon ships its own agents'
+   * sessions over this socket. Nothing gates on this number. A backend on 12 drops the unknown
+   * {@code transcriptChunk} as undecodable and never sends a resync, so the daemon ships from its own
+   * cursors into a host that discards them — harmless. A daemon on 12 never receives a resync it
+   * could not decode, because a host only sends one in answer to a chunk.
    */
-  public static final int CAPABILITY_VERSION = 12;
+  public static final int CAPABILITY_VERSION = 13;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -148,6 +157,7 @@ public final class DaemonProtocol {
     public static final String WORKSPACE_CHANGED = "workspaceChanged";
     public static final String AGENT_BRANCH_PUSHED = "agentBranchPushed";
     public static final String AGENT_HARNESS_EXIT = "agentHarnessExit";
+    public static final String TRANSCRIPT_CHUNK = "transcriptChunk";
     // qits -> workspace-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
@@ -155,6 +165,7 @@ public final class DaemonProtocol {
     public static final String DESCRIBE_CONFIG = "describeConfig";
     public static final String PULL_BRANCH = "pullBranch";
     public static final String OPEN_STREAM = "openStream";
+    public static final String TRANSCRIPT_RESYNC = "transcriptResync";
 
     private Type() {}
   }
@@ -214,6 +225,12 @@ public final class DaemonProtocol {
     public static final String AGENT_TYPE = "agentType";
     public static final String STATUS = "status";
     public static final String STOPPED_BY = "stoppedBy";
+    // TranscriptChunk (qits-1752, capability 13). It also carries AGENT_ID (optional, written only
+    // when present), COMMAND_ID and SESSION_ID; TranscriptResync carries SESSION_ID, FILE and SIZE.
+    public static final String FILE = "file";
+    public static final String OFFSET = "offset";
+    public static final String DATA = "data";
+    public static final String SIZE = "size";
 
     private Field() {}
   }

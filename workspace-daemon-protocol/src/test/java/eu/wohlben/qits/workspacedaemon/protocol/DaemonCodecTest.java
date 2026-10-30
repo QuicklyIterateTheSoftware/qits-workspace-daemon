@@ -478,9 +478,162 @@ class DaemonCodecTest {
 
   @Test
   void theBackgroundWorkVerdictLandedAtCapabilityTwelve() {
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 12);
+  }
+
+  @Test
+  void transcriptShippingLandedAtCapabilityThirteen() {
     // A literal: the host records it, and a capability that moved without this line moving is a
     // contract nobody re-read.
-    assertEquals(12, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals(13, DaemonProtocol.CAPABILITY_VERSION);
+  }
+
+  @Test
+  void aTranscriptChunkRoundTripsWithItsSevenKeys() {
+    TranscriptChunk chunk =
+        new TranscriptChunk(
+            "agent-1", "cmd-1", "5f0c1a7e-0000-4000-8000-000000000001", "main", 4096L,
+            "{\"type\":\"user\"}\n");
+    assertEquals(chunk, roundTrip(chunk));
+    assertEquals(
+        Map.of(
+            "type", "transcriptChunk",
+            "agentId", "agent-1",
+            "commandId", "cmd-1",
+            "sessionId", "5f0c1a7e-0000-4000-8000-000000000001",
+            "file", "main",
+            "offset", 4096L,
+            "data", "{\"type\":\"user\"}\n"),
+        DaemonCodec.encode(chunk));
+  }
+
+  @Test
+  void aSidechainChunkNamesItsFileUnderSubagents() {
+    TranscriptChunk chunk =
+        new TranscriptChunk("agent-1", "cmd-1", "s-1", "subagents/agent-a1b2c3.jsonl", 0L, "x\n");
+    assertEquals("subagents/agent-a1b2c3.jsonl", DaemonCodec.encode(chunk).get("file"));
+    assertEquals(chunk, roundTrip(chunk));
+  }
+
+  @Test
+  void aTranscriptChunkCarriesItsAgentOnlyWhenItHasOne() {
+    TranscriptChunk chunk = new TranscriptChunk(null, "cmd-2", "s-1", "main", 0L, "x\n");
+    assertFalse(DaemonCodec.encode(chunk).containsKey("agentId"));
+    assertNull(((TranscriptChunk) roundTrip(chunk)).agentId());
+  }
+
+  @Test
+  void aChunkDecodedFromJsonWithAnIntegerOffsetKeepsItsValue() {
+    // Jackson decodes a small number as an Integer, Vert.x as a Long; both are a position.
+    Map<String, Object> wire = new java.util.LinkedHashMap<>();
+    wire.put("type", "transcriptChunk");
+    wire.put("commandId", "cmd-1");
+    wire.put("sessionId", "s-1");
+    wire.put("file", "main");
+    wire.put("offset", 17);
+    wire.put("data", "x\n");
+    assertEquals(17L, ((TranscriptChunk) DaemonCodec.decode(wire)).offset());
+  }
+
+  @Test
+  void aChunkWithNoOffsetIsUndecodableRatherThanReadAsTheStartOfTheFile() {
+    Map<String, Object> wire =
+        Map.of("type", "transcriptChunk", "commandId", "c", "sessionId", "s-1", "file", "main",
+            "data", "x\n");
+    assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(wire));
+  }
+
+  @Test
+  void aTranscriptResyncRoundTripsWithItsFourKeys() {
+    TranscriptResync resync = new TranscriptResync("s-1", "subagents/agent-a1.jsonl", 123_456L);
+    assertEquals(resync, roundTrip(resync));
+    assertEquals(
+        Map.of(
+            "type", "transcriptResync",
+            "sessionId", "s-1",
+            "file", "subagents/agent-a1.jsonl",
+            "size", 123_456L),
+        DaemonCodec.encode(resync));
+  }
+
+  @Test
+  void aResyncWithNoSizeIsUndecodableRatherThanARewindToZero() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            DaemonCodec.decode(
+                Map.of("type", "transcriptResync", "sessionId", "s-1", "file", "main")));
+  }
+
+  @Test
+  void aTranscriptFileIsMainOrExactlyOneSidechainUnderSubagents() {
+    for (String good :
+        List.of("main", "subagents/agent-a1b2.jsonl", "subagents/agent-0f_9-X.jsonl")) {
+      assertTrue(TranscriptFiles.validFile(good), good);
+    }
+    for (String bad :
+        List.of(
+            "",
+            "Main",
+            "main.jsonl",
+            "s-1.jsonl",
+            "../main",
+            "subagents/agent-../x.jsonl",
+            "subagents/agent-..jsonl",
+            "subagents/agent-a/b.jsonl",
+            "subagents/agent-.jsonl",
+            "subagents/agent-a.json",
+            "subagents/other-a.jsonl",
+            "/subagents/agent-a.jsonl",
+            "subagents//agent-a.jsonl",
+            "subagents/subagents/agent-a.jsonl",
+            "subagents\\agent-a.jsonl")) {
+      assertFalse(TranscriptFiles.validFile(bad), bad);
+    }
+    assertFalse(TranscriptFiles.validFile(null));
+  }
+
+  @Test
+  void aSessionIdIsOneSafePathSegment() {
+    assertTrue(TranscriptFiles.validSessionId("5f0c1a7e-0000-4000-8000-000000000001"));
+    for (String bad : List.of("", ".", "..", "a..b", "a/b", "a\\b", "-x", ".hidden")) {
+      assertFalse(TranscriptFiles.validSessionId(bad), bad);
+    }
+    assertFalse(TranscriptFiles.validSessionId(null));
+  }
+
+  @Test
+  void aFrameAddressingAnythingButASessionFileIsRefusedOnBothSidesOfTheWire() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new TranscriptChunk("a", "c", "s-1", "../../etc/passwd", 0L, "x\n"));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TranscriptResync("../s", "main", 0L));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TranscriptChunk("a", "c", "s-1", "main", -1L, ""));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TranscriptChunk("a", "c", "s-1", "main", 0L, null));
+    assertThrows(IllegalArgumentException.class, () -> new TranscriptResync("s-1", "main", -1L));
+    // And a decoder meeting one drops it as undecodable, rather than handing it on.
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            DaemonCodec.decode(
+                Map.of("type", "transcriptResync", "sessionId", "s-1", "file", "x/../main",
+                    "size", 1L)));
+  }
+
+  @Test
+  void aBackendThatPredatesTranscriptShippingRefusesTheChunkAsAnUnknownType() {
+    // Why the daemon ships ungated: a backend on 12 has no arm for the tag, its decoder throws, and
+    // DaemonControlSocket catches it, logs and keeps the connection.
+    Map<String, Object> wire =
+        new java.util.HashMap<>(
+            DaemonCodec.encode(new TranscriptChunk("a", "c", "s-1", "main", 0L, "x\n")));
+    wire.put(DaemonProtocol.Field.TYPE, "transcriptChunkAsAnOlderDecoderSeesIt");
+    RuntimeException refused =
+        assertThrows(IllegalArgumentException.class, () -> DaemonCodec.decode(wire));
+    assertTrue(refused.getMessage().contains("unknown workspace-daemon message type"));
   }
 
   @Test
