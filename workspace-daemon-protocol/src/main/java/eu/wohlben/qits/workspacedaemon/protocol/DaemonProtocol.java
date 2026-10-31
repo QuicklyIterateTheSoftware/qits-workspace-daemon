@@ -119,8 +119,17 @@ public final class DaemonProtocol {
    * {@code transcriptChunk} as undecodable and never sends a resync, so the daemon ships from its own
    * cursors into a host that discards them — harmless. A daemon on 12 never receives a resync it
    * could not decode, because a host only sends one in answer to a chunk.
+   *
+   * <p><b>14 added the remote-control outcome to {@link AgentHarnessExit}</b> (qits-1779): {@link
+   * AgentHarnessExit#remoteSession()} and {@link AgentHarnessExit#remoteArchive()}, read from a
+   * claude harness's Remote Control debug log at exit — whether it archived its claude.ai listing.
+   * Nothing gates on this number. A backend on 13 decodes the frame (the new keys are unread) and
+   * is as blind to a session left listed on claude.ai as before; a backend on 14 reading a daemon on
+   * 13 decodes {@code null} for both. The number is what tells those two nulls apart from a 14
+   * daemon's null, which means the harness had no remote-control log. Optional on the wire, the
+   * {@code backgroundWork} rule again.
    */
-  public static final int CAPABILITY_VERSION = 13;
+  public static final int CAPABILITY_VERSION = 14;
 
   /**
    * The first version whose daemon can serve a reverse-tunnel stream <em>and</em> has stopped
@@ -225,6 +234,10 @@ public final class DaemonProtocol {
     public static final String AGENT_TYPE = "agentType";
     public static final String STATUS = "status";
     public static final String STOPPED_BY = "stoppedBy";
+    // Optional on AgentHarnessExit (qits-1779, capability 14): a claude harness's claude.ai
+    // remote-control session and its archive status, written only when present.
+    public static final String REMOTE_SESSION = "remoteSession";
+    public static final String REMOTE_ARCHIVE = "remoteArchive";
     // TranscriptChunk (qits-1752, capability 13). It also carries AGENT_ID (optional, written only
     // when present), COMMAND_ID and SESSION_ID; TranscriptResync carries SESSION_ID, FILE and SIZE.
     public static final String FILE = "file";

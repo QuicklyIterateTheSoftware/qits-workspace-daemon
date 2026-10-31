@@ -143,6 +143,14 @@ public final class DaemonCodec {
         map.put(Field.EXIT_CODE, m.exitCode());
         map.put(Field.STOPPED_BY, m.stoppedBy());
         map.put(Field.AT, m.at() == null ? null : m.at().toEpochMilli());
+        // The remote-control outcome (qits-1779) is written only when present, AgentActivity's
+        // agentId rule: an exit with none is byte-identical to one built before the keys existed.
+        if (m.remoteSession() != null) {
+          map.put(Field.REMOTE_SESSION, m.remoteSession());
+        }
+        if (m.remoteArchive() != null) {
+          map.put(Field.REMOTE_ARCHIVE, m.remoteArchive());
+        }
       }
       case TranscriptChunk m -> {
         map.put(Field.TYPE, Type.TRANSCRIPT_CHUNK);
@@ -275,7 +283,9 @@ public final class DaemonCodec {
               str(map, Field.STATUS),
               intObj(map, Field.EXIT_CODE),
               str(map, Field.STOPPED_BY),
-              instant(map, Field.AT));
+              instant(map, Field.AT),
+              str(map, Field.REMOTE_SESSION),
+              str(map, Field.REMOTE_ARCHIVE));
       case Type.TRANSCRIPT_CHUNK ->
           new TranscriptChunk(
               str(map, Field.AGENT_ID),

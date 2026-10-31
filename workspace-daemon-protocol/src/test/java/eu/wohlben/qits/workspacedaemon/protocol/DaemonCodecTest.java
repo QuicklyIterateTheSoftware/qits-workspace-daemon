@@ -483,9 +483,14 @@ class DaemonCodecTest {
 
   @Test
   void transcriptShippingLandedAtCapabilityThirteen() {
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 13);
+  }
+
+  @Test
+  void theRemoteControlOutcomeLandedAtCapabilityFourteen() {
     // A literal: the host records it, and a capability that moved without this line moving is a
     // contract nobody re-read.
-    assertEquals(13, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals(14, DaemonProtocol.CAPABILITY_VERSION);
   }
 
   @Test
@@ -671,6 +676,96 @@ class DaemonCodecTest {
     assertEquals(exit, decoded);
     assertNull(decoded.agentId());
     assertNull(decoded.exitCode());
+  }
+
+  @Test
+  void aHarnessExitCarriesItsRemoteControlOutcomeUnderTwoMoreKeys() {
+    // qits-1779: a claude harness with Remote Control on says whether it archived its claude.ai
+    // listing. The keys are literals — the host reads them by these names.
+    AgentHarnessExit exit =
+        new AgentHarnessExit(
+            "agent-1",
+            "cmd-1",
+            "claude",
+            "TERMINATED",
+            143,
+            AgentHarnessExit.DAEMON_YIELD,
+            Instant.ofEpochMilli(1_760_000_000_123L),
+            "cse_01CiRkJvCf85w2aC9w8b2LHS",
+            "401");
+    assertEquals(exit, roundTrip(exit));
+    Map<String, Object> wire = DaemonCodec.encode(exit);
+    assertEquals(10, wire.size(), wire.toString());
+    assertEquals("cse_01CiRkJvCf85w2aC9w8b2LHS", wire.get("remoteSession"));
+    assertEquals("401", wire.get("remoteArchive"));
+    // A log with no archive line at all, and a bridge that never named a session: one key, not two.
+    AgentHarnessExit unarchived =
+        new AgentHarnessExit(
+            "agent-1", "cmd-2", "claude", "EXITED", 0, AgentHarnessExit.SELF, Instant.EPOCH, null,
+            AgentHarnessExit.NO_ARCHIVE);
+    assertEquals(unarchived, roundTrip(unarchived));
+    assertEquals("NONE", DaemonCodec.encode(unarchived).get("remoteArchive"));
+    assertFalse(DaemonCodec.encode(unarchived).containsKey("remoteSession"));
+  }
+
+  @Test
+  void aHarnessExitWithNoRemoteControlOutcomeWritesNeitherKey() {
+    // Every exit but a remote-controlled claude one: byte-identical to the frame before qits-1779.
+    Map<String, Object> wire =
+        DaemonCodec.encode(
+            new AgentHarnessExit(
+                "agent-1", "cmd-1", "kimi", "EXITED", 0, AgentHarnessExit.SELF, Instant.EPOCH,
+                null, null));
+    assertFalse(wire.containsKey("remoteSession"), wire.toString());
+    assertFalse(wire.containsKey("remoteArchive"), wire.toString());
+    assertEquals(8, wire.size(), wire.toString());
+  }
+
+  @Test
+  void aHarnessExitFromADaemonThatPredatesTheRemoteOutcomeDecodesItAsNull() {
+    // A daemon on 13 sends the seven keys and nothing else; a host on 14 reads null for both.
+    Map<String, Object> wire = new java.util.HashMap<>();
+    wire.put("type", "agentHarnessExit");
+    wire.put("agentId", "agent-1");
+    wire.put("commandId", "cmd-1");
+    wire.put("agentType", "claude");
+    wire.put("status", "EXITED");
+    wire.put("exitCode", 0);
+    wire.put("stoppedBy", "SELF");
+    wire.put("at", 7L);
+    AgentHarnessExit decoded = (AgentHarnessExit) DaemonCodec.decode(wire);
+    assertEquals(
+        new AgentHarnessExit(
+            "agent-1", "cmd-1", "claude", "EXITED", 0, AgentHarnessExit.SELF,
+            Instant.ofEpochMilli(7)),
+        decoded);
+    assertNull(decoded.remoteSession());
+    assertNull(decoded.remoteArchive());
+  }
+
+  @Test
+  void aDecoderThatPredatesTheRemoteOutcomeStillReadsTheExit() {
+    // A backend on 13 reads the keys it knows by name and never looks at the rest — which is why
+    // the field needs no gate. Played here by the new frame plus a key no version knows, decoded:
+    // every pre-qits-1779 component comes through untouched and the stranger is simply unread.
+    Map<String, Object> wire =
+        new java.util.HashMap<>(
+            DaemonCodec.encode(
+                new AgentHarnessExit(
+                    "agent-1", "cmd-1", "claude", "EXITED", 0, AgentHarnessExit.SELF,
+                    Instant.ofEpochMilli(7), "cse_1", "200")));
+    wire.put("aKeyNoVersionKnows", "x");
+    AgentHarnessExit decoded = (AgentHarnessExit) DaemonCodec.decode(wire);
+    assertEquals(
+        List.of("agent-1", "cmd-1", "claude", "EXITED", 0, "SELF", Instant.ofEpochMilli(7)),
+        List.of(
+            decoded.agentId(),
+            decoded.commandId(),
+            decoded.agentType(),
+            decoded.status(),
+            decoded.exitCode(),
+            decoded.stoppedBy(),
+            decoded.at()));
   }
 
   @Test

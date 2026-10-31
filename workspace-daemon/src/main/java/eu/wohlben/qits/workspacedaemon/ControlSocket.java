@@ -8,6 +8,8 @@ import eu.wohlben.qits.agents.AgentSessionStore;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentTranscriptService;
 import eu.wohlben.qits.agents.AgentTranscriptTailService;
+import eu.wohlben.qits.agents.AgentTranscripts;
+import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.CommandsAgentCommands;
 import eu.wohlben.qits.agents.EntityFacts;
 import eu.wohlben.qits.agents.HarnessCapabilities;
@@ -653,7 +655,11 @@ public class ControlSocket {
             new CgroupMemory(CgroupMemory.CONTAINER),
             this::reportKill,
             this::exitOwner,
-            this::harnessExited);
+            this::harnessExited,
+            // Where a claude harness's remote-control log lands (qits-1779): its CLAUDE_CONFIG_DIR,
+            // which the launch leaves unset under a HOME of claudeMount — the same config dir the
+            // transcript lookups resolve.
+            AgentTranscripts.configDir(claudeMount, AgentType.CLAUDE));
     CommandLifecycleService lifecycle =
         new CommandLifecycleService(
             store,
