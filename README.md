@@ -65,7 +65,8 @@ declares a `<repositories>` block. Inside CI and the Dockerfile's builder stage,
 keeps it open. Provisioning progress, agent activity (each frame naming its agent and, from
 capability 12, whether background work it started is still in flight), each branch the
 daemon pushed for an agent (`AgentBranchPushed`), every agent harness exit (`AgentHarnessExit`,
-capability 11), its own agents' transcripts (`TranscriptChunk`, capability 13) and change nudges all
+capability 11; from 14 also whether a claude harness archived its claude.ai remote-control
+session), its own agents' transcripts (`TranscriptChunk`, capability 13) and change nudges all
 ride it. Message shapes live in `workspace-daemon-protocol`;
 `DaemonProtocol.CAPABILITY_VERSION` is what a backend branches on. The path is qits-workspaces'; the
 daemon dials the url it was handed verbatim and parses no path out of it.

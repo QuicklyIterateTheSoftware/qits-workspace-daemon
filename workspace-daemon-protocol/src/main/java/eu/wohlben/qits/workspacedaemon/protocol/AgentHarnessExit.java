@@ -19,6 +19,13 @@ import java.time.Instant;
  * frame ({@code DaemonControlSocket} catches an undecodable frame and logs it); nothing else about
  * the socket changes.
  *
+ * <p><b>A claude harness's remote-control session</b> (qits-1779, capability 14): when the harness
+ * ran with claude.ai Remote Control, its debug log says whether it archived its claude.ai listing on
+ * the way out, and under which {@code cse_…} id — {@link #remoteSession} and {@link #remoteArchive}.
+ * Both are optional on the wire, {@code AgentActivity}'s {@code agentId} rule: written only when
+ * present, so every other exit is byte-identical to what it was at 11, a backend that never learned
+ * the keys does not read them, and a host reading a frame from an older daemon decodes {@code null}.
+ *
  * @param agentId the agent whose harness it was, or null for an agent command no agent of this
  *     daemon owns (the sign-in terminal)
  * @param commandId the harness command that settled
@@ -29,6 +36,11 @@ import java.time.Instant;
  *     #KILLED}, {@link #SELF}
  * @param at when the daemon saw the exit; epoch milliseconds on the wire, as {@link
  *     AgentActivity#at()} is
+ * @param remoteSession the claude.ai remote-control session ({@code cse_…}) the harness's debug log
+ *     last named, or null — no remote control, no log, or a bridge that never created a session
+ * @param remoteArchive the status of the last archive of that session the log records, as written
+ *     ({@code "200"}, {@code "401"}, …), {@link #NO_ARCHIVE} when the log records none, or null
+ *     when there was no log at all
  */
 public record AgentHarnessExit(
     String agentId,
@@ -37,8 +49,33 @@ public record AgentHarnessExit(
     String status,
     Integer exitCode,
     String stoppedBy,
-    Instant at)
+    Instant at,
+    String remoteSession,
+    String remoteArchive)
     implements DaemonMessage {
+
+  /**
+   * An exit with no remote-control outcome: every harness but a claude one with Remote Control on,
+   * and the frame's whole shape before qits-1779.
+   */
+  public AgentHarnessExit(
+      String agentId,
+      String commandId,
+      String agentType,
+      String status,
+      Integer exitCode,
+      String stoppedBy,
+      Instant at) {
+    this(agentId, commandId, agentType, status, exitCode, stoppedBy, at, null, null);
+  }
+
+  /**
+   * {@link #remoteArchive} for a remote-control log that records no archive attempt at all — a
+   * harness that ended on EOF or a KILL without ever being asked to archive. The same word the
+   * harness library's {@code RemoteControlLog.NO_ARCHIVE} writes; spelled here because this module
+   * depends on nothing.
+   */
+  public static final String NO_ARCHIVE = "NONE";
 
   /** The daemon terminated the harness because the agent's worktree was removed. */
   public static final String DAEMON_REMOVE = "DAEMON_REMOVE";
