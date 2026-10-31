@@ -1,8 +1,13 @@
 package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.agents.RemoteControlLog;
+import eu.wohlben.qits.commands.AgentSessionRef;
+import eu.wohlben.qits.commands.AgentSessionSource;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandStore;
@@ -11,8 +16,13 @@ import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentEvent;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -255,6 +265,237 @@ class AgentKillWatchTest {
     assertTrue(sent.stream().allMatch(e -> e.at() != null), sent.toString());
     // The kill's own ENDED path is untouched, and still only for the kill.
     assertEquals(List.of("killed=" + AgentEvent.KILLED + ":137"), reported);
+  }
+
+  // --- qits-1779: a claude harness's remote-control session, read back at its exit ---
+
+  private static final String SESSION = "5f0c1a7e-0000-4000-8000-000000000001";
+  private static final String CSE = "cse_01CiRkJvCf85w2aC9w8b2LHS";
+
+  @TempDir Path claudeConfig;
+
+  /** A watch over a claude config dir, every command agent-1's, sending frames to {@code sent}. */
+  private CommandLifecycleService remoteLifecycle(List<AgentHarnessExit> sent) {
+    AgentKillWatch watch =
+        new AgentKillWatch(
+            store,
+            new CgroupMemory(cgroup.resolve("absent")),
+            (id, event, code, message) -> reported.add(id + "=" + event + ":" + code),
+            id -> "sign-in".equals(id) ? null : new AgentKillWatch.Owner("agent-1", null),
+            sent::add,
+            claudeConfig);
+    return new CommandLifecycleService(store, watch::commandsChanged);
+  }
+
+  /** A command launched as {@link #SESSION}, the way the harness library pins a fresh session. */
+  private void launchAs(CommandLifecycleService lifecycle, String id, String agentType) {
+    lifecycle.createRunning(
+        "feature",
+        "deadbeef",
+        null,
+        "agent",
+        "claude",
+        true,
+        CommandKind.TERMINAL,
+        id,
+        new AgentSessionRef(SESSION, AgentSessionSource.PINNED, null, null, Instant.now()),
+        agentType);
+  }
+
+  /** The remote-control log the launch passed to {@code --debug-file}, with noise around it. */
+  private Path remoteLog(String archive) throws IOException {
+    Path log = RemoteControlLog.resolve(claudeConfig, SESSION);
+    Files.createDirectories(log.getParent());
+    Files.writeString(
+        log,
+        "2026-10-31T10:00:00Z [DEBUG] Loading settings\n"
+            + "2026-10-31T10:00:01Z [DEBUG] [remote-bridge] Created session "
+            + CSE
+            + "\n"
+            + "2026-10-31T10:00:02Z [DEBUG] Rendering 4096 lines of TUI\n"
+            + "2026-10-31T10:05:00Z [DEBUG] [code-session] Archive "
+            + CSE
+            + " status="
+            + archive
+            + "\n"
+            + "2026-10-31T10:05:00Z [DEBUG] [remote-bridge] Torn down (archive="
+            + archive
+            + ")\n"
+            + "2026-10-31T10:05:01Z [DEBUG] Flushing telemetry\n");
+    return log;
+  }
+
+  /**
+   * The WARN lines {@link AgentKillWatch} logs while {@code body} runs, caught through JUL, which
+   * JBoss Logging delegates to outside a Quarkus boot.
+   */
+  private static List<String> warnings(ThrowingRunnable body) throws IOException {
+    List<String> warned = new ArrayList<>();
+    Logger logger = Logger.getLogger(AgentKillWatch.class.getName());
+    Handler handler =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+              Object[] params = record.getParameters();
+              warned.add(
+                  params == null
+                      ? record.getMessage()
+                      : String.format(record.getMessage(), params));
+            }
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    logger.addHandler(handler);
+    try {
+      body.run();
+    } finally {
+      logger.removeHandler(handler);
+    }
+    return warned;
+  }
+
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    void run() throws IOException;
+  }
+
+  @Test
+  void anArchivedRemoteSessionRidesTheExitFrameWithNoWarning() throws IOException {
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    CommandLifecycleService lifecycle = remoteLifecycle(sent);
+    launchAs(lifecycle, "terminal", "claude");
+    remoteLog("200");
+
+    List<String> warned = warnings(() -> lifecycle.markTerminated("terminal", 143));
+
+    assertEquals(1, sent.size(), sent.toString());
+    assertEquals(CSE, sent.get(0).remoteSession());
+    assertEquals("200", sent.get(0).remoteArchive());
+    assertTrue(warned.isEmpty(), warned.toString());
+    assertNull(
+        AgentKillWatch.notArchivedLine(
+            new AgentKillWatch.Owner("agent-1", null), new RemoteControlLog.Outcome(CSE, "200")));
+    assertTrue(
+        AgentKillWatch.exitLine(
+                store.find("terminal").orElseThrow(),
+                new AgentKillWatch.Owner("agent-1", null),
+                new RemoteControlLog.Outcome(CSE, "200"))
+            .endsWith(", claude.ai remote session " + CSE + " archive=200"));
+  }
+
+  @Test
+  void aRemoteSessionWhoseArchiveFailedIsAWarningAndStillRidesTheFrame() throws IOException {
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    CommandLifecycleService lifecycle = remoteLifecycle(sent);
+    launchAs(lifecycle, "terminal", "claude");
+    remoteLog("401");
+
+    List<String> warned = warnings(() -> lifecycle.markTerminated("terminal", 143));
+
+    assertEquals(CSE, sent.get(0).remoteSession());
+    assertEquals("401", sent.get(0).remoteArchive());
+    String expected =
+        "agent agent-1's claude.ai remote session " + CSE + " was not archived (archive=401)";
+    assertEquals(
+        expected,
+        AgentKillWatch.notArchivedLine(
+            new AgentKillWatch.Owner("agent-1", null), new RemoteControlLog.Outcome(CSE, "401")));
+    assertTrue(
+        warned.stream().anyMatch(line -> line.contains(expected)), "the WARN: " + warned);
+  }
+
+  @Test
+  void aLogThatRecordsNoArchiveAtAllIsTheNoneWordAndAWarning() throws IOException {
+    // The harness ended on EOF or a KILL without ever being asked to archive.
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    CommandLifecycleService lifecycle = remoteLifecycle(sent);
+    launchAs(lifecycle, "terminal", "claude");
+    Path log = RemoteControlLog.resolve(claudeConfig, SESSION);
+    Files.createDirectories(log.getParent());
+    Files.writeString(log, "x [DEBUG] [remote-bridge] Created session " + CSE + "\n");
+
+    lifecycle.markExited("terminal", 137);
+
+    assertEquals(CSE, sent.get(0).remoteSession());
+    assertEquals(AgentHarnessExit.NO_ARCHIVE, sent.get(0).remoteArchive());
+    assertEquals(RemoteControlLog.NO_ARCHIVE, AgentHarnessExit.NO_ARCHIVE, "one word, two homes");
+  }
+
+  @Test
+  void noRemoteLogIsNoRemoteFieldsAndNoWarning() throws IOException {
+    // Remote control off: the launch passed no --debug-file, so there is nothing to read.
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    CommandLifecycleService lifecycle = remoteLifecycle(sent);
+    launchAs(lifecycle, "terminal", "claude");
+
+    List<String> warned = warnings(() -> lifecycle.markExited("terminal", 0));
+
+    assertEquals(1, sent.size(), sent.toString());
+    assertNull(sent.get(0).remoteSession());
+    assertNull(sent.get(0).remoteArchive());
+    assertTrue(warned.isEmpty(), warned.toString());
+    assertFalse(
+        AgentKillWatch.exitLine(
+                store.find("terminal").orElseThrow(), new AgentKillWatch.Owner("agent-1", null))
+            .contains("remote"));
+  }
+
+  @Test
+  void theLogIsCompactedToItsBridgeLinesOnceTheHarnessHasExited() throws IOException {
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    CommandLifecycleService lifecycle = remoteLifecycle(sent);
+    launchAs(lifecycle, "terminal", "claude");
+    Path log = remoteLog("200");
+    launchAs(lifecycle, "running", "claude"); // a change while it runs reads nothing yet
+    assertTrue(Files.readString(log).contains("Rendering 4096 lines"), "untouched while running");
+
+    lifecycle.markTerminated("terminal", 143);
+
+    List<String> left = Files.readAllLines(log);
+    assertEquals(3, left.size(), left.toString());
+    assertTrue(left.stream().allMatch(line -> line.contains("[remote-bridge]")
+        || line.contains("[code-session]")), left.toString());
+  }
+
+  @Test
+  void onlyAClaudeCommandAnAgentOfThisDaemonRanIsRead() throws IOException {
+    // A kimi harness has no remote control; the sign-in terminal is no agent's. Both would find the
+    // same log here, so reading nothing proves neither looked.
+    List<AgentHarnessExit> sent = new ArrayList<>();
+    CommandLifecycleService lifecycle = remoteLifecycle(sent);
+    launchAs(lifecycle, "kimi", "kimi");
+    launchAs(lifecycle, "sign-in", "claude");
+    Path log = remoteLog("401");
+    long before = Files.size(log);
+
+    lifecycle.markExited("kimi", 0);
+    lifecycle.markExited("sign-in", 0);
+
+    assertEquals(2, sent.size(), sent.toString());
+    assertTrue(sent.stream().allMatch(e -> e.remoteSession() == null && e.remoteArchive() == null));
+    assertEquals(before, Files.size(log), "not compacted");
+  }
+
+  @Test
+  void theLaunchSessionIsTheFirstOneAndOnlyAFileNameSafeId() {
+    CommandLifecycleService lifecycle = lifecycle(cgroup);
+    launchAs(lifecycle, "terminal", "claude");
+    // An in-TUI /resume later: the log keeps the name it was launched under.
+    lifecycle.recordAgentSessionReport("terminal", "switched-later", null);
+    assertEquals(SESSION, AgentKillWatch.launchSession(store.find("terminal").orElseThrow()));
+    launch(lifecycle, "kimi-unpinned", "kimi");
+    assertNull(AgentKillWatch.launchSession(store.find("kimi-unpinned").orElseThrow()));
+    lifecycle.createRunning(
+        "feature", "deadbeef", null, "agent", "claude", true, CommandKind.TERMINAL, "escape",
+        new AgentSessionRef("../../etc", AgentSessionSource.RESUMED, null, null, Instant.now()),
+        "claude");
+    assertNull(AgentKillWatch.launchSession(store.find("escape").orElseThrow()));
   }
 
   @Test
