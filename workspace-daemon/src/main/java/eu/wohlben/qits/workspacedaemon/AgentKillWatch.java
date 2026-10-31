@@ -1,10 +1,14 @@
 package eu.wohlben.qits.workspacedaemon;
 
+import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.RemoteControlLog;
+import eu.wohlben.qits.commands.AgentSessionRef;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.workspacedaemon.protocol.AgentHarnessExit;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonProtocol.AgentEvent;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -55,6 +59,16 @@ import org.jboss.logging.Logger;
  * AgentHarnessExit} per settled agent command, saying in one of four words what ended it. A kill
  * still also goes to the {@link Sink} as before — the two are independent, so the host's agent
  * state is driven exactly as it was.
+ *
+ * <p><b>A claude harness's remote-control session is read back at its exit</b> (qits-1779): with
+ * claude.ai Remote Control on, the launch writes a debug log ({@link RemoteControlLog}) that alone
+ * says whether the harness archived its claude.ai listing on the way out. For a claude command an
+ * agent of this daemon ran, the log is resolved under the harness's config dir by the command's
+ * launch session, its {@link RemoteControlLog.Outcome} rides the exit frame and the INFO line, an
+ * outcome that is not {@code archived()} is a WARN, and the log is then compacted to its bridge
+ * lines. Once per command, because {@link #settled} makes the exit path run once — the one read of
+ * a log that may still be its full size. No log (remote control off) is no fields and no line, and
+ * any failure costs only the fields: the frame and the line go out regardless.
  */
 final class AgentKillWatch {
 
@@ -94,6 +108,12 @@ final class AgentKillWatch {
   private final Owners owners;
   private final Exits exits;
 
+  /**
+   * The claude harness's config dir — its {@code CLAUDE_CONFIG_DIR}, {@code <claudeMount>/.claude}
+   * — where {@link RemoteControlLog#resolve} finds a remote-control log; null reads none.
+   */
+  private final Path claudeConfigDir;
+
   /** The {@code oom_kill} count when each running agent command was first seen; -1 unreadable. */
   private final Map<String, Long> baselines = new HashMap<>();
 
@@ -106,11 +126,22 @@ final class AgentKillWatch {
 
   AgentKillWatch(
       CommandStore store, CgroupMemory cgroup, Sink sink, Owners owners, Exits exits) {
+    this(store, cgroup, sink, owners, exits, null);
+  }
+
+  AgentKillWatch(
+      CommandStore store,
+      CgroupMemory cgroup,
+      Sink sink,
+      Owners owners,
+      Exits exits,
+      Path claudeConfigDir) {
     this.store = store;
     this.cgroup = cgroup;
     this.sink = sink;
     this.owners = owners;
     this.exits = exits;
+    this.claudeConfigDir = claudeConfigDir;
   }
 
   /**
@@ -143,8 +174,13 @@ final class AgentKillWatch {
       settled.add(command.id());
       Long baseline = baselines.remove(command.id());
       Owner owner = owners.of(command.id());
-      LOG.infof("workspace-daemon: %s", exitLine(command, owner));
-      exits.exited(exitFrame(command, owner, Instant.now()));
+      RemoteControlLog.Outcome remote = remoteOutcome(command, owner);
+      LOG.infof("workspace-daemon: %s", exitLine(command, owner, remote));
+      String unarchived = notArchivedLine(owner, remote);
+      if (unarchived != null) {
+        LOG.warnf("workspace-daemon: %s", unarchived);
+      }
+      exits.exited(exitFrame(command, owner, Instant.now(), remote));
       if (killed(command)) {
         report(command, baseline);
       }
@@ -162,10 +198,62 @@ final class AgentKillWatch {
   }
 
   /**
-   * The frame every agent exit sends home. The daemon's own stop is asked first: whatever code a
-   * remove or yield ended in — a SIGTERM's, or the SIGKILL after its grace — it was asked for.
+   * What a settled claude command's remote-control log says about its claude.ai session, read and
+   * then compacted (qits-1779); null when there is nothing to say — not claude, no agent of this
+   * daemon, no config dir, no launch session, no log — or reading it failed.
+   *
+   * <p>The session is the command's <em>launch</em> session, the first of its {@link
+   * Command#agentSessions()}, not the agent's current one: the log is named once, at launch, by the
+   * id the harness started as (the resumed one, or the freshly pinned or forked one), and an
+   * in-TUI {@code /resume} that switched the agent's session later does not rename it.
    */
+  private RemoteControlLog.Outcome remoteOutcome(Command command, Owner owner) {
+    try {
+      if (claudeConfigDir == null
+          || owner == null
+          || owner.agentId() == null
+          || AgentType.parse(command.agentType()).orElse(null) != AgentType.CLAUDE) {
+        return null;
+      }
+      String session = launchSession(command);
+      if (session == null) {
+        return null;
+      }
+      Path log = RemoteControlLog.resolve(claudeConfigDir, session);
+      RemoteControlLog.Outcome outcome = RemoteControlLog.read(log).orElse(null);
+      if (outcome != null) {
+        RemoteControlLog.compact(log);
+      }
+      return outcome;
+    } catch (RuntimeException e) {
+      LOG.debugf(e, "workspace-daemon could not read %s's remote-control log", command.id());
+      return null;
+    }
+  }
+
+  /**
+   * The id a claude command was launched as, when it is safe as a file name; else null. Checked as
+   * {@code AgentRuntime#sessionFilesExist} checks a session id, so no id resolves outside the
+   * config dir.
+   */
+  static String launchSession(Command command) {
+    List<AgentSessionRef> sessions = command.agentSessions();
+    String id = sessions == null || sessions.isEmpty() ? null : sessions.getFirst().sessionId();
+    return id != null && id.matches("[A-Za-z0-9._-]+") && !id.matches("\\.+") ? id : null;
+  }
+
+  /** {@link #exitFrame(Command, Owner, Instant, RemoteControlLog.Outcome)} with no remote outcome. */
   static AgentHarnessExit exitFrame(Command command, Owner owner, Instant at) {
+    return exitFrame(command, owner, at, null);
+  }
+
+  /**
+   * The frame every agent exit sends home. The daemon's own stop is asked first: whatever code a
+   * remove or yield ended in — a SIGTERM's, or the SIGKILL after its grace — it was asked for. A
+   * remote-control outcome, when there is one, fills the frame's two remote fields (qits-1779).
+   */
+  static AgentHarnessExit exitFrame(
+      Command command, Owner owner, Instant at, RemoteControlLog.Outcome remote) {
     String by = owner == null ? null : owner.stoppedBy();
     String stoppedBy =
         "remove".equals(by)
@@ -180,11 +268,40 @@ final class AgentKillWatch {
         command.status() == null ? null : command.status().name(),
         command.exitCode(),
         stoppedBy,
-        at);
+        at,
+        remote == null ? null : remote.session(),
+        remote == null ? null : remote.archive());
   }
 
-  /** The one INFO line every agent exit gets; a seam so a test can read it. */
+  /**
+   * The WARN a remote-control session left listed on claude.ai gets — an archive that answered
+   * anything but 200, or none at all — or null when there is no outcome or it archived; a seam so a
+   * test can read it (qits-1779).
+   */
+  static String notArchivedLine(Owner owner, RemoteControlLog.Outcome remote) {
+    if (remote == null || remote.archived()) {
+      return null;
+    }
+    String agent = owner == null || owner.agentId() == null ? "(none)" : owner.agentId();
+    return "agent "
+        + agent
+        + "'s claude.ai remote session "
+        + remote.session()
+        + " was not archived (archive="
+        + remote.archive()
+        + ")";
+  }
+
+  /** {@link #exitLine(Command, Owner, RemoteControlLog.Outcome)} with no remote outcome. */
   static String exitLine(Command command, Owner owner) {
+    return exitLine(command, owner, null);
+  }
+
+  /**
+   * The one INFO line every agent exit gets; a seam so a test can read it. A remote-control outcome
+   * is appended when there is one (qits-1779).
+   */
+  static String exitLine(Command command, Owner owner, RemoteControlLog.Outcome remote) {
     String agent = owner == null || owner.agentId() == null ? "(none)" : owner.agentId();
     String stopped =
         owner == null || owner.stoppedBy() == null
@@ -202,7 +319,10 @@ final class AgentKillWatch {
         + command.status()
         + ", exit code "
         + command.exitCode()
-        + stopped;
+        + stopped
+        + (remote == null
+            ? ""
+            : ", claude.ai remote session " + remote.session() + " archive=" + remote.archive());
   }
 
   private void report(Command command, Long baseline) {
