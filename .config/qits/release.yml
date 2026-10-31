@@ -24,13 +24,56 @@ contracts:
 release-request:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
+    qits-cli: true
     script: |
       # THE ADDRESSES ARE CODE (qits-731): hosted Maven on registry.qits.<domain>, Central through
       # mirror.qits.<domain>. `wohlben.eu` covers a qits-ci too old to inject $QITS_DOMAIN.
       qits_domain=${QITS_DOMAIN:-wohlben.eu}
       export QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$qits_domain/mirror/maven/central"
       export QITS_MAVEN_REPOSITORY_URL="https://registry.qits.$qits_domain/artifacts/maven/maven"
-      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+      # EVERY DEPLOYED CONSUMER'S PACT, NOT ONLY THE POM'S (qits-1765). Mirrors the packaged
+      # `java-service` release archetype's release-request verify step
+      # (ci/src/main/resources/release-archetypes/java-service.yml in qits-ci-service) — see that
+      # recipe for the full rationale. A provider also asks qits-maintenance which consumer
+      # versions are deployed and verifies each of those pacts, not only the pinned one.
+      repo=${QITS_CI_REPO_NAME:?this step was told no QITS_CI_REPO_NAME}
+      deployed_pacts_dir=""
+      declared_consumers=""
+      poms=$(find . -name pom.xml -not -path '*/target/*' -not -path '*/node_modules/*')
+      for pom in $poms; do
+        found=$(sed -n "s|.*<artifactId>\([A-Za-z0-9._-]*\)-pacts-$repo</artifactId>.*|\1|p" "$pom") || {
+          echo "deployed pacts: could not read $pom to tell whether $repo is a pact provider" >&2
+          exit 1
+        }
+        declared_consumers="$declared_consumers $found"
+      done
+      declared_consumers=" $(printf '%s' "$declared_consumers" | tr '\n' ' ') "
+      case "$declared_consumers" in
+        *[!\ ]*) deployed_pacts_dir="$PWD/target/deployed-pacts" ;;
+      esac
+      if [ -n "$deployed_pacts_dir" ]; then
+        rm -rf "$deployed_pacts_dir"
+        mkdir -p "$deployed_pacts_dir"
+        echo "deployed pacts: $repo is a pact provider; fetching every deployed consumer's pact"
+        qits artifacts fetch deployed-pacts --provider "$repo" --out "$deployed_pacts_dir" || {
+          echo "deployed pacts: could not fetch the deployed consumers' pacts for $repo, so this" \
+            "gate cannot verify them" >&2
+          exit 1
+        }
+        for consumer_dir in "$deployed_pacts_dir"/*/; do
+          [ -d "$consumer_dir" ] || continue
+          consumer=$(basename "$consumer_dir")
+          case "$declared_consumers" in
+            *" $consumer "*) ;;
+            *)
+              rm -rf "$consumer_dir"
+              echo "deployed pacts: $consumer is not a consumer this repository pins; not verified" ;;
+          esac
+        done
+      fi
+
+      env ${deployed_pacts_dir:+"QITS_DEPLOYED_PACTS_DIR=$deployed_pacts_dir"} \
+        ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
         -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL"
 
   - image: qits/build-images/ci-base:latest
