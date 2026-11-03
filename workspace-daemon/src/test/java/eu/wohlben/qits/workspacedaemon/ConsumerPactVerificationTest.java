@@ -31,7 +31,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * {@code pacts/<consumer>_qits-workspace-daemon.json} in a jar, and this repository pins that jar
  * as a test dependency. <b>Three consumers are pinned</b>: the landing app ({@code
  * qits-landing-app-pacts-qits-workspace-daemon}, ticket qits-1230), and qits-platform-access-cli
- * and qits-workspaces-service's proxy ({@code qits-platform-access-cli-pacts-qits-workspace-daemon},
+ * and qits-workspaces-service's proxy ({@code qits-platform-access-monorepo-pacts-qits-workspace-daemon},
  * {@code qits-workspaces-service-pacts-qits-workspace-daemon}, ticket qits-1149), so {@link
  * ClasspathPactLoader#REQUIRED} is true and an empty classpath fails the build instead of passing
  * silently.

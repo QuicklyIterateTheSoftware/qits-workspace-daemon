@@ -116,7 +116,7 @@
             <!-- qits-platform-access-cli's and qits-workspaces-service's pacts against this daemon
                  (ticket qits-1149), verified the same way. -->
             <groupId>eu.wohlben.qits</groupId>
-            <artifactId>qits-platform-access-cli-pacts-qits-workspace-daemon</artifactId>
+            <artifactId>qits-platform-access-monorepo-pacts-qits-workspace-daemon</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
