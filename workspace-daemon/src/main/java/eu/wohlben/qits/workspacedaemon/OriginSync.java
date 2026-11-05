@@ -2,12 +2,17 @@ package eu.wohlben.qits.workspacedaemon;
 
 import eu.wohlben.qits.workspacedaemon.protocol.AgentBranchPushed;
 import eu.wohlben.qits.workspacedaemon.protocol.DaemonMessage;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -31,6 +36,15 @@ import org.jboss.logging.Logger;
  *       each with <em>that agent's</em> credential. Each push is reported as an {@link
  *       AgentBranchPushed}. The default branch is never pushed, and a commit on a detached HEAD is
  *       not pushed at all; the cleanup check reports it.
+ *   <li><b>Agent-local repositories (qits-1886).</b> A repository that becomes a submodule during
+ *       the session — {@code git submodule add} or {@code git submodule update --init} in an
+ *       agent's wrapper worktree — is in neither the base clone's HEAD nor its worktree lists: git
+ *       makes it a standalone clone under the wrapper worktree's git dir ({@code
+ *       <base>/.git/worktrees/<wt>/modules/<name>}). Each agent's wrapper {@code .gitmodules} is
+ *       therefore read every cycle, and a declared path the base clone does not have that holds a
+ *       checkout is fetched and its branch pushed like any other, as that agent only. Only
+ *       submodules of the wrapper and, below them, of an accepted agent-local repository are
+ *       walked; one an agent adds inside a base-clone submodule is not.
  * </ul>
  *
  * <p>Both run on one thread, so a fetch and a push never race for the same ref lock. A rejected
@@ -40,8 +54,9 @@ import org.jboss.logging.Logger;
  *
  * <p>The push side polls rather than watches: one {@code git worktree list} per repository finds
  * every agent's branch and head at once, so the cost of a cycle does not grow with the number of
- * agents. A harness hook nudges a cycle at once, so a commit made in a turn is pushed when the turn
- * ends rather than at the next poll.
+ * agents; only the agent-local walk is per agent, one {@code .gitmodules} read each. A harness hook
+ * nudges a cycle at once, so a commit made in a turn is pushed when the turn ends rather than at
+ * the next poll.
  */
 final class OriginSync {
 
@@ -69,6 +84,14 @@ final class OriginSync {
 
   /** One worktree of a repository, as {@code git worktree list --porcelain} reports it. */
   record Worktree(Path path, String head, String branch) {}
+
+  /**
+   * One repository a push or a fetch runs in: a base-clone repository, or an agent-local one
+   * (qits-1886). {@code path} is its path in the wrapper, the key {@link #handled} and the log use;
+   * {@code originUrl} the origin {@link GitConfigGuard} holds its config to; {@code where} names it
+   * in a log line.
+   */
+  private record Target(Path dir, String path, String name, String originUrl, String where) {}
 
   private final AgentWorktrees worktrees;
   private final Function<String, Optional<Map<String, String>>> agentEnvironment;
@@ -193,20 +216,26 @@ final class OriginSync {
    * test drives it off the scheduler. Answers how many repositories failed to fetch.
    */
   int fetchAll() {
-    int failures = 0;
+    List<Target> targets = new ArrayList<>();
     for (AgentWorktrees.Repo repo : worktrees.repositories()) {
-      Path dir = worktrees.dirOf(repo);
-      List<String> tampered = GitConfigGuard.violations(dir, repo.originUrl());
+      targets.add(target(repo));
+    }
+    for (String agentId : worktrees.agentIds()) {
+      targets.addAll(agentLocal(agentId));
+    }
+    int failures = 0;
+    for (Target target : targets) {
+      List<String> tampered = GitConfigGuard.violations(target.dir(), target.originUrl());
       if (!tampered.isEmpty()) {
         failures++;
         warnOnce(
-            "fetch:" + repo.path(),
-            "Not fetching " + where(repo) + ": its config carries " + tampered);
+            "fetch:" + target.where(),
+            "Not fetching " + target.where() + ": its config carries " + tampered);
         continue;
       }
       GitExec.Out fetched =
           GitExec.network(
-              dir,
+              target.dir(),
               GitExec.workspaceCredential(),
               "fetch",
               "--prune",
@@ -216,9 +245,7 @@ final class OriginSync {
               AgentWorktrees.ORIGIN_TAGS_REFSPEC);
       if (!fetched.ok()) {
         failures++;
-        LOG.debugf(
-            "fetch failed in %s: %s",
-            repo.path().isEmpty() ? "the wrapper" : repo.path(), fetched.message());
+        LOG.debugf("fetch failed in %s: %s", target.where(), fetched.message());
       }
     }
     return failures;
@@ -234,7 +261,8 @@ final class OriginSync {
       return pushed;
     }
     Path agentsRoot = worktrees.agentsRoot().toAbsolutePath().normalize();
-    for (AgentWorktrees.Repo repo : worktrees.repositories()) {
+    List<AgentWorktrees.Repo> repos = worktrees.repositories();
+    for (AgentWorktrees.Repo repo : repos) {
       Path repository = worktrees.dirOf(repo);
       for (Worktree worktree : list(repository)) {
         Path path = worktree.path().toAbsolutePath().normalize();
@@ -253,27 +281,45 @@ final class OriginSync {
             || !path.equals(expectedWorktree(agentId, repo))) {
           continue;
         }
-        AgentBranchPushed done = pushIfNew(repository, repo, agentId, worktree);
-        if (done != null) {
-          pushed.add(done);
-          emit.accept(done);
+        report(pushIfNew(target(repo), agentId, worktree.branch(), worktree.head()), pushed);
+      }
+    }
+    String wrapperDefault = repos.get(0).defaultBranch();
+    for (String agentId : worktrees.agentIds()) {
+      for (Target local : agentLocal(agentId)) {
+        // Read in the checkout itself: it is no worktree of anything in the base clone.
+        GitExec.Out branch = GitExec.git(local.dir(), "symbolic-ref", "--quiet", "--short", "HEAD");
+        GitExec.Out head = GitExec.git(local.dir(), "rev-parse", "--verify", "--quiet", "HEAD");
+        if (!branch.ok()
+            || !head.ok()
+            || branch.line().isEmpty()
+            || branch.line().equals(wrapperDefault)
+            || branch.line().equals(AgentWorktrees.defaultBranch(local.dir()))) {
+          continue;
         }
+        report(pushIfNew(local, agentId, branch.line(), head.line()), pushed);
       }
     }
     return pushed;
   }
 
-  private AgentBranchPushed pushIfNew(
-      Path repository, AgentWorktrees.Repo repo, String agentId, Worktree worktree) {
-    String key = agentId + '\u0000' + repo.path() + '\u0000' + worktree.branch();
-    if (worktree.head().equals(handled.get(key))) {
+  private void report(AgentBranchPushed done, List<AgentBranchPushed> pushed) {
+    if (done != null) {
+      pushed.add(done);
+      emit.accept(done);
+    }
+  }
+
+  private AgentBranchPushed pushIfNew(Target target, String agentId, String branch, String head) {
+    String key = agentId + '\u0000' + target.path() + '\u0000' + branch;
+    if (head.equals(handled.get(key))) {
       return null;
     }
     // A commit a release tag holds is delivered, even after the release deleted its branch: pushing
     // it again would bring the released branch back (qits-1688).
-    GitExec.Out ahead = GitExec.git(repository, AgentWorktrees.notOnOrigin(worktree.head()));
+    GitExec.Out ahead = GitExec.git(target.dir(), AgentWorktrees.notOnOrigin(head));
     if (ahead.ok() && "0".equals(ahead.line())) {
-      handled.put(key, worktree.head());
+      handled.put(key, head);
       return null;
     }
     String token =
@@ -281,24 +327,157 @@ final class OriginSync {
     if (token == null || token.isBlank()) {
       // Not handled: the branch is pushed once the host starts the agent again with its credential.
       // Never with the workspace's, and never with another agent's.
-      LOG.debugf(
-          "not pushing %s for agent %s: its credential is not known", worktree.branch(), agentId);
+      LOG.debugf("not pushing %s for agent %s: its credential is not known", branch, agentId);
       return null;
     }
-    List<String> tampered = GitConfigGuard.violations(repository, repo.originUrl());
+    List<String> tampered = GitConfigGuard.violations(target.dir(), target.originUrl());
     if (!tampered.isEmpty()) {
       warnOnce(
-          "push:" + repo.path(),
-          "Not pushing in " + where(repo) + ": its config carries " + tampered);
+          "push:" + target.where(),
+          "Not pushing in " + target.where() + ": its config carries " + tampered);
       return null;
     }
-    PushOutcome outcome = push(repository, Map.of(AGENT_CREDENTIAL, token), worktree.branch());
+    PushOutcome outcome = push(target.dir(), Map.of(AGENT_CREDENTIAL, token), branch);
     if (outcome != PushOutcome.RETRY_LATER) {
-      handled.put(key, worktree.head());
+      handled.put(key, head);
     }
     return outcome == PushOutcome.PUSHED
-        ? new AgentBranchPushed(agentId, repo.name(), worktree.branch(), worktree.head())
+        ? new AgentBranchPushed(agentId, target.name(), branch, head)
         : null;
+  }
+
+  private Target target(AgentWorktrees.Repo repo) {
+    return new Target(
+        worktrees.dirOf(repo), repo.path(), repo.name(), repo.originUrl(), where(repo));
+  }
+
+  /**
+   * The agent's agent-local repositories (qits-1886): every submodule its wrapper worktree's {@code
+   * .gitmodules} declares that the base clone does not have and that holds a checkout, then the
+   * same one level down inside each one accepted, a parent before its children. Read from {@code
+   * .gitmodules} rather than {@code submodule status --recursive}, which would walk every base
+   * submodule of every agent each cycle to find the rare one that is new.
+   *
+   * <p>Agents share the OS user, so each checkout is held to what {@link #expectedWorktree} and
+   * {@link AgentWorktrees#contained} give a base repository: its path, real-path resolved, is
+   * exactly its place in this agent's wrapper worktree (no link out), and its git dir lies under
+   * this agent's wrapper worktree git dir's {@code modules/} — where git put it, and where no other
+   * agent's submodule command would. A clone planted at a declared path, or a {@code .git} file
+   * pointing into another agent's modules, is not this agent's and is skipped. The origin it is
+   * held to ({@link GitConfigGuard}) is its {@code .gitmodules} url resolved against the parent's
+   * — the wrapper's recorded origin, or the parent agent-local repository's expected one — never
+   * its own {@code remote.origin.url}.
+   */
+  private List<Target> agentLocal(String agentId) {
+    List<Target> found = new ArrayList<>();
+    if (!AgentWorktrees.validAgentId(agentId) || !worktrees.exists(agentId)) {
+      return found;
+    }
+    List<AgentWorktrees.Repo> repos = worktrees.repositories();
+    String wrapperUrl = repos.get(0).originUrl();
+    Path wrapper;
+    Path modules;
+    try {
+      wrapper = worktrees.wrapperDir(agentId).toRealPath();
+      Path gitDir = realGitDir(wrapper);
+      if (wrapperUrl == null
+          || gitDir == null
+          || !gitDir.getParent().equals(worktrees.base().resolve(".git/worktrees").toRealPath())) {
+        return found;
+      }
+      modules = gitDir.resolve("modules");
+    } catch (IOException e) {
+      return found;
+    }
+    Set<String> basePaths = new HashSet<>();
+    repos.forEach(repo -> basePaths.add(repo.path()));
+    walk(agentId, wrapper, modules, basePaths, "", wrapperUrl, 0, found);
+    return found;
+  }
+
+  private void walk(
+      String agentId,
+      Path wrapper,
+      Path modules,
+      Set<String> basePaths,
+      String parent,
+      String parentUrl,
+      int depth,
+      List<Target> found) {
+    if (depth >= Provisioner.MAX_SUBMODULE_DEPTH) {
+      return;
+    }
+    Path parentDir = parent.isEmpty() ? wrapper : wrapper.resolve(parent);
+    String gitmodules = parentDir.resolve(".gitmodules").toString();
+    GitExec.Out listed =
+        GitExec.git(
+            wrapper, "config", "--file", gitmodules, "--get-regexp", "^submodule\\..*\\.path$");
+    if (!listed.ok()) {
+      return;
+    }
+    List<Target> accepted = new ArrayList<>();
+    for (Provisioner.Submodule sub : Provisioner.parseSubmodules(listed.stdout())) {
+      // The path and the url come from a file the agent writes: confined, and resolved here.
+      if (!AgentWorktrees.confined(sub.path())) {
+        continue;
+      }
+      String path = parent.isEmpty() ? sub.path() : parent + "/" + sub.path();
+      Path dir = wrapper.resolve(path);
+      if (basePaths.contains(path)
+          || !Files.exists(dir.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
+        continue;
+      }
+      String where = path + " (agent " + agentId + ")";
+      GitExec.Out url =
+          GitExec.git(wrapper, "config", "--file", gitmodules, "submodule." + sub.name() + ".url");
+      String expected = url.ok() ? Provisioner.resolveSubmoduleUrl(url.line(), parentUrl) : null;
+      if (expected == null) {
+        warnOnce(
+            "local:" + where, "Not syncing " + where + ": its .gitmodules url is unresolvable");
+        continue;
+      }
+      if (!ownCheckout(dir, wrapper.resolve(path), modules)) {
+        warnOnce(
+            "local:" + where,
+            "Not syncing " + where + ": its checkout is not where this agent's git put it");
+        continue;
+      }
+      accepted.add(new Target(dir, path, Provisioner.basename(expected), expected, where));
+    }
+    for (Target target : accepted) {
+      found.add(target);
+      walk(
+          agentId,
+          wrapper,
+          modules,
+          basePaths,
+          target.path(),
+          target.originUrl(),
+          depth + 1,
+          found);
+    }
+  }
+
+  /**
+   * Whether {@code dir} is a checkout this agent's git made: its real path is {@code expected}, and
+   * its real git dir lies under {@code modules}.
+   */
+  private static boolean ownCheckout(Path dir, Path expected, Path modules) {
+    try {
+      if (!dir.toRealPath().equals(expected)) {
+        return false;
+      }
+      Path gitDir = realGitDir(dir);
+      return gitDir != null && gitDir.startsWith(modules) && !gitDir.equals(modules);
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  /** {@code rev-parse --absolute-git-dir} in {@code dir}, real-path resolved; null if git fails. */
+  private static Path realGitDir(Path dir) throws IOException {
+    GitExec.Out gitDir = GitExec.git(dir, "rev-parse", "--absolute-git-dir");
+    return gitDir.ok() && !gitDir.line().isEmpty() ? Path.of(gitDir.line()).toRealPath() : null;
   }
 
   /** Push one branch with retry. Package-private so a test can drive the classification. */

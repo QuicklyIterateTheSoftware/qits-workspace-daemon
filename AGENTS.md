@@ -260,7 +260,11 @@ from it (`AgentWorktrees`): the wrapper at `/workspace/agents/<agentId>/<repoNam
 wrapper branch, and each submodule a detached worktree at its own `origin/main`. Objects are shared;
 nothing is cloned twice. `OriginSync` fetches every head into the base clone (timer, plus a
 `PullBranch` hint) and pushes every agent branch that has commits no remote has, with that agent's
-credential, reporting each push as `AgentBranchPushed`. Every agent harness command that settles is
+credential, reporting each push as `AgentBranchPushed`. A repository an agent makes a submodule
+mid-session (`submodule add` / `update --init` in its wrapper worktree) is no worktree of the base
+clone — git clones it under the wrapper worktree's git dir — so `OriginSync` also reads each
+agent's wrapper `.gitmodules` and syncs those checkouts, held to that agent's `modules/` dir and to
+the `.gitmodules` url resolved against the wrapper's origin (qits-1886). Every agent harness command that settles is
 logged and sent home as one `AgentHarnessExit` (`AgentKillWatch`), its `stoppedBy` one of
 `DAEMON_REMOVE`, `DAEMON_YIELD`, `KILLED` (exit 137 the daemon did not ask for) or `SELF`; a kill
 still also sends its `AgentActivity` `ENDED`, unchanged. `CommitGuard` installs a `pre-commit` hook

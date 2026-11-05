@@ -81,7 +81,7 @@ public final class Provisioner {
    * The cycle backstop for the bounded submodule walk (mirrors the host's {@code
    * MAX_SUBMODULE_DEPTH}).
    */
-  private static final int MAX_SUBMODULE_DEPTH = 10;
+  static final int MAX_SUBMODULE_DEPTH = 10;
 
   private static final int BUFFER_SIZE = 4096;
 
@@ -270,6 +270,43 @@ public final class Provisioner {
   }
 
   /**
+   * A submodule url as git resolves it against the url of the repository whose {@code .gitmodules}
+   * names it (qits-1886): an absolute url as is; a relative one ({@code ./}, {@code ../}) by git's
+   * own rule (see the class comment), where the parent url is a directory and each {@code ../}
+   * drops one whole segment. Answers null when it cannot be resolved: no parent url, or more
+   * {@code ../} than the parent has path segments — an scp-style parent ({@code host:path}) is
+   * refused there too rather than guessed at, since no git host of the daemon's is addressed so.
+   */
+  static String resolveSubmoduleUrl(String url, String parentUrl) {
+    if (url == null || url.isBlank()) {
+      return null;
+    }
+    String rel = url.trim();
+    if (!rel.startsWith("./") && !rel.startsWith("../")) {
+      return rel;
+    }
+    if (parentUrl == null || parentUrl.isBlank()) {
+      return null;
+    }
+    String remote = trimTrailingSlash(parentUrl.trim());
+    while (true) {
+      if (rel.startsWith("./")) {
+        rel = rel.substring(2);
+      } else if (rel.startsWith("../")) {
+        int slash = remote.lastIndexOf('/');
+        if (slash <= 0 || remote.substring(0, slash).endsWith("/")) {
+          return null;
+        }
+        remote = remote.substring(0, slash);
+        rel = rel.substring(3);
+      } else {
+        break;
+      }
+    }
+    return rel.isEmpty() || remote.endsWith(":") ? null : remote + "/" + rel;
+  }
+
+  /**
    * Whether the project-scoped route ({@code /git/<projectId>/<repoName>}) exists for this
    * workspace — the ONE predicate for both the clone url and the preserved-checkout retarget.
    * <b>Both</b> env vars must be present: a repository name alone addressed a repository only while
@@ -416,7 +453,7 @@ public final class Provisioner {
     }
   }
 
-  private record Submodule(String name, String path) {}
+  record Submodule(String name, String path) {}
 
   /** Parse {@code git config --get-regexp} output lines ({@code submodule.<name>.path <path>}). */
   static List<Submodule> parseSubmodules(String getRegexpOutput) {

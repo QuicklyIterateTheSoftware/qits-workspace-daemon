@@ -93,6 +93,23 @@ final class GitFixtures {
     return line(seed, "rev-parse", "HEAD");
   }
 
+  /**
+   * A third bare origin, {@code <name>.git} beside the wrapper's, with one commit on {@code main}:
+   * a repository that is no submodule of the base clone, so {@code ../<name>.git} from the wrapper
+   * names it (qits-1886).
+   */
+  static Path sibling(Path tmp, String name) throws IOException, InterruptedException {
+    Path origin = bare(tmp.resolve(name + ".git"));
+    Path seed = tmp.resolve("seed-" + name);
+    git(tmp, "clone", "--quiet", origin.toString(), seed.toString());
+    identity(seed);
+    Files.writeString(seed.resolve(name + ".txt"), name + "\n");
+    git(seed, "add", name + ".txt");
+    git(seed, "commit", "--quiet", "-m", name);
+    git(seed, "push", "--quiet", "origin", "HEAD:main");
+    return origin;
+  }
+
   private static Path bare(Path dir) throws IOException, InterruptedException {
     Files.createDirectories(dir);
     git(dir, "init", "--quiet", "--bare", "--initial-branch=main");

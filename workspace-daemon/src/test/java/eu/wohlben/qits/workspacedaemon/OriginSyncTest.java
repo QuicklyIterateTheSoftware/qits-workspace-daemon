@@ -288,4 +288,206 @@ class OriginSyncTest {
     assertTrue(sync.pushCycle().isEmpty());
     assertEquals("", git(estate.childOrigin(), "branch", "--list", BRANCH + "-smuggled"));
   }
+
+  // --- agent-local repositories (qits-1886) ----------------------------------------------------
+
+  private static final String NEWLIB = "libs/newlib";
+
+  /** The agent adds {@code ../newlib.git} as a submodule in its own wrapper worktree. */
+  private Path addedByTheAgent(String agentId) throws Exception {
+    Path wrapper = worktrees.ensure(agentId, agentId.equals("agent-1") ? BRANCH : BRANCH + "-2");
+    git(
+        wrapper,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        "../newlib.git",
+        NEWLIB);
+    Path newlib = wrapper.resolve(NEWLIB);
+    GitFixtures.identity(newlib);
+    return newlib;
+  }
+
+  private static String commitOnBranch(Path repository, String branch) throws Exception {
+    git(repository, "switch", "--quiet", "-c", branch);
+    git(repository, "commit", "--quiet", "--allow-empty", "-m", "work");
+    return line(repository, "rev-parse", "HEAD");
+  }
+
+  @Test
+  void aRepositoryTheAgentAddsAsASubmoduleIsPushedUnderItsOwnName() throws Exception {
+    Path newlibOrigin = GitFixtures.sibling(tmp, "newlib");
+    Path newlib = addedByTheAgent("agent-1");
+    String head = commitOnBranch(newlib, BRANCH);
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    AgentBranchPushed expected = new AgentBranchPushed("agent-1", "newlib", BRANCH, head);
+    assertEquals(List.of(expected), pushed);
+    assertEquals(List.of(expected), sent, "and the push goes home as a frame");
+    assertEquals(head, line(newlibOrigin, "rev-parse", BRANCH));
+    assertEquals(0, sync.fetchAll(), "and it is fetched like the base clone's repositories");
+  }
+
+  @Test
+  void aSubmoduleInitialisedFromTheAgentsWrapperBranchIsPushed() throws Exception {
+    Path newlibOrigin = GitFixtures.sibling(tmp, "newlib");
+    // Somebody else lands the gitlink on the agent's wrapper branch; the agent merges it and
+    // initialises the submodule in its own worktree.
+    Path elsewhere = tmp.resolve("elsewhere");
+    git(tmp, "clone", "--quiet", estate.wrapperOrigin().toString(), elsewhere.toString());
+    GitFixtures.identity(elsewhere);
+    git(
+        elsewhere,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        "--name",
+        "newlib",
+        "../newlib.git",
+        NEWLIB);
+    git(elsewhere, "commit", "--quiet", "-m", "add newlib");
+    git(elsewhere, "push", "--quiet", "origin", "HEAD:refs/heads/" + BRANCH);
+    Path wrapper = worktrees.ensure("agent-1", BRANCH);
+    git(wrapper, "pull", "--quiet", "--ff-only", "origin", BRANCH);
+    git(
+        wrapper,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+        "--quiet",
+        "--",
+        NEWLIB);
+    Path newlib = wrapper.resolve(NEWLIB);
+    GitFixtures.identity(newlib);
+    String head = commitOnBranch(newlib, BRANCH + "-lib");
+
+    List<AgentBranchPushed> pushed =
+        sync.pushCycle().stream().filter(p -> p.repository().equals("newlib")).toList();
+
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-1", "newlib", BRANCH + "-lib", head)), pushed);
+    assertEquals(head, line(newlibOrigin, "rev-parse", BRANCH + "-lib"));
+  }
+
+  @Test
+  void aSubmoduleOfAnAgentLocalRepositoryResolvesAgainstItsParentAndIsPushed() throws Exception {
+    GitFixtures.sibling(tmp, "newlib");
+    Path innerOrigin = GitFixtures.sibling(tmp, "inner");
+    Path newlib = addedByTheAgent("agent-1");
+    git(
+        newlib,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        "../inner.git",
+        "inner");
+    Path inner = newlib.resolve("inner");
+    GitFixtures.identity(inner);
+    String head = commitOnBranch(inner, BRANCH);
+
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-1", "inner", BRANCH, head)), sync.pushCycle());
+    assertEquals(head, line(innerOrigin, "rev-parse", BRANCH));
+  }
+
+  @Test
+  void theDefaultBranchAndADetachedHeadOfAnAgentLocalRepositoryAreNotPushed() throws Exception {
+    Path newlibOrigin = GitFixtures.sibling(tmp, "newlib");
+    Path newlib = addedByTheAgent("agent-1");
+    String before = line(newlibOrigin, "rev-parse", "main");
+    git(newlib, "commit", "--quiet", "--allow-empty", "-m", "on main");
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals(before, line(newlibOrigin, "rev-parse", "main"));
+
+    git(newlib, "checkout", "--quiet", "--detach");
+    git(newlib, "commit", "--quiet", "--allow-empty", "-m", "nowhere to go");
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals(before, line(newlibOrigin, "rev-parse", "main"));
+  }
+
+  @Test
+  void aCloneOfItsOwnPlantedAtADeclaredPathIsNotPushed() throws Exception {
+    Path newlibOrigin = GitFixtures.sibling(tmp, "newlib");
+    Path wrapper = worktrees.ensure("agent-1", BRANCH);
+    // A plain clone at a path .gitmodules declares: its git dir is its own, not one git made under
+    // this agent's worktree git dir.
+    Path planted = wrapper.resolve(NEWLIB);
+    git(tmp, "clone", "--quiet", newlibOrigin.toString(), planted.toString());
+    GitFixtures.identity(planted);
+    Path gitmodules = wrapper.resolve(".gitmodules");
+    git(wrapper, "config", "-f", gitmodules.toString(), "submodule.newlib.path", NEWLIB);
+    git(wrapper, "config", "-f", gitmodules.toString(), "submodule.newlib.url", "../newlib.git");
+    commitOnBranch(planted, BRANCH);
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(newlibOrigin, "branch", "--list", BRANCH));
+  }
+
+  @Test
+  void aCheckoutPointingIntoAnotherAgentsModulesIsNotPushedAsThisAgent() throws Exception {
+    Path newlibOrigin = GitFixtures.sibling(tmp, "newlib");
+    Path theirs = addedByTheAgent("agent-2");
+    String head = commitOnBranch(theirs, BRANCH + "-2");
+    String theirGitDir = line(theirs, "rev-parse", "--absolute-git-dir");
+    // Agent 1's wrapper declares the same path, and a .git file there points at agent 2's clone.
+    Path wrapper = worktrees.ensure("agent-1", BRANCH);
+    Path gitmodules = wrapper.resolve(".gitmodules");
+    git(wrapper, "config", "-f", gitmodules.toString(), "submodule.newlib.path", NEWLIB);
+    git(wrapper, "config", "-f", gitmodules.toString(), "submodule.newlib.url", "../newlib.git");
+    Files.createDirectories(wrapper.resolve(NEWLIB));
+    Files.writeString(wrapper.resolve(NEWLIB).resolve(".git"), "gitdir: " + theirGitDir + "\n");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-2", "newlib", BRANCH + "-2", head)),
+        pushed,
+        "pushed once, as the agent whose git made it");
+    assertEquals(head, line(newlibOrigin, "rev-parse", BRANCH + "-2"));
+  }
+
+  @Test
+  void aRedirectedOriginOnAnAgentLocalRepositoryStopsThePushAndTheFetch() throws Exception {
+    GitFixtures.sibling(tmp, "newlib");
+    Path newlib = addedByTheAgent("agent-1");
+    commitOnBranch(newlib, BRANCH);
+    String origin = line(newlib, "config", "--get", "remote.origin.url");
+    Path elsewhere = tmp.resolve("elsewhere.git");
+    git(tmp, "init", "--quiet", "--bare", elsewhere.toString());
+    git(newlib, "config", "remote.origin.url", elsewhere.toString());
+
+    assertTrue(sync.pushCycle().isEmpty(), "its own origin is never its own expectation");
+    assertEquals("", git(elsewhere, "branch", "--list"));
+    assertEquals(1, sync.fetchAll(), "nor fetched from there with the workspace's credential");
+
+    git(newlib, "config", "remote.origin.url", origin);
+    assertEquals(1, sync.pushCycle().size(), "a clean config pushes again");
+  }
+
+  @Test
+  void anAgentLocalHeadWaitsForTheCredentialAndIsNotPushedTwice() throws Exception {
+    GitFixtures.sibling(tmp, "newlib");
+    Path newlib = addedByTheAgent("agent-1");
+    commitOnBranch(newlib, BRANCH);
+    credential.set(Optional.empty());
+
+    assertTrue(sync.pushCycle().isEmpty(), "never pushed as the workspace");
+
+    credential.set(Optional.of(Map.of("QITS_TOKEN", "agent-token")));
+    assertEquals(1, sync.pushCycle().size());
+    assertTrue(sync.pushCycle().isEmpty(), "an unmoved head is not pushed twice");
+
+    git(newlib, "commit", "--quiet", "--allow-empty", "-m", "more work");
+    assertEquals(1, sync.pushCycle().size(), "a new commit is pushed again");
+  }
 }

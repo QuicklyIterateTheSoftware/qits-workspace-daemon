@@ -393,4 +393,32 @@ class ProvisionerTest {
     assertEquals("foo", Provisioner.basename("../foo.git"));
     assertEquals("foo", Provisioner.basename("foo"));
   }
+
+  @Test
+  void aSubmoduleUrlResolvesAgainstItsParentTheWayGitDoes() {
+    String parent = GIT_BASE + "/project-1/wrapper";
+    assertEquals(
+        GIT_BASE + "/project-1/newlib.git",
+        Provisioner.resolveSubmoduleUrl("../newlib.git", parent));
+    assertEquals(
+        GIT_BASE + "/project-1/newlib.git",
+        Provisioner.resolveSubmoduleUrl("../newlib.git", parent + "/"),
+        "a trailing slash on the parent is no extra segment");
+    assertEquals(
+        GIT_BASE + "/project-1/wrapper/inner", Provisioner.resolveSubmoduleUrl("./inner", parent));
+    assertEquals(
+        GIT_BASE + "/other/lib", Provisioner.resolveSubmoduleUrl("./../../other/lib", parent));
+    assertEquals("/abs/lib.git", Provisioner.resolveSubmoduleUrl("/abs/lib.git", parent));
+    assertEquals(
+        "https://h/o/lib.git", Provisioner.resolveSubmoduleUrl("https://h/o/lib.git", null));
+  }
+
+  @Test
+  void aSubmoduleUrlThatClimbsOutOfItsParentIsNotResolved() {
+    assertNull(Provisioner.resolveSubmoduleUrl("../lib.git", null));
+    assertNull(Provisioner.resolveSubmoduleUrl("../../../lib.git", "http://h/wrapper"));
+    assertNull(Provisioner.resolveSubmoduleUrl("../lib.git", "git@host:wrapper"));
+    assertNull(Provisioner.resolveSubmoduleUrl("../", "http://h/a/wrapper"));
+    assertNull(Provisioner.resolveSubmoduleUrl("", "http://h/a/wrapper"));
+  }
 }
