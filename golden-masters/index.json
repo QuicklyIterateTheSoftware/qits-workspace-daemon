@@ -347,6 +347,25 @@
           }
         },
         {
+          "operationId": "agentSessions",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-sessions",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/agentSessions.json",
+          "frozen": {
+            "ids": [
+              "$.sessions[*].sessionId",
+              "$.sessions[*].newestCommandId"
+            ],
+            "instants": [
+              "$.sessions[*].firstRecordedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "deliverAgentTurn",
           "method": "POST",
           "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/turn",
@@ -388,6 +407,27 @@
           }
         },
         {
+          "operationId": "getCommand",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/commands/{commandId}",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/getCommand.json",
+          "frozen": {
+            "ids": [
+              "$.id",
+              "$.repoId",
+              "$.agentSessions[*].sessionId"
+            ],
+            "instants": [
+              "$.launchedAt",
+              "$.agentSessions[*].recordedAt"
+            ],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "interruptAgent",
           "method": "POST",
           "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/interrupt",
@@ -400,6 +440,28 @@
             ],
             "instants": [],
             "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listAgentWorktrees",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/listAgentWorktrees.json",
+          "frozen": {
+            "ids": [
+              "$[*].agentId",
+              "$[*].workId",
+              "$[*].commandId",
+              "$[*].sessionId"
+            ],
+            "instants": [],
+            "strings": [
+              "$[*].path",
+              "$[*].branches[*].head"
+            ],
             "numbers": [],
             "listFilteredTo": null
           }
@@ -435,6 +497,23 @@
             "ids": [
               "$.agentId"
             ],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "setAgentBlocked",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/blocked",
+          "body": {
+            "blocked": true
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-running/setAgentBlocked.json",
+          "frozen": {
+            "ids": [],
             "instants": [],
             "strings": [],
             "numbers": [],
@@ -546,6 +625,32 @@
           },
           "status": 404,
           "file": "a-workspace-daemon-with-an-agent-whose-worktree-has-an-ignored-directory/readFile.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a workspace daemon with an agent whose worktree holds an Angular component",
+      "slug": "a-workspace-daemon-with-an-agent-whose-worktree-holds-an-angular-component",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "commandId": "00000000-0000-4000-8000-000000000100",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "componentMap",
+          "method": "GET",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/component-map",
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-worktree-holds-an-angular-component/componentMap.json",
           "frozen": {
             "ids": [],
             "instants": [],

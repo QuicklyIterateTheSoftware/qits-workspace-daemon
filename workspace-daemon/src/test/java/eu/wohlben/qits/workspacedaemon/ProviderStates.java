@@ -128,6 +128,15 @@ final class ProviderStates implements AutoCloseable {
    */
   static final String AGENT_BUSY = "a workspace daemon with an agent busy in the background";
 
+  /**
+   * {@link #AGENT_ID} running, its wrapper worktree holding one Angular standalone component
+   * ({@link #writeComponent}), uncommitted: what {@code componentMap} (qits-1939) attributes a pick
+   * to. A state of its own rather than a file added to {@link #writeFiles}, so the published
+   * listings and detection of the file states stay as they are.
+   */
+  static final String AGENT_WITH_COMPONENT =
+      "a workspace daemon with an agent whose worktree holds an Angular component";
+
   /** Every state, in one place, for the verification's guard. */
   private static final Set<String> NAMES =
       Set.of(
@@ -140,7 +149,8 @@ final class ProviderStates implements AutoCloseable {
           AGENT_WITH_IGNORED_DIRECTORY,
           PLUGINS_INSTALLED,
           AGENT_WITH_LEFTOVER_WORK,
-          AGENT_BUSY);
+          AGENT_BUSY,
+          AGENT_WITH_COMPONENT);
 
   /** The row id qits-workspaces keys the container on. */
   static final String WORKSPACE_ROW_ID = "1";
@@ -469,6 +479,11 @@ final class ProviderStates implements AutoCloseable {
         writeFiles(worktrees.wrapperDir(AGENT_ID));
         yield params(commandId);
       }
+      case AGENT_WITH_COMPONENT -> {
+        String commandId = startAgent(AgentLaunchMode.INTERACTIVE);
+        writeComponent(worktrees.wrapperDir(AGENT_ID));
+        yield params(commandId);
+      }
       default -> throw new IllegalArgumentException("No provider state named '" + state + "'");
     };
   }
@@ -552,6 +567,28 @@ final class ProviderStates implements AutoCloseable {
       Files.createDirectories(root.resolve("node_modules/left-pad"));
       Files.writeString(root.resolve("node_modules/.package-lock.json"), "{}\n");
       Files.writeString(root.resolve("node_modules/left-pad/index.js"), "module.exports = 1;\n");
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+  /**
+   * One Angular standalone component with an inline template, so the map's entry names no template
+   * or style file. Left uncommitted: the scan's {@code git grep --untracked} reads the working
+   * tree.
+   */
+  private static void writeComponent(Path root) {
+    try {
+      Files.createDirectories(root.resolve("src/app/login"));
+      Files.writeString(
+          root.resolve("src/app/login/login.component.ts"),
+          "import { Component } from '@angular/core';\n\n"
+              + "@Component({\n"
+              + "  selector: 'app-login',\n"
+              + "  standalone: true,\n"
+              + "  template: '<form></form>',\n"
+              + "})\n"
+              + "export class LoginComponent {}\n");
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }

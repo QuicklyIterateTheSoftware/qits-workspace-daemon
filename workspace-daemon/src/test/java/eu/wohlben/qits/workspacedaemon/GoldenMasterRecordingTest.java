@@ -70,11 +70,12 @@ class GoldenMasterRecordingTest {
   static final String AGENT = PREFIX + "/agent-worktrees/{agentId}";
 
   /**
-   * Every recorded call: {@link #serviceCalls} and {@link #landingCalls}. The index keys a
-   * recording by state and operation, so one operation is recorded at most once per state.
+   * Every recorded call: {@link #serviceCalls}, {@link #landingCalls} and {@link #coverageCalls}.
+   * The index keys a recording by state and operation, so one operation is recorded at most once
+   * per state.
    */
   static final List<Interaction> INTERACTIONS =
-      Stream.concat(serviceCalls().stream(), landingCalls().stream()).toList();
+      Stream.of(serviceCalls(), landingCalls(), coverageCalls()).flatMap(List::stream).toList();
 
   /**
    * The calls qits-workspaces' {@code DaemonAgentClient} makes (qits-1152), with the bodies it
@@ -389,6 +390,55 @@ class GoldenMasterRecordingTest {
             200));
   }
 
+  /**
+   * The operations no consumer calls yet (qits-1939), recorded so each one has a published state a
+   * consumer can write its first pact against: the agent list, one command, the blocked flag, the
+   * session tree (rooted at the running agent's pinned session) and the component map.
+   */
+  private static List<Interaction> coverageCalls() {
+    return List.of(
+        new Interaction(
+            ProviderStates.AGENT_RUNNING,
+            "listAgentWorktrees",
+            "GET",
+            PREFIX + "/agent-worktrees",
+            Map.of(),
+            null,
+            200),
+        new Interaction(
+            ProviderStates.AGENT_RUNNING,
+            "getCommand",
+            "GET",
+            PREFIX + "/commands/{commandId}",
+            Map.of(),
+            null,
+            200),
+        new Interaction(
+            ProviderStates.AGENT_RUNNING,
+            "setAgentBlocked",
+            "POST",
+            AGENT + "/blocked",
+            Map.of(),
+            new JsonObject().put("blocked", true),
+            200),
+        new Interaction(
+            ProviderStates.AGENT_RUNNING,
+            "agentSessions",
+            "GET",
+            PREFIX + "/agent-sessions",
+            Map.of(),
+            null,
+            200),
+        new Interaction(
+            ProviderStates.AGENT_WITH_COMPONENT,
+            "componentMap",
+            "GET",
+            AGENT + "/component-map",
+            Map.of(),
+            null,
+            200));
+  }
+
   private static final Pattern TEMPLATE_PARAM = Pattern.compile("\\{([^}]+)}");
 
   /** The state's name as a directory: lower case, runs of anything else as one dash. */
@@ -530,8 +580,16 @@ class GoldenMasterRecordingTest {
                 + ": "
                 + response.body());
       }
-      return new Recorded(freezer.freeze(new JsonObject(response.body())), frozenParams, freezer);
+      return new Recorded(freezer.freeze(decode(response.body())), frozenParams, freezer);
     }
+  }
+
+  /**
+   * The answer as JSON: an object, or for {@code listAgentWorktrees} — the one top-level array on
+   * this API — an array.
+   */
+  private static Object decode(String body) {
+    return body.stripLeading().startsWith("[") ? new JsonArray(body) : new JsonObject(body);
   }
 
   /** The call as qits-workspaces' proxy makes it: the full mounted path, the daemon token. */

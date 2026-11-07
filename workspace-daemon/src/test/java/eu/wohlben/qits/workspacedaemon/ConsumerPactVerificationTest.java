@@ -151,6 +151,11 @@ class ConsumerPactVerificationTest {
     return daemon.setUp(ProviderStates.AGENT_BUSY);
   }
 
+  @State(ProviderStates.AGENT_WITH_COMPONENT)
+  Map<String, String> anAgentWithAnAngularComponent() {
+    return daemon.setUp(ProviderStates.AGENT_WITH_COMPONENT);
+  }
+
   /** The daemon's loopback port, with the daemon token on every request. */
   static final class DaemonTarget extends HttpTestTarget {
 

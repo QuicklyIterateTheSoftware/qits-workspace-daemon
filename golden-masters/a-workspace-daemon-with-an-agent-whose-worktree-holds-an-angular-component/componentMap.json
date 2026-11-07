@@ -1,0 +1,15 @@
+{
+  "framework": "angular",
+  "components": [
+    {
+      "className": "LoginComponent",
+      "componentFile": "src/app/login/login.component.ts",
+      "styleFiles": [],
+      "selectors": [
+        {
+          "element": "app-login"
+        }
+      ]
+    }
+  ]
+}
