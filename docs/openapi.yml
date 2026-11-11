@@ -468,6 +468,13 @@ paths:
         harness resumes that session (`resumed: true`). Without them it starts a new one; the
         answer's `sessionId` is then the new id.
 
+        **Restore** (qits-2088). With `restorable: true` — the host holds a copy of that session —
+        a Claude session whose files are missing is not started fresh: the start answers `409`
+        `SessionMissing` and launches nothing. The host puts the files back with `POST
+        …/session-files` and starts again, without `restorable`, which resumes the session if the
+        restore completed and starts a new one if it did not. A Kimi session is never refused: its
+        files are not restored.
+
         **The credential.** `env` is laid over the harness process's environment and reaches
         nothing else: never a file, never git config. The daemon keeps it in memory to push the
         agent's branches as the agent. After a restart it is not known until this is called again,
@@ -498,13 +505,15 @@ paths:
           description: |
             Either git would not make the wrapper worktree — its branch is checked out in another
             agent's worktree, say — and the `message` says why, or nobody has signed the harness in,
-            which answers the `NotSignedIn` body. Match `error`, never the sentence.
+            which answers the `NotSignedIn` body, or a `restorable` start's session files are
+            missing, which answers the `SessionMissing` body. Match `error`, never the sentence.
           content:
             application/json:
               schema:
                 oneOf:
                   - { $ref: "#/components/schemas/Error" }
                   - { $ref: "#/components/schemas/NotSignedIn" }
+                  - { $ref: "#/components/schemas/SessionMissing" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/AgentsUnavailable" }
 
@@ -763,6 +772,59 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CleanupCheck" }
+        "404": { $ref: "#/components/responses/NoSuchAgent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503": { $ref: "#/components/responses/AgentsUnavailable" }
+
+  /agent-worktrees/{agentId}/session-files:
+    post:
+      tags: [agent worktrees]
+      operationId: restoreAgentSessionFile
+      summary: Put back one chunk of a session file the host holds (qits-2088).
+      description: |
+        Sent after a `restorable` start answered `409` `SessionMissing`, for the session that start
+        named, while no harness runs. Each file is written where a resume looks for it — `main` at
+        `<credential volume>/.claude/projects/<escaped worktree path>/<sessionId>.jsonl`, a
+        sidechain at `<sessionId>/subagents/agent-<id>.jsonl` beside it — owned by the harness's
+        own user, as the daemon runs as that user.
+
+        A file's chunks are staged beside it and moved into place by its `last` chunk, so a file
+        appears whole or not at all. `offset` 0 starts a file over; any other must equal the
+        bytes staged so far (UTF-8 bytes of `data`), else `409` `offset-mismatch` with the `size`
+        to send from. A file already in place is the harness's and is never overwritten: the
+        answer is its size with `restored: false`.
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionFileChunk" }
+      responses:
+        "200":
+          description: The chunk is staged, or with `last` the file is in place.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionFileWritten" }
+        "400":
+          description: |
+            A field missing or mistyped, a `sessionId` or `file` outside the transcript grammar, a
+            negative `offset`, or no credential volume to restore to.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            The chunk does not start where the staged file ends (`offset-mismatch`, with `size`);
+            or, as an `Error`, the session is not the one the agent's start named, or its harness
+            runs.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/Error" }
+                  - { $ref: "#/components/schemas/OffsetMismatch" }
         "404": { $ref: "#/components/responses/NoSuchAgent" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
@@ -1583,6 +1645,81 @@ components:
           description: |
             Human-readable, and **not** a contract. Reworded freely; match `error` instead.
 
+    SessionMissing:
+      type: object
+      description: |
+        A `restorable` start's refusal (qits-2088): the session's files are missing here, and
+        nothing was launched. Put them back with `POST …/session-files` and start again.
+      required: [error, sessionId, message]
+      properties:
+        error:
+          type: string
+          description: The discriminator. Always `session-missing`.
+          enum: [session-missing]
+        sessionId:
+          type: string
+          description: The session whose files are missing — the start's own `sessionId`.
+        message:
+          type: string
+          description: Human-readable, and **not** a contract.
+
+    SessionFileChunk:
+      type: object
+      required: [sessionId, file, offset, data]
+      properties:
+        sessionId:
+          type: string
+          description: The session the agent's start named.
+        file:
+          type: string
+          pattern: "^(main|subagents/agent-[A-Za-z0-9_-]+\\.jsonl)$"
+          description: |
+            `main`, the session's own transcript, or a sidechain — the transcript grammar of the
+            `transcriptChunk` frame.
+        offset:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Where `data` starts, in UTF-8 bytes; 0 starts the file over.
+        data:
+          type: string
+          description: The chunk, as text.
+        last:
+          type: boolean
+          description: The file's final chunk, which moves it into place. Omit for false.
+
+    SessionFileWritten:
+      type: object
+      required: [agentId, sessionId, file, size, restored]
+      properties:
+        agentId: { type: string }
+        sessionId: { type: string }
+        file: { type: string }
+        size:
+          type: integer
+          format: int64
+          description: The bytes staged so far, or the size of the file in place.
+        restored:
+          type: boolean
+          description: |
+            Whether this chunk moved the file into place. False for a chunk that is not `last`,
+            and for a file that was already there.
+
+    OffsetMismatch:
+      type: object
+      required: [error, size, message]
+      properties:
+        error:
+          type: string
+          enum: [offset-mismatch]
+        size:
+          type: integer
+          format: int64
+          description: The bytes staged so far; send from here, or from 0.
+        message:
+          type: string
+          description: Human-readable, and **not** a contract.
+
     AvailableAgents:
       type: object
       required: [agents, defaultAgent, imageVersion, reportedBy, capabilities]
@@ -1785,7 +1922,12 @@ components:
           type: string
           description: |
             The session to resume, as the host stored it. Resumed only when its files are still
-            there; otherwise a new session starts and its id comes back.
+            there; otherwise a new session starts and its id comes back — unless `restorable`.
+        restorable:
+          type: boolean
+          description: |
+            The host holds a copy of `sessionId` (qits-2088): a Claude session whose files are
+            missing answers `409` `SessionMissing` instead of starting fresh. Omit for false.
         env:
           type: object
           additionalProperties: { type: string }

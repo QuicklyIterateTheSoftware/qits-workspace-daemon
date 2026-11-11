@@ -156,6 +156,11 @@ class ConsumerPactVerificationTest {
     return daemon.setUp(ProviderStates.AGENT_WITH_COMPONENT);
   }
 
+  @State(ProviderStates.SESSION_FILES_GONE)
+  Map<String, String> anAgentWhoseSessionFilesAreGone() {
+    return daemon.setUp(ProviderStates.SESSION_FILES_GONE);
+  }
+
   /** The daemon's loopback port, with the daemon token on every request. */
   static final class DaemonTarget extends HttpTestTarget {
 

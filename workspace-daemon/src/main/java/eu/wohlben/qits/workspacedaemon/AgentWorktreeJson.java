@@ -23,6 +23,36 @@ final class AgentWorktreeJson {
         .put("sessionId", started.sessionId());
   }
 
+  /**
+   * A {@code restorable} start's 409 (qits-2088): the session's files are missing and the host
+   * should put its copy back. The {@code error} key is the contract, as {@code not-signed-in}'s is.
+   */
+  static JsonObject sessionMissing(AgentRuntime.SessionMissingException e) {
+    return new JsonObject()
+        .put("error", "session-missing")
+        .put("sessionId", e.sessionId())
+        .put("message", e.getMessage());
+  }
+
+  /** {@code POST agent-worktrees/{agentId}/session-files}: what is staged, or now in place. */
+  static JsonObject sessionFileWritten(
+      String agentId, String sessionId, String file, SessionFiles.Written written) {
+    return new JsonObject()
+        .put("agentId", agentId)
+        .put("sessionId", sessionId)
+        .put("file", file)
+        .put("size", written.size())
+        .put("restored", written.restored());
+  }
+
+  /** A session-files chunk that does not start where the staged file ends: send from {@code size}. */
+  static JsonObject offsetMismatch(SessionFiles.OffsetMismatchException e) {
+    return new JsonObject()
+        .put("error", "offset-mismatch")
+        .put("size", e.size())
+        .put("message", e.getMessage());
+  }
+
   /** {@code GET agent-worktrees}: one entry per agent. */
   static JsonArray views(java.util.List<AgentRuntime.View> views) {
     JsonArray out = new JsonArray();

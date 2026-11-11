@@ -1065,6 +1065,244 @@ class AgentsApiTest {
     assertFalse(session.equals(answer.body().getString("sessionId")));
   }
 
+  // --- restoring a session the host holds (qits-2088) -------------------------------------------
+
+  private static final String RESTORED = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
+  /** Where Claude keeps {@code session}'s transcript for the agent, as {@link #writeSessionFile}. */
+  private Path sessionFile(String agentId, String session) {
+    String escaped = agentDir(agentId).toString().replaceAll("[^A-Za-z0-9]", "-");
+    return claudeMount.resolve(".claude/projects").resolve(escaped).resolve(session + ".jsonl");
+  }
+
+  private static JsonObject chunk(String file, long offset, String data, boolean last) {
+    return new JsonObject()
+        .put("sessionId", RESTORED)
+        .put("file", file)
+        .put("offset", offset)
+        .put("data", data)
+        .put("last", last);
+  }
+
+  @Test
+  @Timeout(60)
+  void aSessionTheHostHoldsIsRestoredWhereAResumeLooksAndResumed() throws Exception {
+    // A credential volume swapped for an empty one: the worktree is there, the session files not.
+    worktrees.ensure("agent-1", BRANCH);
+    String first = "{\"type\":\"user\",\"message\":\"héllo\"}\n";
+    String second = "{\"type\":\"assistant\"}\n";
+    String sidechain = "{\"isSidechain\":true}\n";
+    List<String> logged = new java.util.ArrayList<>();
+
+    Answer refused;
+    Answer resumed;
+    try (LogCapture capture = LogCapture.of(AgentRuntime.class, logged)) {
+      refused =
+          post(
+              "/agent-worktrees",
+              start("agent-1").put("sessionId", RESTORED).put("restorable", true));
+
+      assertEquals(409, refused.status(), refused.raw());
+      assertEquals("session-missing", refused.body().getString("error"));
+      assertEquals(RESTORED, refused.body().getString("sessionId"));
+      assertNotNull(refused.body().getString("message"));
+      assertFalse(Files.exists(fakeLog.resolveSibling("harness.args")), "nothing was launched");
+
+      Answer side =
+          post(
+              "/agent-worktrees/agent-1/session-files",
+              chunk("subagents/agent-a1b2.jsonl", 0, sidechain, true));
+      assertEquals(200, side.status(), side.raw());
+      assertEquals(true, side.body().getBoolean("restored"));
+      Answer head =
+          post("/agent-worktrees/agent-1/session-files", chunk("main", 0, first, false));
+      assertEquals(200, head.status(), head.raw());
+      assertEquals("agent-1", head.body().getString("agentId"));
+      assertEquals(RESTORED, head.body().getString("sessionId"));
+      assertEquals("main", head.body().getString("file"));
+      long size = head.body().getLong("size");
+      assertEquals(first.getBytes(java.nio.charset.StandardCharsets.UTF_8).length, size);
+      assertEquals(false, head.body().getBoolean("restored"));
+      assertFalse(Files.exists(sessionFile("agent-1", RESTORED)), "not in place before its last");
+      Answer tail =
+          post("/agent-worktrees/agent-1/session-files", chunk("main", size, second, true));
+      assertEquals(200, tail.status(), tail.raw());
+      assertEquals(true, tail.body().getBoolean("restored"));
+
+      resumed = post("/agent-worktrees", start("agent-1").put("sessionId", RESTORED));
+    }
+
+    assertEquals(200, resumed.status(), resumed.raw());
+    assertEquals(true, resumed.body().getBoolean("resumed"));
+    assertEquals(RESTORED, resumed.body().getString("sessionId"));
+    awaitContains(fakeLog.resolveSibling("harness.args"), "--resume " + RESTORED);
+    Path main = sessionFile("agent-1", RESTORED);
+    assertTrue(runtime.sessionFilesExist(AgentType.CLAUDE, agentDir("agent-1"), RESTORED));
+    assertEquals(first + second, Files.readString(main));
+    assertEquals(
+        sidechain,
+        Files.readString(main.resolveSibling(RESTORED).resolve("subagents/agent-a1b2.jsonl")));
+    try (java.util.stream.Stream<Path> left = Files.walk(main.getParent())) {
+      assertTrue(
+          left.noneMatch(p -> p.toString().endsWith(SessionFiles.STAGING_SUFFIX)),
+          "no staging file is left behind");
+    }
+    assertTrue(
+        logged.stream().anyMatch(line -> line.contains("asking the host to restore")), logged.toString());
+    assertTrue(
+        logged.stream().anyMatch(line -> line.contains("resuming session " + RESTORED)),
+        logged.toString());
+  }
+
+  @Test
+  @Timeout(60)
+  void aRestoreThatDidNotCompleteStartsAFreshSessionAndSaysSo() throws Exception {
+    worktrees.ensure("agent-1", BRANCH);
+    List<String> logged = new java.util.ArrayList<>();
+
+    Answer fresh;
+    try (LogCapture capture = LogCapture.of(AgentRuntime.class, logged)) {
+      assertEquals(
+          409,
+          post(
+                  "/agent-worktrees",
+                  start("agent-1").put("sessionId", RESTORED).put("restorable", true))
+              .status());
+      post("/agent-worktrees/agent-1/session-files", chunk("main", 0, "{}\n", false));
+      Answer skipped =
+          post("/agent-worktrees/agent-1/session-files", chunk("main", 99, "{}\n", true));
+      assertEquals(409, skipped.status(), skipped.raw());
+      assertEquals("offset-mismatch", skipped.body().getString("error"));
+      assertEquals(3L, skipped.body().getLong("size"));
+
+      fresh = post("/agent-worktrees", start("agent-1").put("sessionId", RESTORED));
+    }
+
+    assertEquals(200, fresh.status(), fresh.raw());
+    assertEquals(false, fresh.body().getBoolean("resumed"));
+    assertFalse(RESTORED.equals(fresh.body().getString("sessionId")));
+    assertFalse(Files.exists(sessionFile("agent-1", RESTORED)), "half a transcript is never resumed");
+    assertTrue(
+        logged.stream().anyMatch(line -> line.contains("the host's restore did not complete")),
+        logged.toString());
+  }
+
+  @Test
+  void aStartTheHostOffersNoCopyForStartsFreshAndSaysSo() throws Exception {
+    List<String> logged = new java.util.ArrayList<>();
+
+    Answer answer;
+    try (LogCapture capture = LogCapture.of(AgentRuntime.class, logged)) {
+      answer = post("/agent-worktrees", start("agent-1").put("sessionId", RESTORED));
+    }
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals(false, answer.body().getBoolean("resumed"));
+    assertTrue(
+        logged.stream().anyMatch(line -> line.contains("no copy from the host")), logged.toString());
+  }
+
+  @Test
+  @Timeout(60)
+  void aRestorableStartWhoseFilesAreThereResumesWithoutAsking() throws Exception {
+    worktrees.ensure("agent-1", BRANCH);
+    writeSessionFile("agent-1", RESTORED);
+
+    Answer answer =
+        post(
+            "/agent-worktrees",
+            start("agent-1").put("sessionId", RESTORED).put("restorable", true));
+
+    assertEquals(200, answer.status(), answer.raw());
+    assertEquals(true, answer.body().getBoolean("resumed"));
+  }
+
+  @Test
+  void aRestorableKimiStartIsNeverRefused() throws Exception {
+    Answer answer =
+        post(
+            "/agent-worktrees",
+            start("agent-1")
+                .put("harness", "KIMI")
+                .put("sessionId", RESTORED)
+                .put("restorable", true));
+
+    assertFalse(answer.status() == 409 && answer.raw().contains("session-missing"), answer.raw());
+  }
+
+  @Test
+  void aSessionFileIsWrittenOnlyForTheSessionTheStartNamedAndNeverOverAFileInPlace()
+      throws Exception {
+    worktrees.ensure("agent-1", BRANCH);
+    post("/agent-worktrees", start("agent-1").put("sessionId", RESTORED).put("restorable", true));
+
+    Answer other =
+        post(
+            "/agent-worktrees/agent-1/session-files",
+            chunk("main", 0, "{}\n", true).put("sessionId", "another-session"));
+    assertEquals(409, other.status(), other.raw());
+    Answer escape =
+        post("/agent-worktrees/agent-1/session-files", chunk("../../evil.jsonl", 0, "x", true));
+    assertEquals(400, escape.status(), escape.raw());
+    Answer mistyped =
+        post(
+            "/agent-worktrees/agent-1/session-files",
+            chunk("main", 0, "{}\n", true).put("offset", "zero"));
+    assertEquals(400, mistyped.status(), mistyped.raw());
+    assertEquals(
+        404,
+        post("/agent-worktrees/agent-2/session-files", chunk("main", 0, "{}\n", true)).status());
+    assertEquals(405, get("/agent-worktrees/agent-1/session-files").status());
+
+    writeSessionFile("agent-1", RESTORED);
+    Answer inPlace =
+        post("/agent-worktrees/agent-1/session-files", chunk("main", 0, "overwritten\n", true));
+    assertEquals(200, inPlace.status(), inPlace.raw());
+    assertEquals(false, inPlace.body().getBoolean("restored"));
+    assertEquals("{}\n", Files.readString(sessionFile("agent-1", RESTORED)));
+  }
+
+  /** The INFO-and-above lines one logger writes while open, through JUL (see AgentKillWatchTest). */
+  private static final class LogCapture implements AutoCloseable {
+    private final java.util.logging.Logger logger;
+    private final java.util.logging.Handler handler;
+
+    private LogCapture(java.util.logging.Logger logger, java.util.logging.Handler handler) {
+      this.logger = logger;
+      this.handler = handler;
+    }
+
+    static LogCapture of(Class<?> owner, List<String> into) {
+      java.util.logging.Logger logger = java.util.logging.Logger.getLogger(owner.getName());
+      java.util.logging.Handler handler =
+          new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+              Object[] params = record.getParameters();
+              synchronized (into) {
+                into.add(
+                    params == null
+                        ? record.getMessage()
+                        : String.format(record.getMessage(), params));
+              }
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+          };
+      logger.addHandler(handler);
+      return new LogCapture(logger, handler);
+    }
+
+    @Override
+    public void close() {
+      logger.removeHandler(handler);
+    }
+  }
+
   @Test
   void aTurnNeedsTextAndAKnownAgent() throws Exception {
     post("/agent-worktrees", start("agent-1"));

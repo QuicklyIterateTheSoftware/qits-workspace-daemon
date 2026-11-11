@@ -169,6 +169,13 @@ public class WorkspaceApi {
   static final String CLEANUP_CHECK_PATH = "/cleanup-check";
 
   /**
+   * {@code POST …/session-files} (qits-2088): one chunk of a session file the host holds, put back
+   * where a resume looks for it. The host sends it after a {@code restorable} start answered 409
+   * {@code session-missing}, and starts again once every file's {@code last} chunk is in.
+   */
+  static final String SESSION_FILES_PATH = "/session-files";
+
+  /**
    * The commands surface, from {@code qits-commands}. These came from the host's {@code
    * /api/commands**}, which drove every process through a {@code docker exec} client; here the
    * processes are this daemon's own children.
@@ -677,6 +684,10 @@ public class WorkspaceApi {
             method == HttpMethod.GET
                 ? new Reply(200, AgentWorktreeJson.cleanupCheck(agents.cleanupCheck(agentId)))
                 : new Reply(405, WorkspaceJson.error("Method not allowed"));
+        case SESSION_FILES_PATH ->
+            method == HttpMethod.POST
+                ? restoreSessionFile(agentId, body)
+                : new Reply(405, WorkspaceJson.error("Method not allowed"));
         case FILES_PATH, CONTENT_PATH, DETECTION_PATH, COMPONENT_MAP_PATH ->
             method == HttpMethod.GET
                 ? dispatchFiles(agentId, verb, request.getParam("path"))
@@ -695,6 +706,10 @@ public class WorkspaceApi {
       return new Reply(400, WorkspaceJson.error(e.getMessage()));
     } catch (AgentNotSignedInException e) {
       return new Reply(409, notSignedIn(e));
+    } catch (AgentRuntime.SessionMissingException e) {
+      return new Reply(409, AgentWorktreeJson.sessionMissing(e));
+    } catch (SessionFiles.OffsetMismatchException e) {
+      return new Reply(409, AgentWorktreeJson.offsetMismatch(e));
     } catch (RuntimeException e) {
       LOG.errorf(e, "workspace-daemon agent-worktrees API failed handling %s", path);
       return new Reply(500, WorkspaceJson.error("Internal error"));
@@ -754,7 +769,42 @@ public class WorkspaceApi {
         surface(json.getString("surface")),
         parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
         entityFacts(json),
-        agentConfig(json));
+        agentConfig(json),
+        restorable(json));
+  }
+
+  /**
+   * A start's optional {@code restorable} (qits-2088): the host holds a copy of the session it
+   * names. Absent is false — every host before it — and anything but a boolean is a 400.
+   */
+  private static boolean restorable(JsonObject json) {
+    Object raw = json.getValue("restorable");
+    if (raw != null && !(raw instanceof Boolean)) {
+      throw new InvalidCommandRequestException("restorable must be a boolean");
+    }
+    return Boolean.TRUE.equals(raw);
+  }
+
+  /**
+   * {@code POST /agent-worktrees/{agentId}/session-files} (qits-2088): {@code sessionId}, {@code
+   * file} ({@code main} or {@code subagents/agent-<id>.jsonl}), {@code offset}, {@code data} and
+   * {@code last}. 200 with the staged size; 409 {@code offset-mismatch} with the size to send from.
+   */
+  private Reply restoreSessionFile(String agentId, String body) {
+    JsonObject json = jsonBody(body);
+    if (!(json.getValue("sessionId") instanceof String sessionId)
+        || !(json.getValue("file") instanceof String file)
+        || !(json.getValue("offset") instanceof Number offset)
+        || !(json.getValue("data") instanceof String data)
+        || (json.getValue("last") != null && !(json.getValue("last") instanceof Boolean))) {
+      throw new InvalidCommandRequestException(
+          "sessionId, file and data must be strings, offset a number and last a boolean");
+    }
+    boolean last = Boolean.TRUE.equals(json.getBoolean("last"));
+    SessionFiles.Written written =
+        agents.restoreSessionFile(agentId, sessionId, file, offset.longValue(), data, last);
+    return new Reply(
+        200, AgentWorktreeJson.sessionFileWritten(agentId, sessionId, file, written));
   }
 
   /**

@@ -63,6 +63,7 @@ class OpenApiContractTest {
               AGENT + WorkspaceApi.ENTITY_PATH,
               AGENT + WorkspaceApi.BLOCKED_PATH,
               AGENT + WorkspaceApi.CLEANUP_CHECK_PATH,
+              AGENT + WorkspaceApi.SESSION_FILES_PATH,
               AGENT + WorkspaceApi.FILES_PATH,
               AGENT + WorkspaceApi.CONTENT_PATH,
               AGENT + WorkspaceApi.DETECTION_PATH,

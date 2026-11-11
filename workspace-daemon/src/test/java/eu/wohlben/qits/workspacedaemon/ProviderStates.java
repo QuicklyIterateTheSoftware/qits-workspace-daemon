@@ -137,6 +137,17 @@ final class ProviderStates implements AutoCloseable {
   static final String AGENT_WITH_COMPONENT =
       "a workspace daemon with an agent whose worktree holds an Angular component";
 
+  /**
+   * {@link #AGENT_ID}'s worktree on the volume and its session {@link #RESTORED_SESSION} gone from
+   * the credential volume — one swapped for an empty one (qits-2088) — and the host's restorable
+   * start of it already refused: nothing runs, and the daemon waits for the session's files.
+   */
+  static final String SESSION_FILES_GONE =
+      "a workspace daemon with an agent whose session files are gone";
+
+  /** The session {@link #SESSION_FILES_GONE} is missing, as the host stored it. */
+  static final String RESTORED_SESSION = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
   /** Every state, in one place, for the verification's guard. */
   private static final Set<String> NAMES =
       Set.of(
@@ -150,7 +161,8 @@ final class ProviderStates implements AutoCloseable {
           PLUGINS_INSTALLED,
           AGENT_WITH_LEFTOVER_WORK,
           AGENT_BUSY,
-          AGENT_WITH_COMPONENT);
+          AGENT_WITH_COMPONENT,
+          SESSION_FILES_GONE);
 
   /** The row id qits-workspaces keys the container on. */
   static final String WORKSPACE_ROW_ID = "1";
@@ -484,6 +496,10 @@ final class ProviderStates implements AutoCloseable {
         writeComponent(worktrees.wrapperDir(AGENT_ID));
         yield params(commandId);
       }
+      case SESSION_FILES_GONE -> {
+        refuseRestorableStart();
+        yield params();
+      }
       default -> throw new IllegalArgumentException("No provider state named '" + state + "'");
     };
   }
@@ -522,6 +538,30 @@ final class ProviderStates implements AutoCloseable {
                 mode,
                 null))
         .commandId();
+  }
+
+  /** The host's first start after the credential volume lost the session: refused, 409. */
+  private void refuseRestorableStart() {
+    try {
+      runtime.start(
+          new AgentRuntime.Start(
+              AGENT_ID,
+              WORK_ID,
+              ENTITY_ID,
+              WRAPPER_BRANCH,
+              AgentType.CLAUDE,
+              RESTORED_SESSION,
+              Map.of(),
+              "Work the ticket.",
+              AgentSurface.TICKET_DISPATCH,
+              AgentLaunchMode.INTERACTIVE,
+              null,
+              null,
+              true));
+      throw new IllegalStateException("a restorable start of a missing session launched");
+    } catch (AgentRuntime.SessionMissingException expected) {
+      // The state: the daemon now waits for the session's files.
+    }
   }
 
   /**

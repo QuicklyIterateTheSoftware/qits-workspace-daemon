@@ -41,7 +41,10 @@ import org.jboss.logging.Logger;
  * <p><b>Yield and resume.</b> Yielding stops the harness and keeps everything else. Resuming starts
  * it again with the agent's last session id, when that session's files are still there. They are
  * under the shared harness volume ({@code /claude-home}), keyed by the agent's working directory,
- * and the worktree is on the workspace volume, so both outlive a container restart.
+ * and the worktree is on the workspace volume, so both outlive a container restart. A credential
+ * volume that did not — swapped for an empty one — is what a start's {@code restorable} answers
+ * (qits-2088): the host holds every session the daemon shipped it, and puts the missing one back
+ * ({@link SessionFiles}) before the harness resumes it.
  *
  * <p><b>What is remembered where.</b> The credential lives only in memory and only in the harness
  * process's environment (D18). The rest of an agent's description — work item, wrapper branch,
@@ -64,6 +67,9 @@ final class AgentRuntime implements AutoCloseable {
   /**
    * What the host asks for in {@code POST agent-worktrees}. {@code agentConfig} is null when the
    * start names no {@code qits-agent-config} repository; like {@code env} it is kept in memory only.
+   * {@code restorable} is the host saying it holds a copy of {@code sessionId} (qits-2088): a
+   * Claude session whose files are missing here is then refused with {@link
+   * SessionMissingException} rather than started fresh, so the host can put them back first.
    */
   record Start(
       String agentId,
@@ -77,7 +83,27 @@ final class AgentRuntime implements AutoCloseable {
       AgentSurface surface,
       AgentLaunchMode mode,
       EntityFacts entity,
-      AgentConfigCheckout.AgentConfig agentConfig) {
+      AgentConfigCheckout.AgentConfig agentConfig,
+      boolean restorable) {
+
+    /** A start the host offers no session copy for: every start before qits-2088. */
+    Start(
+        String agentId,
+        String workId,
+        String entityId,
+        String wrapperBranch,
+        AgentType harness,
+        String sessionId,
+        Map<String, String> env,
+        String instruction,
+        AgentSurface surface,
+        AgentLaunchMode mode,
+        EntityFacts entity,
+        AgentConfigCheckout.AgentConfig agentConfig) {
+      this(
+          agentId, workId, entityId, wrapperBranch, harness, sessionId, env, instruction, surface,
+          mode, entity, agentConfig, false);
+    }
 
     /** A start without an agent config checkout: today's start, field for field. */
     Start(
@@ -182,6 +208,9 @@ final class AgentRuntime implements AutoCloseable {
     /** The agent's {@code qits-agent-config} work tree, handed to a Claude launch; or null. */
     volatile Path configDir;
 
+    /** The session this daemon last asked the host to restore (qits-2088); null when none. */
+    volatile String restoreAsked;
+
     Agent(String agentId) {
       this.agentId = agentId;
     }
@@ -193,6 +222,7 @@ final class AgentRuntime implements AutoCloseable {
   private final AgentCommands commands;
   private final LaunchFactory factory;
   private final String claudeMount;
+  private final SessionFiles sessionFiles;
   private final TerminalTurnGate terminalTurns;
 
   /** The agents' config checkouts (qits-1382); null where nothing wired them. */
@@ -282,6 +312,7 @@ final class AgentRuntime implements AutoCloseable {
     this.commands = commands;
     this.factory = factory;
     this.claudeMount = claudeMount;
+    this.sessionFiles = new SessionFiles(claudeMount);
     this.terminalTurns = new TerminalTurnGate(commands::sendKeystrokes, readyTimeout);
   }
 
@@ -350,7 +381,63 @@ final class AgentRuntime implements AutoCloseable {
     if (running != null) {
       return new Started(agent.agentId, directory, running.id(), false, false, agent.sessionId);
     }
+    if (request.restorable() && restoreWanted(agent)) {
+      agent.restoreAsked = agent.sessionId;
+      LOG.infof(
+          "agent %s: no files for session %s under %s, asking the host to restore its copy",
+          agent.agentId, agent.sessionId, claudeMount);
+      throw new SessionMissingException(agent.sessionId);
+    }
     return launch(agent, request.instruction());
+  }
+
+  /**
+   * Whether a start should ask the host for the agent's session (qits-2088): a Claude session —
+   * Kimi keeps its sessions in a layout of its own, which nothing restores — whose transcript is
+   * not where a resume looks for it.
+   */
+  private boolean restoreWanted(Agent agent) {
+    String session = agent.sessionId;
+    return session != null
+        && agent.harness != AgentType.KIMI
+        && sessionFiles.mainFile(agent.directory, session).isPresent()
+        && !sessionFilesExist(agent.harness, agent.directory, session);
+  }
+
+  /**
+   * One chunk of a session file the host holds ({@code POST
+   * agent-worktrees/{agentId}/session-files}, qits-2088), written where a resume looks for it
+   * ({@link SessionFiles}). Only the session the agent's start named, and never into a running
+   * harness's.
+   */
+  synchronized SessionFiles.Written restoreSessionFile(
+      String agentId, String sessionId, String file, long offset, String data, boolean last) {
+    Agent agent = known(agentId);
+    if (sessionId == null || !sessionId.equals(agent.sessionId)) {
+      throw new AgentWorktrees.AgentWorktreeException(
+          409, "Session " + sessionId + " is not the session agent " + agentId + " starts");
+    }
+    if (running(agent) != null) {
+      throw new AgentWorktrees.AgentWorktreeException(
+          409, "Agent " + agentId + "'s harness is running; its session is not restored under it");
+    }
+    try {
+      SessionFiles.Written written =
+          sessionFiles.write(agent.directory, sessionId, file, offset, data, last);
+      if (written.restored()) {
+        LOG.infof(
+            "agent %s: restored %s of session %s from the host (%d bytes)",
+            agentId, file, sessionId, written.size());
+      }
+      return written;
+    } catch (IllegalArgumentException e) {
+      throw new AgentWorktrees.AgentWorktreeException(e.getMessage());
+    } catch (IOException e) {
+      LOG.warnf(
+          "agent %s: could not restore %s of session %s: %s",
+          agentId, file, sessionId, e.getMessage());
+      throw new java.io.UncheckedIOException(e);
+    }
   }
 
   /**
@@ -477,9 +564,17 @@ final class AgentRuntime implements AutoCloseable {
     boolean resume = session != null && sessionFilesExist(harness, agent.directory, session);
     if (session != null && !resume) {
       LOG.infof(
-          "agent %s: no files for session %s under %s, starting a new session",
-          agent.agentId, session, claudeMount);
+          "agent %s: no files for session %s under %s and %s, starting a new session",
+          agent.agentId,
+          session,
+          claudeMount,
+          session.equals(agent.restoreAsked)
+              ? "the host's restore did not complete"
+              : "no copy from the host");
+    } else if (resume && session.equals(agent.restoreAsked)) {
+      LOG.infof("agent %s: resuming session %s from the host's copy", agent.agentId, session);
     }
+    agent.restoreAsked = null;
     Command command = agent.launch.launch(launchRequest(agent, opening, resume ? session : null));
     agent.commandId = command.id();
     commandAgents.put(command.id(), agent.agentId);
@@ -816,9 +911,7 @@ final class AgentRuntime implements AutoCloseable {
         return false;
       }
     }
-    String escaped = directory.toString().replaceAll("[^A-Za-z0-9]", "-");
-    return Files.isRegularFile(
-        Path.of(claudeMount, ".claude", "projects", escaped, session + ".jsonl"));
+    return sessionFiles.mainFile(directory, session).map(Files::isRegularFile).orElse(false);
   }
 
   private Command running(Agent agent) {
@@ -885,6 +978,23 @@ final class AgentRuntime implements AutoCloseable {
     } catch (IOException e) {
       LOG.warnf(
           "could not write %s for agent %s: %s", METADATA_FILE, agent.agentId, e.getMessage());
+    }
+  }
+
+  /**
+   * A start the host said it could restore, of a session whose files are missing (qits-2088): the
+   * host puts them back through {@link #restoreSessionFile} and starts again.
+   */
+  static final class SessionMissingException extends RuntimeException {
+    private final String sessionId;
+
+    SessionMissingException(String sessionId) {
+      super("No files for session " + sessionId + " here; restore them and start again");
+      this.sessionId = sessionId;
+    }
+
+    String sessionId() {
+      return sessionId;
     }
   }
 

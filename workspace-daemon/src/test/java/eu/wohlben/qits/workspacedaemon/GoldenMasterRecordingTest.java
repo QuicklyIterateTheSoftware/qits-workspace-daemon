@@ -180,6 +180,40 @@ class GoldenMasterRecordingTest {
             Map.of(),
             new JsonObject().put("text", "Carry on."),
             404),
+        // A restart after the credential volume lost the session (qits-2088): the host's
+        // restorable start is refused with session-missing, and each file it holds is put back.
+        new Interaction(
+            ProviderStates.SESSION_FILES_GONE,
+            "startAgentWorktree",
+            "POST",
+            PREFIX + "/agent-worktrees",
+            Map.of(),
+            new JsonObject()
+                .put("agentId", ProviderStates.AGENT_ID)
+                .put("workId", ProviderStates.WORK_ID)
+                .put("entityId", ProviderStates.ENTITY_ID)
+                .put("wrapperBranch", ProviderStates.WRAPPER_BRANCH)
+                .put("harness", "CLAUDE")
+                .put("sessionId", ProviderStates.RESTORED_SESSION)
+                .put("restorable", true)
+                .put("env", new JsonObject())
+                .put("surface", "ticket.dispatch")
+                .put("mode", "INTERACTIVE")
+                .put("instruction", "Work the ticket."),
+            409),
+        new Interaction(
+            ProviderStates.SESSION_FILES_GONE,
+            "restoreAgentSessionFile",
+            "POST",
+            AGENT + "/session-files",
+            Map.of(),
+            new JsonObject()
+                .put("sessionId", ProviderStates.RESTORED_SESSION)
+                .put("file", "main")
+                .put("offset", 0)
+                .put("data", "{\"type\":\"user\"}\n")
+                .put("last", true),
+            200),
         new Interaction(
             ProviderStates.SIGNED_IN,
             "setAgentEntity",

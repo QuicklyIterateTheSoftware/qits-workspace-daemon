@@ -590,6 +590,72 @@
       ]
     },
     {
+      "name": "a workspace daemon with an agent whose session files are gone",
+      "slug": "a-workspace-daemon-with-an-agent-whose-session-files-are-gone",
+      "params": {
+        "agentId": "00000000-0000-4000-8000-0000000000a1",
+        "workspaceRowId": "1"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "restoreAgentSessionFile",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees/{agentId}/session-files",
+          "body": {
+            "sessionId": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+            "file": "main",
+            "offset": 0,
+            "data": "{\"type\":\"user\"}\n",
+            "last": true
+          },
+          "status": 200,
+          "file": "a-workspace-daemon-with-an-agent-whose-session-files-are-gone/restoreAgentSessionFile.json",
+          "frozen": {
+            "ids": [
+              "$.agentId",
+              "$.sessionId"
+            ],
+            "instants": [],
+            "strings": [],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "startAgentWorktree",
+          "method": "POST",
+          "path": "/workspaces/container/{workspaceRowId}/agent-worktrees",
+          "body": {
+            "agentId": "00000000-0000-4000-8000-0000000000a1",
+            "workId": "00000000-0000-4000-8000-000000000001",
+            "entityId": "contract-00000001-10",
+            "wrapperBranch": "ticket/contract-00000001-10",
+            "harness": "CLAUDE",
+            "sessionId": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+            "restorable": true,
+            "env": {},
+            "surface": "ticket.dispatch",
+            "mode": "INTERACTIVE",
+            "instruction": "Work the ticket."
+          },
+          "status": 409,
+          "file": "a-workspace-daemon-with-an-agent-whose-session-files-are-gone/startAgentWorktree.json",
+          "frozen": {
+            "ids": [
+              "$.sessionId"
+            ],
+            "instants": [],
+            "strings": [
+              "$.message"
+            ],
+            "numbers": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
       "name": "a workspace daemon with an agent whose worktree has an ignored directory",
       "slug": "a-workspace-daemon-with-an-agent-whose-worktree-has-an-ignored-directory",
       "params": {
