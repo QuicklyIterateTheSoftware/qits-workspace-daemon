@@ -399,11 +399,13 @@ class CommandSocketsTest {
   private static void awaitContains(List<String> frames, String needle) throws InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
     while (System.nanoTime() < deadline) {
-      if (frames.stream().anyMatch(frame -> frame.contains(needle))) {
+      // A terminal's output is a byte stream the PTY may cut anywhere, so match across frames
+      // (qits-2088: 'half typ' arrived as 'ha' + 'lf typ').
+      if (String.join("", List.copyOf(frames)).contains(needle)) {
         return;
       }
       Thread.sleep(25);
     }
-    throw new AssertionError("timed out waiting for a frame containing '" + needle + "': " + frames);
+    throw new AssertionError("timed out waiting for frames containing '" + needle + "': " + frames);
   }
 }
