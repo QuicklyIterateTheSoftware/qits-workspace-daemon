@@ -68,7 +68,7 @@
              (`pacts/qits-platform-access-cli_qits-workspace-daemon.json`) and qits-workspaces-service's
              proxy (`pacts/qits-workspaces-service_qits-workspace-daemon.json`). -->
         <qits.platform-access-monorepo-pacts-qits-workspace-daemon.version>2026.1103.101116</qits.platform-access-monorepo-pacts-qits-workspace-daemon.version>
-        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1029.225748</qits.workspaces-service-pacts-qits-workspace-daemon.version>
+        <qits.workspaces-service-pacts-qits-workspace-daemon.version>2026.1111.224614</qits.workspaces-service-pacts-qits-workspace-daemon.version>
         <!-- The platform's shared rules, test scope (qits-1754): ProviderStateCoverageRules checks
              every state golden-masters/index.json records has its @State callback on
              ConsumerPactVerificationTest. Published by qits-integrations-quarkus into the same
