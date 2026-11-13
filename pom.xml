@@ -73,7 +73,7 @@
              every state golden-masters/index.json records has its @State callback on
              ConsumerPactVerificationTest. Published by qits-integrations-quarkus into the same
              platform Maven repository as the coordinate above. -->
-        <qits.arch-rules.version>2026.1108.20205</qits.arch-rules.version>
+        <qits.arch-rules.version>2026.1113.5438</qits.arch-rules.version>
     </properties>
 
     <dependencyManagement>
