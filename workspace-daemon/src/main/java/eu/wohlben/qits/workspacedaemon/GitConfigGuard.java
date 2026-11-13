@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.stream.Stream;
@@ -54,11 +55,21 @@ final class GitConfigGuard {
    * @param expectedOrigin the origin url the daemon set, or null to skip that check
    */
   static List<String> violations(Path repository, String expectedOrigin) {
+    return violations(repository, expectedOrigin == null ? null : List.of(expectedOrigin));
+  }
+
+  /**
+   * The same, for a repository whose origin may be any of several urls the daemon derived itself —
+   * an agent-local checkout, whose origin git wrote in one of two spellings (qits-2166).
+   *
+   * @param acceptedOrigins the origin urls accepted, or null to skip that check
+   */
+  static List<String> violations(Path repository, Collection<String> acceptedOrigins) {
     List<String> found = new ArrayList<>();
     for (String scope : List.of("--local", "--worktree")) {
       GitExec.Out listed = GitExec.git(repository, "config", scope, "--includes", "--list");
       if (listed.ok()) {
-        check(listed.stdout(), expectedOrigin, found);
+        check(listed.stdout(), acceptedOrigins, found);
       }
     }
     return found.stream().distinct().toList();
@@ -90,7 +101,8 @@ final class GitConfigGuard {
     return found;
   }
 
-  private static void check(String list, String expectedOrigin, List<String> found) {
+  private static void check(
+      String list, Collection<String> acceptedOrigins, List<String> found) {
     for (String line : list.split("\n")) {
       int eq = line.indexOf('=');
       if (eq <= 0) {
@@ -100,9 +112,9 @@ final class GitConfigGuard {
       String value = line.substring(eq + 1);
       if (denied(key, value)) {
         found.add(key);
-      } else if (expectedOrigin != null
+      } else if (acceptedOrigins != null
           && key.equals("remote.origin.url")
-          && !value.equals(expectedOrigin)) {
+          && !acceptedOrigins.contains(value)) {
         found.add("remote.origin.url");
       }
     }

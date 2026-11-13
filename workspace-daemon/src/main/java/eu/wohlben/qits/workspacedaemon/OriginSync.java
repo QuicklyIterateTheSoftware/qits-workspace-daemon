@@ -44,7 +44,10 @@ import org.jboss.logging.Logger;
  *       therefore read every cycle, and a declared path the base clone does not have that holds a
  *       checkout is fetched and its branch pushed like any other, as that agent only. Only
  *       submodules of the wrapper and, below them, of an accepted agent-local repository are
- *       walked; one an agent adds inside a base-clone submodule is not.
+ *       walked; one an agent adds inside a base-clone submodule is not. A path the base clone
+ *       does have counts too once the agent's own {@code update --init} cloned it there (no
+ *       worktree of it was made for this agent); the worktree that was made is the base
+ *       clone's, pushed through its worktree list and passed over here (qits-2166).
  * </ul>
  *
  * <p>Both run on one thread, so a fetch and a push never race for the same ref lock. A rejected
@@ -54,9 +57,9 @@ import org.jboss.logging.Logger;
  *
  * <p>The push side polls rather than watches: one {@code git worktree list} per repository finds
  * every agent's branch and head at once, so the cost of a cycle does not grow with the number of
- * agents; only the agent-local walk is per agent, one {@code .gitmodules} read each. A harness hook
- * nudges a cycle at once, so a commit made in a turn is pushed when the turn ends rather than at
- * the next poll.
+ * agents; only the agent-local walk is per agent, one {@code .gitmodules} read each and one git
+ * dir lookup per declared checkout. A harness hook nudges a cycle at once, so a commit made in a
+ * turn is pushed when the turn ends rather than at the next poll.
  */
 final class OriginSync {
 
@@ -88,10 +91,12 @@ final class OriginSync {
   /**
    * One repository a push or a fetch runs in: a base-clone repository, or an agent-local one
    * (qits-1886). {@code path} is its path in the wrapper, the key {@link #handled} and the log use;
-   * {@code originUrl} the origin {@link GitConfigGuard} holds its config to; {@code where} names it
-   * in a log line.
+   * {@code originUrl} its canonical origin, what its own submodules resolve against; {@code
+   * origins} every origin {@link GitConfigGuard} accepts in its config, null for no check; {@code
+   * where} names it in a log line.
    */
-  private record Target(Path dir, String path, String name, String originUrl, String where) {}
+  private record Target(
+      Path dir, String path, String name, String originUrl, List<String> origins, String where) {}
 
   private final AgentWorktrees worktrees;
   private final Function<String, Optional<Map<String, String>>> agentEnvironment;
@@ -225,7 +230,7 @@ final class OriginSync {
     }
     int failures = 0;
     for (Target target : targets) {
-      List<String> tampered = GitConfigGuard.violations(target.dir(), target.originUrl());
+      List<String> tampered = GitConfigGuard.violations(target.dir(), target.origins());
       if (!tampered.isEmpty()) {
         failures++;
         warnOnce(
@@ -330,7 +335,7 @@ final class OriginSync {
       LOG.debugf("not pushing %s for agent %s: its credential is not known", branch, agentId);
       return null;
     }
-    List<String> tampered = GitConfigGuard.violations(target.dir(), target.originUrl());
+    List<String> tampered = GitConfigGuard.violations(target.dir(), target.origins());
     if (!tampered.isEmpty()) {
       warnOnce(
           "push:" + target.where(),
@@ -347,8 +352,14 @@ final class OriginSync {
   }
 
   private Target target(AgentWorktrees.Repo repo) {
+    String url = repo.originUrl();
     return new Target(
-        worktrees.dirOf(repo), repo.path(), repo.name(), repo.originUrl(), where(repo));
+        worktrees.dirOf(repo),
+        repo.path(),
+        repo.name(),
+        url,
+        url == null ? null : List.of(url),
+        where(repo));
   }
 
   /**
@@ -358,6 +369,12 @@ final class OriginSync {
    * .gitmodules} rather than {@code submodule status --recursive}, which would walk every base
    * submodule of every agent each cycle to find the rare one that is new.
    *
+   * <p>A path the base clone has is walked too (qits-2166): when no worktree of it was made for
+   * this agent, the agent's own {@code update --init} clones it there, into this agent's {@code
+   * modules/}. The worktree that was made — its git dir under the base clone's own {@code modules/}
+   * — or a checkout pointing anywhere else is passed over without a word, being the base loop's or
+   * nobody's.
+   *
    * <p>Agents share the OS user, so each checkout is held to what {@link #expectedWorktree} and
    * {@link AgentWorktrees#contained} give a base repository: its path, real-path resolved, is
    * exactly its place in this agent's wrapper worktree (no link out), and its git dir lies under
@@ -366,7 +383,10 @@ final class OriginSync {
    * pointing into another agent's modules, is not this agent's and is skipped. The origin it is
    * held to ({@link GitConfigGuard}) is its {@code .gitmodules} url resolved against the parent's
    * — the wrapper's recorded origin, or the parent agent-local repository's expected one — never
-   * its own {@code remote.origin.url}.
+   * its own {@code remote.origin.url}. That url without a trailing {@code .git} is accepted as well
+   * (qits-2166): the base clone's boot writes {@code submodule.<name>.url} in that form ({@link
+   * Provisioner#siblingUrl}) into the config every worktree shares, so an agent's own {@code update
+   * --init} clones from it. Both are derived here; neither is read from any config.
    */
   private List<Target> agentLocal(String agentId) {
     List<Target> found = new ArrayList<>();
@@ -423,8 +443,11 @@ final class OriginSync {
       }
       String path = parent.isEmpty() ? sub.path() : parent + "/" + sub.path();
       Path dir = wrapper.resolve(path);
-      if (basePaths.contains(path)
-          || !Files.exists(dir.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) {
+      if (!Files.exists(dir.resolve(".git"), LinkOption.NOFOLLOW_LINKS)
+          || (basePaths.contains(path)
+              && (inBaseModules(dir) || !gitDirUnder(dir, modules)))) {
+        // A base path whose checkout git did not make for this agent is the worktree the daemon
+        // made (pushed by the base loop), or not this agent's at all: no warning either way.
         continue;
       }
       String where = path + " (agent " + agentId + ")";
@@ -442,7 +465,14 @@ final class OriginSync {
             "Not syncing " + where + ": its checkout is not where this agent's git put it");
         continue;
       }
-      accepted.add(new Target(dir, path, Provisioner.basename(expected), expected, where));
+      accepted.add(
+          new Target(
+              dir,
+              path,
+              Provisioner.basename(expected),
+              expected,
+              acceptedOrigins(expected),
+              where));
     }
     for (Target target : accepted) {
       found.add(target);
@@ -459,14 +489,55 @@ final class OriginSync {
   }
 
   /**
+   * The origins an agent-local checkout may carry: {@code expected}, and the same without a
+   * trailing {@code .git} — the form {@link Provisioner#siblingUrl} writes into the shared config
+   * (qits-2166).
+   */
+  private static List<String> acceptedOrigins(String expected) {
+    return expected.endsWith(".git") && expected.length() > ".git".length()
+        ? List.of(expected, expected.substring(0, expected.length() - ".git".length()))
+        : List.of(expected);
+  }
+
+  /**
    * Whether {@code dir} is a checkout this agent's git made: its real path is {@code expected}, and
    * its real git dir lies under {@code modules}.
    */
   private static boolean ownCheckout(Path dir, Path expected, Path modules) {
     try {
-      if (!dir.toRealPath().equals(expected)) {
+      return dir.toRealPath().equals(expected) && gitDirUnder(dir, modules);
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  /**
+   * Whether {@code dir/.git} is a file whose {@code gitdir:} line, resolved lexically, lies under
+   * the base clone's {@code .git/modules} — the worktree the daemon made. Read without spawning
+   * git, so the walk costs no process per ordinary submodule; it only ever rules a checkout out.
+   */
+  private boolean inBaseModules(Path dir) {
+    Path dotGit = dir.resolve(".git");
+    if (!Files.isRegularFile(dotGit, LinkOption.NOFOLLOW_LINKS)) {
+      return false;
+    }
+    try (java.io.BufferedReader reader = Files.newBufferedReader(dotGit)) {
+      String first = reader.readLine();
+      if (first == null || !first.startsWith("gitdir:")) {
         return false;
       }
+      Path gitDir = dir.resolve(first.substring("gitdir:".length()).strip()).normalize();
+      Path baseModules = worktrees.base().resolve(".git/modules").toAbsolutePath().normalize();
+      return gitDir.startsWith(baseModules)
+          || (Files.isDirectory(baseModules) && gitDir.startsWith(baseModules.toRealPath()));
+    } catch (IOException | RuntimeException e) {
+      return false;
+    }
+  }
+
+  /** Whether {@code dir}'s real git dir lies strictly under {@code modules}. */
+  private static boolean gitDirUnder(Path dir, Path modules) {
+    try {
       Path gitDir = realGitDir(dir);
       return gitDir != null && gitDir.startsWith(modules) && !gitDir.equals(modules);
     } catch (IOException e) {
@@ -584,7 +655,8 @@ final class OriginSync {
     }
   }
 
-  private final java.util.Set<String> warned = ConcurrentHashMap.newKeySet();
+  /** Every subject warned about. Package-private so a test can assert nothing was. */
+  final Set<String> warned = ConcurrentHashMap.newKeySet();
 
   void close() {
     closed = true;

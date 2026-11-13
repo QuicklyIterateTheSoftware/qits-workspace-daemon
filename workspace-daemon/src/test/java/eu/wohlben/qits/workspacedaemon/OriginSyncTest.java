@@ -490,4 +490,143 @@ class OriginSyncTest {
     git(newlib, "commit", "--quiet", "--allow-empty", "-m", "more work");
     assertEquals(1, sync.pushCycle().size(), "a new commit is pushed again");
   }
+
+  // --- agent-local checkouts at base paths and in the sibling url's spelling (qits-2166) --------
+
+  /**
+   * The agent's own {@code submodule update --init} of the base clone's child, where no worktree of
+   * it was made for the agent: the daemon's worktree is removed and the directory left empty.
+   */
+  private Path initialisedByTheAgent(String agentId, String wrapperBranch) throws Exception {
+    Path wrapper = worktrees.ensure(agentId, wrapperBranch);
+    Path child = wrapper.resolve(CHILD);
+    git(estate.base().resolve(CHILD), "worktree", "remove", "--force", child.toString());
+    Files.createDirectories(child);
+    git(
+        wrapper,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+        "--quiet",
+        "--",
+        CHILD);
+    GitFixtures.identity(child);
+    assertTrue(
+        line(child, "rev-parse", "--absolute-git-dir")
+            .startsWith(line(wrapper, "rev-parse", "--absolute-git-dir") + "/modules/"),
+        "a standalone clone under the wrapper worktree's git dir");
+    return child;
+  }
+
+  @Test
+  void aBaseSubmoduleTheAgentInitialisedItselfIsPushedAndFetched() throws Exception {
+    Path child = initialisedByTheAgent("agent-1", BRANCH);
+    String head = commitOnBranch(child, BRANCH + "-fix");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-1", "child", BRANCH + "-fix", head)), pushed);
+    assertEquals(head, line(estate.childOrigin(), "rev-parse", BRANCH + "-fix"));
+    assertEquals(0, sync.fetchAll(), "and it is fetched like the base clone's repositories");
+  }
+
+  @Test
+  void aSubmoduleClonedFromTheBaseClonesSiblingUrlWithoutDotGitIsPushed() throws Exception {
+    Path newlibOrigin = GitFixtures.sibling(tmp, "newlib");
+    Path elsewhere = tmp.resolve("elsewhere");
+    git(tmp, "clone", "--quiet", estate.wrapperOrigin().toString(), elsewhere.toString());
+    GitFixtures.identity(elsewhere);
+    git(
+        elsewhere,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        "--name",
+        "newlib",
+        "../newlib.git",
+        NEWLIB);
+    git(elsewhere, "commit", "--quiet", "-m", "add newlib");
+    git(elsewhere, "push", "--quiet", "origin", "HEAD:refs/heads/" + BRANCH);
+    // The boot's materialisation wrote the served sibling's url, without .git, into the config
+    // every worktree shares, and its update left the submodule uninitialised in the base clone.
+    String siblingUrl = tmp.resolve("newlib").toString();
+    git(estate.base(), "config", "submodule.newlib.url", siblingUrl);
+    Path wrapper = worktrees.ensure("agent-1", BRANCH);
+    git(
+        wrapper,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--init",
+        "--quiet",
+        "--",
+        NEWLIB);
+    Path newlib = wrapper.resolve(NEWLIB);
+    GitFixtures.identity(newlib);
+    assertEquals(siblingUrl, line(newlib, "config", "--get", "remote.origin.url"));
+    String head = commitOnBranch(newlib, BRANCH + "-lib");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-1", "newlib", BRANCH + "-lib", head)), pushed);
+    assertEquals(head, line(newlibOrigin, "rev-parse", BRANCH + "-lib"));
+    assertEquals(0, sync.fetchAll());
+  }
+
+  @Test
+  void aCheckoutAtABasePathPointingIntoAnotherAgentsModulesIsNotPushedAsThisAgent()
+      throws Exception {
+    Path theirs = initialisedByTheAgent("agent-2", BRANCH + "-2");
+    String head = commitOnBranch(theirs, BRANCH + "-2-fix");
+    String theirGitDir = line(theirs, "rev-parse", "--absolute-git-dir");
+    Path child = worktrees.ensure("agent-1", BRANCH).resolve(CHILD);
+    git(estate.base().resolve(CHILD), "worktree", "remove", "--force", child.toString());
+    Files.createDirectories(child);
+    Files.writeString(child.resolve(".git"), "gitdir: " + theirGitDir + "\n");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    assertEquals(
+        List.of(new AgentBranchPushed("agent-2", "child", BRANCH + "-2-fix", head)),
+        pushed,
+        "pushed once, as the agent whose git made it");
+  }
+
+  @Test
+  void anAgentLocalOriginInNeitherSpellingStopsThePushAndTheFetch() throws Exception {
+    Path child = initialisedByTheAgent("agent-1", BRANCH);
+    commitOnBranch(child, BRANCH + "-fix");
+    String origin = line(child, "config", "--get", "remote.origin.url");
+    Path elsewhere = GitFixtures.sibling(tmp, "elsewhere");
+    git(child, "config", "remote.origin.url", elsewhere.toString());
+
+    assertTrue(sync.pushCycle().isEmpty());
+    assertEquals("", git(elsewhere, "branch", "--list", BRANCH + "-fix"));
+    assertEquals(1, sync.fetchAll());
+
+    git(child, "config", "remote.origin.url", origin);
+    assertEquals(1, sync.pushCycle().size(), "a clean config pushes again");
+  }
+
+  @Test
+  void theWorktreesTheDaemonMadeArePushedOnceEachWithoutAWarning() throws Exception {
+    Path wrapper = worktrees.ensure("agent-1", BRANCH);
+    git(wrapper, "commit", "--quiet", "--allow-empty", "-m", "docs");
+    String child = commitOnBranch(wrapper.resolve(CHILD), BRANCH + "-fix");
+
+    List<AgentBranchPushed> pushed = sync.pushCycle();
+
+    assertEquals(2, pushed.size(), pushed.toString());
+    assertEquals(WRAPPER, pushed.get(0).repository());
+    assertEquals(new AgentBranchPushed("agent-1", "child", BRANCH + "-fix", child), pushed.get(1));
+    assertEquals(0, sync.fetchAll());
+    assertTrue(sync.warned.isEmpty(), "an ordinary submodule is passed over without a word");
+  }
 }
