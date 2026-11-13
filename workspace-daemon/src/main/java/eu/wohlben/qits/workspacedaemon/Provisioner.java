@@ -96,10 +96,24 @@ public final class Provisioner {
    * returns. Deliberately <b>not</b> a wall-clock kill: a large clone that keeps moving bytes must
    * run as long as it needs to. Mutable only so a test can shrink the window; production never
    * changes them.
+   *
+   * <p>60 s was too short (qits-2172). A git server stays silent while it prepares a pack: it
+   * counts objects, finds sources and runs a delta search before the first pack byte. The
+   * provisioner's {@code git submodule update} has no tty, so it asks for no progress, which makes
+   * that silence total. Measured on 2026-11-13, qits-githost spends about 50 s on that for
+   * qits-landing-app (24k objects, 128 MB pack), with 30 s of it in delta search, and more under
+   * load. So the 60 s window aborted that clone with curl 28 and left the submodule uninitialised.
+   * Keepalive or progress bytes cannot rescue a 1000 B/s average either. 300 s still bounds a
+   * genuinely stalled transfer (the qits-1750 incident hung 37 minutes) while letting a large
+   * repository's pack preparation finish.
    */
-  static volatile int lowSpeedLimitBytesPerSecond = 1000;
+  static final int DEFAULT_LOW_SPEED_LIMIT_BYTES_PER_SECOND = 1000;
 
-  static volatile int lowSpeedTimeSeconds = 60;
+  static final int DEFAULT_LOW_SPEED_TIME_SECONDS = 300;
+
+  static volatile int lowSpeedLimitBytesPerSecond = DEFAULT_LOW_SPEED_LIMIT_BYTES_PER_SECOND;
+
+  static volatile int lowSpeedTimeSeconds = DEFAULT_LOW_SPEED_TIME_SECONDS;
 
   /**
    * The identity + coordinates the daemon self-provisions from (its injected env).

@@ -317,8 +317,18 @@ class ProvisionerTest {
   /** Restore the production defaults, so a failure in one test never leans on another's window. */
   @AfterEach
   void restoreLowSpeedDefaults() {
-    Provisioner.lowSpeedLimitBytesPerSecond = 1000;
-    Provisioner.lowSpeedTimeSeconds = 60;
+    Provisioner.lowSpeedLimitBytesPerSecond = Provisioner.DEFAULT_LOW_SPEED_LIMIT_BYTES_PER_SECOND;
+    Provisioner.lowSpeedTimeSeconds = Provisioner.DEFAULT_LOW_SPEED_TIME_SECONDS;
+  }
+
+  /**
+   * qits-2172: the window must stay wide enough for a large repository's pack preparation — not
+   * just a stalled transfer — to finish inside it.
+   */
+  @Test
+  void aPackPreparationMinuteDoesNotTripTheStallBound() {
+    assertTrue(Provisioner.DEFAULT_LOW_SPEED_TIME_SECONDS >= 300);
+    assertEquals(1000, Provisioner.DEFAULT_LOW_SPEED_LIMIT_BYTES_PER_SECOND);
   }
 
   /**
