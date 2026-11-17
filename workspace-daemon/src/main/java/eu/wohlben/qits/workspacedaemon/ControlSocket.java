@@ -332,6 +332,22 @@ public class ControlSocket {
             return thread;
           });
 
+  /**
+   * The ceiling on the wait between dials until the control socket has come up once — see {@link
+   * #dialDelayMs}. A constant rather than a setting: it is derived from the host's connect window,
+   * which this daemon cannot read, and a knob nobody can set correctly from here is just a second
+   * place for the two to disagree.
+   */
+  static final long BOOT_DIAL_CAP_MS = 2_000;
+
+  /**
+   * Whether a control socket has been established in this process. Picks the dial schedule and the
+   * failure log level ({@link #dialDelayMs}, {@link #connect(URI, int, Optional)}). Volatile, not
+   * guarded: written once on the event loop that opened the socket, read on whichever loop the next
+   * retry timer fires on, and never reset — a later reconnect is still not a boot.
+   */
+  private volatile boolean everConnected;
+
   private volatile WebSocketClient client;
   private volatile WebSocket socket;
   private volatile Context socketContext;
@@ -510,10 +526,22 @@ public class ControlSocket {
     // before the API is up simply fails to connect to loopback and answers nothing.
     tunnel = new DaemonStreamTunnel(vertx, url.get(), authorization(), workspaceApi.apiPort());
     tunnel.start();
-    client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
       vertx.setPeriodic(heartbeatIntervalMs, id -> heartbeat());
     }
+    dialHome();
+  }
+
+  /**
+   * Build the control socket's client and make the first dial; every later one is {@link
+   * #reconnect}'s. Split out of {@link #start()} as the seam {@code ControlSocketDialHomeTest}
+   * drives: {@code start()} wires the editor, the agents, the tunnel and a live provisioner, which
+   * a test that only cares how soon the socket comes up has no business standing up. Needs {@link
+   * #vertx}, {@link #url} and {@link #token}; the rest of what {@link #onConnected} reads is
+   * null-tolerant.
+   */
+  void dialHome() {
+    client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     connect(0);
   }
 
@@ -1078,10 +1106,21 @@ public class ControlSocket {
         .onSuccess(this::onConnected)
         .onFailure(
             t -> {
-              LOG.debugf(
-                  "workspace-daemon dial-home failed (attempt %d): %s", attempt, t.getMessage());
+              // INFO until the first socket, because then a failed dial is the only trace of why a
+              // container the host is about to give up on never came up — and the host's own log
+              // only says it did not. Once a socket has existed, a dropped connection is routine
+              // (a host rollout, an edge restart) and retries at DEBUG as before. The cause is the
+              // exception's text, never the dial options: those carry the Authorization header.
+              Logger.Level level = everConnected ? Logger.Level.DEBUG : Logger.Level.INFO;
+              LOG.logf(
+                  level, "workspace-daemon dial-home failed (attempt %d): %s", attempt, cause(t));
               reconnect(attempt);
             });
+  }
+
+  /** A failure's message, or its class where it has none (a bare timeout, a reset). */
+  private static String cause(Throwable t) {
+    return t.getMessage() != null ? t.getMessage() : t.getClass().getName();
   }
 
   /**
@@ -1107,6 +1146,7 @@ public class ControlSocket {
   }
 
   private void onConnected(WebSocket ws) {
+    everConnected = true;
     socketContext = vertx.getOrCreateContext();
     ws.textMessageHandler(this::onFrame);
     ws.closeHandler(
@@ -1173,8 +1213,31 @@ public class ControlSocket {
   }
 
   private void reconnect(int attempt) {
-    long backoff = Math.min(maxBackoffMs, 500L * (1L << Math.min(attempt, 6)));
-    vertx.setTimer(backoff, id -> connect(attempt + 1));
+    vertx.setTimer(dialDelayMs(attempt, everConnected, maxBackoffMs), id -> connect(attempt + 1));
+  }
+
+  /**
+   * How long to wait after failed dial {@code attempt} (0-based) before the next: {@code 500 ms ·
+   * 2^attempt}, ceilinged at {@link #BOOT_DIAL_CAP_MS} until the first socket and at {@code
+   * maxBackoffMs} after it.
+   *
+   * <p>Two ceilings because the two situations have different budgets (qits-2294). After a socket
+   * has existed, a failure is the host restarting or the edge rolling, and a daemon that backs off
+   * to {@code maxBackoffMs} is being polite to a host that may be down for minutes. Before it, the
+   * host is waiting: qits-workspaces gives a freshly started container 30 s to dial home and then
+   * marks it FAILED. The single schedule this replaced dialled at 0, 0.5, 1.5, 3.5, 7.5, 15.5 and
+   * 31.5 s, so early dials failing for some 8 s — the edge not yet routing the new container, DNS
+   * not yet answering — left one more chance inside the window, and a fail from 16 s on left none.
+   * Capped at 2 s, the daemon dials more than a dozen times in the same 30 s, and the 6th is out by
+   * 7.5 s. It stays exponential at the start so a refusal that clears at once costs half a second,
+   * not two.
+   *
+   * <p>Pure and package-private so the schedule is asserted directly ({@code
+   * ControlSocketDialScheduleTest}) rather than by waiting it out.
+   */
+  static long dialDelayMs(int attempt, boolean everConnected, long maxBackoffMs) {
+    long exponential = 500L * (1L << Math.min(Math.max(attempt, 0), 6));
+    return Math.min(everConnected ? maxBackoffMs : BOOT_DIAL_CAP_MS, exponential);
   }
 
   private void onFrame(String json) {

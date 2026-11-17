@@ -25,9 +25,23 @@ final class DaemonDial {
 
   private DaemonDial() {}
 
-  /** A client for either dial: host verification on, the default trust store. */
+  /**
+   * How long one dial may take to open its TCP connection before it counts as failed. Vert.x's own
+   * default is 60 s, twice the 30 s qits-workspaces gives a new container to dial home: one dial
+   * into a black hole — a SYN nobody answers while the edge does not yet route this container —
+   * would spend the whole window on a single attempt and leave none for the retry that would have
+   * worked (qits-2294). Five seconds is far above any healthy connect to the edge or to {@code
+   * qits-net}, and still leaves room for several more dials inside the window.
+   */
+  static final int CONNECT_TIMEOUT_MS = 5_000;
+
+  /**
+   * A client for either dial: host verification on, the default trust store, and {@link
+   * #CONNECT_TIMEOUT_MS}. The tunnel's dial-backs share the timeout on purpose — a dial-back that
+   * hangs is a terminal or a file view that hangs with it.
+   */
   static WebSocketClientOptions clientOptions() {
-    return new WebSocketClientOptions().setVerifyHost(true);
+    return new WebSocketClientOptions().setVerifyHost(true).setConnectTimeout(CONNECT_TIMEOUT_MS);
   }
 
   /** Whether {@code uri} is to be dialled over TLS — its scheme is {@code wss}. */
