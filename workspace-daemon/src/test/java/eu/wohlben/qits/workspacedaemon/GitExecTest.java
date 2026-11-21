@@ -2,10 +2,13 @@ package eu.wohlben.qits.workspacedaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -97,5 +100,91 @@ class GitExecTest {
     GitExec.git(tmp, "checkout", "-q", "-b", "other");
 
     assertFalse(Files.exists(ran), "planted code ran inside a daemon git call");
+  }
+
+  /** Whether {@code pid} is still a live process: absent and zombie both count as gone. */
+  private static boolean running(long pid) throws Exception {
+    Path stat = Path.of("/proc/" + pid + "/stat");
+    try {
+      String fields = Files.readString(stat);
+      return fields.charAt(fields.lastIndexOf(')') + 2) != 'Z';
+    } catch (java.io.IOException gone) {
+      return false;
+    }
+  }
+
+  private static boolean goneWithin(long pid, Duration within) throws Exception {
+    long deadline = System.nanoTime() + within.toNanos();
+    while (running(pid)) {
+      if (System.nanoTime() > deadline) {
+        return false;
+      }
+      Thread.sleep(50);
+    }
+    return true;
+  }
+
+  @Test
+  @EnabledOnOs(OS.LINUX)
+  void aCallThatHoldsItsOutputOpenIsKilledWithItsChildrenAtTheDeadline(@TempDir Path tmp)
+      throws Exception {
+    // qits-2365: git holds stdout until it exits, so a stalled transfer used to block the read
+    // before the deadline was ever consulted. The alias's shell holds the same pipe.
+    Path pid = tmp.resolve("pid");
+    long start = System.nanoTime();
+    GitExec.Out out =
+        GitExec.run(
+            tmp,
+            Map.of(),
+            Duration.ofSeconds(1),
+            "-c",
+            "alias.hang=!echo $$ > " + pid + "; exec sleep 30",
+            "hang");
+    long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - start);
+
+    assertTrue(seconds < 10, "returned at the deadline, not when the child ended: " + seconds);
+    assertTrue(out.timedOut(), out.toString());
+    assertTrue(out.message().contains("timed out"), "a push classifies it transient: " + out);
+    long child = Long.parseLong(Files.readString(pid).strip());
+    assertTrue(goneWithin(child, Duration.ofSeconds(5)), "the child was killed too: " + child);
+  }
+
+  @Test
+  @EnabledOnOs(OS.LINUX)
+  void anOrphanHoldingThePipeDoesNotHoldACallThatEnded(@TempDir Path tmp) throws Exception {
+    Path pid = tmp.resolve("pid");
+    long start = System.nanoTime();
+    GitExec.Out out =
+        GitExec.run(
+            tmp,
+            Map.of(),
+            Duration.ofSeconds(120),
+            "-c",
+            "alias.orphan=!sh -c 'echo $$ > " + pid + "; exec sleep 30' & echo done",
+            "orphan");
+    long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - start);
+    try {
+      assertTrue(out.ok(), out.toString());
+      assertTrue(out.line().startsWith("done"), out.toString());
+      assertTrue(seconds < 15, "returned after a short grace, not with the orphan: " + seconds);
+    } finally {
+      ProcessHandle.of(Long.parseLong(Files.readString(pid).strip()))
+          .ifPresent(ProcessHandle::destroyForcibly);
+    }
+  }
+
+  @Test
+  @EnabledOnOs(OS.LINUX)
+  void aNetworkCallBoundsAStalledTransferWithTheProvisionersWindow(@TempDir Path tmp) {
+    GitExec.Out out = GitExec.network(tmp, Map.of(), "-c", "alias.showenv=!env", "showenv");
+
+    assertTrue(out.ok(), out.toString());
+    assertTrue(
+        out.stdout()
+            .contains("GIT_HTTP_LOW_SPEED_LIMIT=" + Provisioner.lowSpeedLimitBytesPerSecond),
+        out.stdout());
+    assertTrue(
+        out.stdout().contains("GIT_HTTP_LOW_SPEED_TIME=" + Provisioner.lowSpeedTimeSeconds),
+        out.stdout());
   }
 }
