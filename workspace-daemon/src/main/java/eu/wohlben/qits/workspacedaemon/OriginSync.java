@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -20,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import org.jboss.logging.Logger;
 
 /**
@@ -27,13 +29,14 @@ import org.jboss.logging.Logger;
  *
  * <ul>
  *   <li><b>Fetch (origin → base clone).</b> {@code git fetch --prune origin} in the base clone and
- *       in every submodule, branches and tags (the tags under {@code refs/origin-tags}, qits-1688), on a timer and whenever the host hints that a ref moved ({@code
- *       PullBranch}). Only remote-tracking refs move; the base clone's working tree is never
- *       touched, so a dirty tree can never block it. Agent worktrees share these refs, so a fresh
- *       {@code origin/main} is there for every agent at once.
+ *       in every submodule, branches and tags (the tags under {@code refs/origin-tags}, qits-1688),
+ *       on a timer and whenever the host hints that a ref moved ({@code PullBranch}). Only
+ *       remote-tracking refs move; the base clone's working tree is never touched, so a dirty tree
+ *       can never block it. Agent worktrees share these refs, so a fresh {@code origin/main} is
+ *       there for every agent at once.
  *   <li><b>Auto-push (agent branches → origin).</b> Every agent branch with commits no remote
- *       branch or tag has is pushed, the wrapper branch and any branch an agent made in a submodule alike,
- *       each with <em>that agent's</em> credential. Each push is reported as an {@link
+ *       branch or tag has is pushed, the wrapper branch and any branch an agent made in a submodule
+ *       alike, each with <em>that agent's</em> credential. Each push is reported as an {@link
  *       AgentBranchPushed}. The default branch is never pushed, and a commit on a detached HEAD is
  *       not pushed at all; the cleanup check reports it.
  *   <li><b>Agent-local repositories (qits-1886).</b> A repository that becomes a submodule during
@@ -44,22 +47,37 @@ import org.jboss.logging.Logger;
  *       therefore read every cycle, and a declared path the base clone does not have that holds a
  *       checkout is fetched and its branch pushed like any other, as that agent only. Only
  *       submodules of the wrapper and, below them, of an accepted agent-local repository are
- *       walked; one an agent adds inside a base-clone submodule is not. A path the base clone
- *       does have counts too once the agent's own {@code update --init} cloned it there (no
- *       worktree of it was made for this agent); the worktree that was made is the base
- *       clone's, pushed through its worktree list and passed over here (qits-2166).
+ *       walked; one an agent adds inside a base-clone submodule is not. A path the base clone does
+ *       have counts too once the agent's own {@code update --init} cloned it there (no worktree of
+ *       it was made for this agent); the worktree that was made is the base clone's, pushed through
+ *       its worktree list and passed over here (qits-2166).
  * </ul>
  *
- * <p>Both run on one thread, so a fetch and a push never race for the same ref lock. A rejected
- * push is classified: a lock or connection failure is retried with capped backoff, a
- * non-fast-forward is left alone (never a force; the agent rewrote a pushed branch, and only it can
- * say what it meant).
+ * <p><b>Fetches and pushes run on two threads</b> (qits-2365), each a single-thread scheduler of
+ * its own. They used to share one so a fetch and a push could never race for a ref lock, and the
+ * price was that a fetch which stalled — the git host accepting a connection and never answering —
+ * held every push of every agent behind it. The race that separation allows is narrow and already
+ * handled: a push writes only {@code refs/remotes/origin/<branch>} in the local repository, after
+ * the host accepted it, and a fetch writing the same ref at that moment makes one of the two fail
+ * with {@code cannot lock ref}. That is classified transient: the push is retried, and the fetch
+ * simply runs again on its next round. Two fetches, or two pushes, still never run at once.
+ *
+ * <p>A rejected push is classified: a lock or connection failure is retried with capped backoff
+ * within the cycle, a non-fast-forward is left alone (never a force; the agent rewrote a pushed
+ * branch, and only it can say what it meant). Any other failure, and a transient one that outlived
+ * its in-cycle retries, is tried again on a later cycle without the head having to move, after a
+ * backoff per branch head that doubles from {@link #FAILURE_BACKOFF_INITIAL_MS} up to {@link
+ * #FAILURE_BACKOFF_MAX_MS}; a new head starts afresh. A push that timed out is not retried within
+ * the cycle at all: a stall is not a lock, and retrying it would hold every other push for another
+ * deadline. Every failure is a WARN naming the repository, the branch and git's message, repeated
+ * for the same failure at most every {@link #WARN_INTERVAL_MS} (qits-2365: a refused push used to
+ * be an INFO line once, and then nothing while the branch sat unpushed).
  *
  * <p>The push side polls rather than watches: one {@code git worktree list} per repository finds
  * every agent's branch and head at once, so the cost of a cycle does not grow with the number of
- * agents; only the agent-local walk is per agent, one {@code .gitmodules} read each and one git
- * dir lookup per declared checkout. A harness hook nudges a cycle at once, so a commit made in a
- * turn is pushed when the turn ends rather than at the next poll.
+ * agents; only the agent-local walk is per agent, one {@code .gitmodules} read each and one git dir
+ * lookup per declared checkout. A harness hook nudges a cycle at once, so a commit made in a turn
+ * is pushed when the turn ends rather than at the next poll.
  */
 final class OriginSync {
 
@@ -109,22 +127,51 @@ final class OriginSync {
   private final long backoffInitialMs;
   private final long backoffMaxMs;
 
-  private final ScheduledExecutorService scheduler =
-      Executors.newSingleThreadScheduledExecutor(
-          runnable -> {
-            Thread thread = new Thread(runnable, "workspace-daemon-origin-sync");
-            thread.setDaemon(true);
-            return thread;
-          });
+  /** How often an unchanged warning is repeated while its condition lasts. */
+  static final long WARN_INTERVAL_MS = TimeUnit.MINUTES.toMillis(10);
+
+  /** The first wait before a failed push of an unmoved head is tried again on a later cycle. */
+  static final long FAILURE_BACKOFF_INITIAL_MS = TimeUnit.SECONDS.toMillis(30);
+
+  /** The longest such wait. */
+  static final long FAILURE_BACKOFF_MAX_MS = TimeUnit.MINUTES.toMillis(10);
+
+  private final ScheduledExecutorService fetchScheduler =
+      scheduler("workspace-daemon-origin-fetch");
+
+  private final ScheduledExecutorService pushScheduler = scheduler("workspace-daemon-origin-push");
+
+  /** Milliseconds on a monotonic clock; a test steps it instead of sleeping. */
+  private final LongSupplier clock;
+
+  /**
+   * The deadline of every fetch and push. Package-private and mutable only so a test can shorten
+   * it; production never changes it.
+   */
+  volatile Duration gitTimeout = GitExec.TIMEOUT;
 
   private final AtomicBoolean fetchPending = new AtomicBoolean();
   private final AtomicBoolean pushPending = new AtomicBoolean();
 
   /**
    * The head last handled per (agent, repository path, branch): pushed, found to have nothing new,
-   * or refused for good. A cycle skips a branch whose head has not moved since.
+   * or diverged from the host (never forced). A cycle skips a branch whose head has not moved
+   * since.
    */
   private final Map<String, String> handled = new ConcurrentHashMap<>();
+
+  /**
+   * A head whose push failed, per (agent, repository path, branch): how often, and when it may be
+   * tried again. A cycle passes over it until then; another head of the branch is tried at once.
+   */
+  private record Failing(String head, int failures, long retryAtMs) {}
+
+  private final Map<String, Failing> failing = new ConcurrentHashMap<>();
+
+  /** The last WARN per subject: what it said, and when. */
+  private record Warning(String fingerprint, long atMs, int count) {}
+
+  private final Map<String, Warning> warnings = new ConcurrentHashMap<>();
 
   private volatile boolean closed;
 
@@ -146,6 +193,34 @@ final class OriginSync {
       int maxAttempts,
       long backoffInitialMs,
       long backoffMaxMs) {
+    this(
+        worktrees,
+        agentEnvironment,
+        emit,
+        autoPush,
+        fetchIntervalMs,
+        pushPollMs,
+        coalesceMs,
+        maxAttempts,
+        backoffInitialMs,
+        backoffMaxMs,
+        () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
+  }
+
+  /** The same, on {@code clock} (milliseconds, monotonic): a test's, which it steps. */
+  OriginSync(
+      AgentWorktrees worktrees,
+      Function<String, Optional<Map<String, String>>> agentEnvironment,
+      Consumer<DaemonMessage> emit,
+      boolean autoPush,
+      long fetchIntervalMs,
+      long pushPollMs,
+      long coalesceMs,
+      int maxAttempts,
+      long backoffInitialMs,
+      long backoffMaxMs,
+      LongSupplier clock) {
+    this.clock = clock;
     this.worktrees = worktrees;
     this.agentEnvironment = agentEnvironment;
     this.emit = emit;
@@ -158,17 +233,26 @@ final class OriginSync {
     this.backoffMaxMs = Math.max(this.backoffInitialMs, backoffMaxMs);
   }
 
+  private static ScheduledExecutorService scheduler(String name) {
+    return Executors.newSingleThreadScheduledExecutor(
+        runnable -> {
+          Thread thread = new Thread(runnable, name);
+          thread.setDaemon(true);
+          return thread;
+        });
+  }
+
   /** Start the two timers. */
   void start() {
     if (fetchIntervalMs > 0) {
-      scheduler.scheduleWithFixedDelay(
+      fetchScheduler.scheduleWithFixedDelay(
           () -> guarded("fetch", this::fetchAll),
           fetchIntervalMs,
           fetchIntervalMs,
           TimeUnit.MILLISECONDS);
     }
     if (autoPush && pushPollMs > 0) {
-      scheduler.scheduleWithFixedDelay(
+      pushScheduler.scheduleWithFixedDelay(
           () -> guarded("push", this::pushCycle), pushPollMs, pushPollMs, TimeUnit.MILLISECONDS);
     }
   }
@@ -177,6 +261,7 @@ final class OriginSync {
   void requestFetch() {
     if (!closed && fetchPending.compareAndSet(false, true)) {
       submit(
+          fetchScheduler,
           () -> {
             fetchPending.set(false);
             guarded("fetch", this::fetchAll);
@@ -189,6 +274,7 @@ final class OriginSync {
   void nudge() {
     if (autoPush && !closed && pushPending.compareAndSet(false, true)) {
       submit(
+          pushScheduler,
           () -> {
             pushPending.set(false);
             guarded("push", this::pushCycle);
@@ -197,7 +283,7 @@ final class OriginSync {
     }
   }
 
-  private void submit(Runnable work, long delayMs) {
+  private void submit(ScheduledExecutorService scheduler, Runnable work, long delayMs) {
     try {
       scheduler.schedule(work, delayMs, TimeUnit.MILLISECONDS);
     } catch (java.util.concurrent.RejectedExecutionException shuttingDown) {
@@ -209,10 +295,17 @@ final class OriginSync {
     if (closed) {
       return;
     }
+    // Throwable, not RuntimeException: anything a timer's task throws cancels the timer, and a
+    // StackOverflowError in one cycle must not end every later one (qits-2365).
     try {
       work.run();
-    } catch (RuntimeException e) {
-      LOG.debugf(e, "origin %s cycle failed", what);
+    } catch (Throwable e) {
+      if (e instanceof Error) {
+        LOG.warnf(e, "origin %s cycle failed; the next one runs as scheduled", what);
+      } else {
+        warn("cycle:" + what, String.valueOf(e), "Origin " + what + " cycle failed: " + e);
+        LOG.debugf(e, "origin %s cycle failed", what);
+      }
     }
   }
 
@@ -233,24 +326,36 @@ final class OriginSync {
       List<String> tampered = GitConfigGuard.violations(target.dir(), target.origins());
       if (!tampered.isEmpty()) {
         failures++;
-        warnOnce(
+        warn(
             "fetch:" + target.where(),
+            tampered.toString(),
             "Not fetching " + target.where() + ": its config carries " + tampered);
         continue;
       }
+      cleared("fetch:" + target.where());
       GitExec.Out fetched =
           GitExec.network(
               target.dir(),
               GitExec.workspaceCredential(),
+              gitTimeout,
               "fetch",
               "--prune",
               "--quiet",
               "origin",
               "+refs/heads/*:refs/remotes/origin/*",
               AgentWorktrees.ORIGIN_TAGS_REFSPEC);
-      if (!fetched.ok()) {
+      if (fetched.ok()) {
+        cleared("fetch-failed:" + target.where());
+      } else {
         failures++;
-        LOG.debugf("fetch failed in %s: %s", target.where(), fetched.message());
+        if (closed) {
+          continue;
+        }
+        String message = redacted(fetched.message());
+        warn(
+            "fetch-failed:" + target.where(),
+            message,
+            "Fetching " + target.where() + " failed: " + message);
       }
     }
     return failures;
@@ -320,6 +425,10 @@ final class OriginSync {
     if (head.equals(handled.get(key))) {
       return null;
     }
+    Failing failed = failing.get(key);
+    if (failed != null && failed.head().equals(head) && clock.getAsLong() < failed.retryAtMs()) {
+      return null;
+    }
     // A commit a release tag holds is delivered, even after the release deleted its branch: pushing
     // it again would bring the released branch back (qits-1688).
     GitExec.Out ahead = GitExec.git(target.dir(), AgentWorktrees.notOnOrigin(head));
@@ -337,18 +446,55 @@ final class OriginSync {
     }
     List<String> tampered = GitConfigGuard.violations(target.dir(), target.origins());
     if (!tampered.isEmpty()) {
-      warnOnce(
+      warn(
           "push:" + target.where(),
+          tampered.toString(),
           "Not pushing in " + target.where() + ": its config carries " + tampered);
       return null;
     }
-    PushOutcome outcome = push(target.dir(), Map.of(AGENT_CREDENTIAL, token), branch);
-    if (outcome != PushOutcome.RETRY_LATER) {
-      handled.put(key, head);
+    cleared("push:" + target.where());
+    Pushed result = push(target.dir(), Map.of(AGENT_CREDENTIAL, token), branch);
+    if (closed) {
+      // Interrupted by close(): nothing to learn from it, and nothing to warn about.
+      return null;
     }
-    return outcome == PushOutcome.PUSHED
+    String subject = "push-failed:" + agentId + ":" + target.where() + ":" + branch;
+    switch (result.outcome()) {
+      case PUSHED, DIVERGED -> {
+        handled.put(key, head);
+        failing.remove(key);
+        cleared(subject);
+      }
+      case FAILED, RETRY_LATER -> {
+        int failures = failed != null && failed.head().equals(head) ? failed.failures() + 1 : 1;
+        long backoff = backoff(failures);
+        failing.put(key, new Failing(head, failures, clock.getAsLong() + backoff));
+        warn(
+            subject,
+            result.outcome() + " " + result.message(),
+            String.format(
+                "Pushing %s in %s for agent %s failed (%s, %d in a row; next try in %d s): %s",
+                branch,
+                target.where(),
+                agentId,
+                result.outcome() == PushOutcome.FAILED ? "refused" : "transient",
+                failures,
+                TimeUnit.MILLISECONDS.toSeconds(backoff),
+                result.message()));
+      }
+    }
+    return result.outcome() == PushOutcome.PUSHED
         ? new AgentBranchPushed(agentId, target.name(), branch, head)
         : null;
+  }
+
+  /** The wait after the {@code failures}th failure in a row of one head. */
+  private static long backoff(int failures) {
+    long wait = FAILURE_BACKOFF_INITIAL_MS;
+    for (int i = 1; i < failures && wait < FAILURE_BACKOFF_MAX_MS; i++) {
+      wait *= 2;
+    }
+    return Math.min(FAILURE_BACKOFF_MAX_MS, wait);
   }
 
   private Target target(AgentWorktrees.Repo repo) {
@@ -381,9 +527,9 @@ final class OriginSync {
    * this agent's wrapper worktree git dir's {@code modules/} — where git put it, and where no other
    * agent's submodule command would. A clone planted at a declared path, or a {@code .git} file
    * pointing into another agent's modules, is not this agent's and is skipped. The origin it is
-   * held to ({@link GitConfigGuard}) is its {@code .gitmodules} url resolved against the parent's
-   * — the wrapper's recorded origin, or the parent agent-local repository's expected one — never
-   * its own {@code remote.origin.url}. That url without a trailing {@code .git} is accepted as well
+   * held to ({@link GitConfigGuard}) is its {@code .gitmodules} url resolved against the parent's —
+   * the wrapper's recorded origin, or the parent agent-local repository's expected one — never its
+   * own {@code remote.origin.url}. That url without a trailing {@code .git} is accepted as well
    * (qits-2166): the base clone's boot writes {@code submodule.<name>.url} in that form ({@link
    * Provisioner#siblingUrl}) into the config every worktree shares, so an agent's own {@code update
    * --init} clones from it. Both are derived here; neither is read from any config.
@@ -444,8 +590,7 @@ final class OriginSync {
       String path = parent.isEmpty() ? sub.path() : parent + "/" + sub.path();
       Path dir = wrapper.resolve(path);
       if (!Files.exists(dir.resolve(".git"), LinkOption.NOFOLLOW_LINKS)
-          || (basePaths.contains(path)
-              && (inBaseModules(dir) || !gitDirUnder(dir, modules)))) {
+          || (basePaths.contains(path) && (inBaseModules(dir) || !gitDirUnder(dir, modules)))) {
         // A base path whose checkout git did not make for this agent is the worktree the daemon
         // made (pushed by the base loop), or not this agent's at all: no warning either way.
         continue;
@@ -455,16 +600,20 @@ final class OriginSync {
           GitExec.git(wrapper, "config", "--file", gitmodules, "submodule." + sub.name() + ".url");
       String expected = url.ok() ? Provisioner.resolveSubmoduleUrl(url.line(), parentUrl) : null;
       if (expected == null) {
-        warnOnce(
-            "local:" + where, "Not syncing " + where + ": its .gitmodules url is unresolvable");
+        warn(
+            "local:" + where,
+            "unresolvable",
+            "Not syncing " + where + ": its .gitmodules url is unresolvable");
         continue;
       }
       if (!ownCheckout(dir, wrapper.resolve(path), modules)) {
-        warnOnce(
+        warn(
             "local:" + where,
+            "not its own",
             "Not syncing " + where + ": its checkout is not where this agent's git put it");
         continue;
       }
+      cleared("local:" + where);
       accepted.add(
           new Target(
               dir,
@@ -551,24 +700,32 @@ final class OriginSync {
     return gitDir.ok() && !gitDir.line().isEmpty() ? Path.of(gitDir.line()).toRealPath() : null;
   }
 
+  /** What one push came to, and git's last word on it (credential-free, for a log). */
+  record Pushed(PushOutcome outcome, String message) {}
+
   /** Push one branch with retry. Package-private so a test can drive the classification. */
-  PushOutcome push(Path repository, Map<String, String> credential, String branch) {
+  Pushed push(Path repository, Map<String, String> credential, String branch) {
     long backoff = backoffInitialMs;
     String refspec = "refs/heads/" + branch + ":refs/heads/" + branch;
+    String message = "not attempted: the origin sync is closing";
     for (int attempt = 1; attempt <= maxAttempts && !closed; attempt++) {
-      GitExec.Out result = GitExec.network(repository, credential, "push", "origin", refspec);
+      GitExec.Out result =
+          GitExec.network(repository, credential, gitTimeout, "push", "origin", refspec);
       if (result.ok()) {
-        return PushOutcome.PUSHED;
+        return new Pushed(PushOutcome.PUSHED, "");
+      }
+      message = redacted(result.message());
+      if (result.timedOut()) {
+        // A stall is no lock: another attempt would hold every other push for one more deadline.
+        return new Pushed(PushOutcome.RETRY_LATER, message);
       }
       switch (classify(result.message())) {
         case NON_FAST_FORWARD -> {
-          LOG.infof(
-              "not pushing %s: the git host has commits it lacks (%s)", branch, result.message());
-          return PushOutcome.DIVERGED;
+          LOG.infof("not pushing %s: the git host has commits it lacks (%s)", branch, message);
+          return new Pushed(PushOutcome.DIVERGED, message);
         }
         case FATAL -> {
-          LOG.infof("pushing %s failed: %s", branch, result.message());
-          return PushOutcome.FAILED;
+          return new Pushed(PushOutcome.FAILED, message);
         }
         case TRANSIENT -> {
           if (attempt < maxAttempts) {
@@ -578,7 +735,16 @@ final class OriginSync {
         }
       }
     }
-    return PushOutcome.RETRY_LATER;
+    return new Pushed(PushOutcome.RETRY_LATER, message);
+  }
+
+  /**
+   * {@code message} with any user-info in a url masked. The daemon's origins carry none — the
+   * credential travels in the environment — but a message is logged, and a url an agent's config
+   * could have smuggled in must not put a secret there.
+   */
+  static String redacted(String message) {
+    return message == null ? "" : message.replaceAll("://[^/@\\s]+@", "://***@");
   }
 
   /** Every worktree of {@code repository}. */
@@ -648,18 +814,53 @@ final class OriginSync {
     return repo.path().isEmpty() ? "the wrapper" : repo.path();
   }
 
-  /** Warn once per subject, so a tampered repository does not flood the log every cycle. */
-  private void warnOnce(String subject, String message) {
-    if (warned.add(subject)) {
+  /**
+   * WARN {@code message} about {@code subject}: the first time, whenever {@code fingerprint} — what
+   * is wrong, without what changes from one cycle to the next — changes, and otherwise at most
+   * every {@link #WARN_INTERVAL_MS} while it lasts. Once a refusal stopped a repository's sync for
+   * the daemon's whole life on a single line (qits-2365); one line a cycle would bury everything
+   * else.
+   */
+  private void warn(String subject, String fingerprint, String message) {
+    long now = clock.getAsLong();
+    Warning[] logged = new Warning[1];
+    warnings.compute(
+        subject,
+        (s, last) -> {
+          if (last != null
+              && last.fingerprint().equals(fingerprint)
+              && now - last.atMs() < WARN_INTERVAL_MS) {
+            return last;
+          }
+          logged[0] = new Warning(fingerprint, now, last == null ? 1 : last.count() + 1);
+          return logged[0];
+        });
+    if (logged[0] != null) {
+      warned.add(subject);
       LOG.warn(message);
     }
   }
 
-  /** Every subject warned about. Package-private so a test can assert nothing was. */
+  /** {@code subject}'s condition is over: its next occurrence warns at once. */
+  private void cleared(String subject) {
+    warnings.remove(subject);
+  }
+
+  /**
+   * How many WARNs {@code subject} has had since its condition last cleared. Package-private so a
+   * test can assert on the rate limit.
+   */
+  int warnings(String subject) {
+    Warning last = warnings.get(subject);
+    return last == null ? 0 : last.count();
+  }
+
+  /** Every subject ever warned about. Package-private so a test can assert nothing was. */
   final Set<String> warned = ConcurrentHashMap.newKeySet();
 
   void close() {
     closed = true;
-    scheduler.shutdownNow();
+    fetchScheduler.shutdownNow();
+    pushScheduler.shutdownNow();
   }
 }
