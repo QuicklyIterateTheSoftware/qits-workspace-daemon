@@ -232,7 +232,6 @@ final class GitExec {
     Drain stderr = new Drain(process.getErrorStream());
     Future<?> stdoutDone = DRAIN.submit(stdout);
     Future<?> stderrDone = DRAIN.submit(stderr);
-    long deadline = System.nanoTime() + timeout.toNanos();
     try {
       if (!process.waitFor(timeout.toNanos(), TimeUnit.NANOSECONDS)) {
         kill(process);
@@ -243,9 +242,10 @@ final class GitExec {
             stdout.text(),
             ("timed out after " + timeout.toSeconds() + "s " + stderr.text()).strip());
       }
-      long grace = Math.max(0, Math.min(DRAIN_GRACE.toNanos(), deadline - System.nanoTime()));
-      settle(stdoutDone, grace);
-      settle(stderrDone, grace);
+      // The full grace, never what is left of the deadline: git has exited, and output it wrote
+      // just before must not be cut off because it exited close to the deadline.
+      settle(stdoutDone, DRAIN_GRACE.toNanos());
+      settle(stderrDone, DRAIN_GRACE.toNanos());
       return new Out(process.exitValue(), stdout.text(), stderr.text());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
