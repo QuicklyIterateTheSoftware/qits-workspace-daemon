@@ -218,4 +218,10 @@ RUN chmod +x /usr/local/bin/qits-workspace-daemon
 #
 # No CMD and no `sleep infinity` fallback: a container whose daemon cannot start is not a usable
 # workspace, and should fail visibly rather than idle looking healthy.
-ENTRYPOINT ["/usr/local/bin/qits-workspace-daemon"]
+# PLATFORM TRUST ANCHORS (epic qits-2524): start through qits-trust-init, which writes the anchors
+# the creator put in QITS_TRUST_ANCHORS into every trust store under /etc/ssl/qits and then execs the
+# daemon. It never stops the start. The base must carry it (workspace-base from 2026.1125.92124 on),
+# or this entrypoint would name a missing file: the RUN fails the build instead of every container.
+RUN test -x /usr/local/bin/qits-trust-init \
+    || { echo "the base image has no /usr/local/bin/qits-trust-init: its workspace-base predates qits-2524" >&2; exit 1; }
+ENTRYPOINT ["/usr/local/bin/qits-trust-init", "/usr/local/bin/qits-workspace-daemon"]
