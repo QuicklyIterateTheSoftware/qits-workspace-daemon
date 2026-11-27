@@ -7,12 +7,14 @@ import eu.wohlben.qits.commands.ChatProtocolFactory;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandExitListener;
 import eu.wohlben.qits.commands.GuardedInput;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -96,15 +98,37 @@ final class AgentScopedCommands implements AgentCommands {
   }
 
   /**
+   * The real process environment, read only to find {@code QITS_EGRESS_PROXY} when neither overlay
+   * set it. The image init hook exports it straight into the daemon's own process environment, never
+   * into an overlay map, so a reader that only looked at {@code merged} would never see it. Package-
+   * private and mutable so a test can drive a process environment without touching the real one.
+   */
+  static Function<String, String> processEnv = System::getenv;
+
+  /**
    * The harness's environment: every workspace secret blanked, then the agent's own environment,
-   * then the launch's (the library's {@code HOME} still wins).
+   * then the launch's (the library's {@code HOME} still wins) — and, last, the egress proxy
+   * variables rewritten to carry the agent's own token.
    *
    * <p>The commands layer lays this map over the daemon's environment and cannot remove a name, so
    * a secret is set to the empty string instead. That keeps the workspace token, the agent
    * configuration document and the daemon's API token out of the harness: without the API token a
    * harness cannot drive another agent through this daemon's routes, and without the workspace
    * token its git can push only with the agent's own (an empty {@code QITS_TOKEN} reads as absent to
-   * the image's credential helper). Package-private for the test.
+   * the image's credential helper).
+   *
+   * <p>The library ({@code ClaudeCodeAgent.egressProxyEnv}) bakes {@code HTTPS_PROXY} (and its three
+   * siblings) into {@code launch} from its own, un-overlaid view of the environment, which falls
+   * back to this daemon's process environment for both halves of the pair. That is right for a
+   * project agent or a desk session, whose token *is* the process one, but wrong here: a workspace
+   * applies the per-agent token as the overlay {@code environment.get()} carries, one step the
+   * library never sees, so the proxy URL it rendered carries this container's token instead and
+   * qits-egress audits the whole workspace as {@code project:<id>} rather than the one agent that
+   * made the call. So once every other overlay has been applied, if {@code QITS_EGRESS_PROXY} is set
+   * (in {@code merged}, else in the process environment) and the merged — the agent's own — {@code
+   * QITS_TOKEN} is non-blank, the four proxy variables are overwritten with a URL built from that
+   * token instead. An agent with no token of its own is left exactly as the library rendered it:
+   * there is nothing truer to replace it with. Package-private for the test.
    */
   Map<String, String> environmentFor(Map<String, String> launch) {
     Map<String, String> merged = new HashMap<>();
@@ -120,7 +144,48 @@ final class AgentScopedCommands implements AgentCommands {
     if (launch != null) {
       merged.putAll(launch);
     }
+    String proxy = merged.get("QITS_EGRESS_PROXY");
+    if (proxy == null || proxy.isBlank()) {
+      proxy = processEnv.apply("QITS_EGRESS_PROXY");
+    }
+    String token = merged.get("QITS_TOKEN");
+    if (proxy != null && !proxy.isBlank() && token != null && !token.isBlank()) {
+      String url = "http://agent:" + urlEncode(token.trim()) + "@" + proxy.trim();
+      merged.put("HTTPS_PROXY", url);
+      merged.put("https_proxy", url);
+      merged.put("HTTP_PROXY", url);
+      merged.put("http_proxy", url);
+    }
     return merged;
+  }
+
+  /**
+   * Percent-encodes {@code value} for a URL's userinfo component — RFC 3986 unreserved characters
+   * ({@code A-Za-z0-9-_.~}) literal, everything else {@code %XX}. Re-implemented rather than called:
+   * {@code ClaudeCodeAgent.urlEncode} does exactly this, but it is package-private to the library's
+   * own package and widening it just for this call is not worth the API surface. Keep the two in
+   * step if either changes. {@link java.net.URLEncoder} answers the wrong standard here (form
+   * encoding: a space becomes {@code +}, not {@code %20}), and a bearer token can hold characters a
+   * basic-auth userinfo cannot without escaping — {@code /} and {@code +} out of base64, or a literal
+   * {@code @} or {@code :}.
+   */
+  private static String urlEncode(String value) {
+    StringBuilder encoded = new StringBuilder();
+    for (byte raw : value.getBytes(StandardCharsets.UTF_8)) {
+      int b = raw & 0xFF;
+      if ((b >= 'A' && b <= 'Z')
+          || (b >= 'a' && b <= 'z')
+          || (b >= '0' && b <= '9')
+          || b == '-'
+          || b == '_'
+          || b == '.'
+          || b == '~') {
+        encoded.append((char) b);
+      } else {
+        encoded.append('%').append(String.format("%02X", b));
+      }
+    }
+    return encoded.toString();
   }
 
   @Override
