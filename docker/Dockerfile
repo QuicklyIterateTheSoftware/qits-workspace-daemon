@@ -43,7 +43,7 @@
 # default below, and every FROM line, can read it; the release recipes pass
 # `--opt build-arg:QITS_DOMAIN`.
 ARG QITS_DOMAIN=wohlben.eu
-ARG WORKSPACE_BASE=registry.qits.${QITS_DOMAIN}/qits/workspace-base:2026.1126.105624
+ARG WORKSPACE_BASE=registry.qits.${QITS_DOMAIN}/qits/workspace-base:2026.1127.134221
 
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
